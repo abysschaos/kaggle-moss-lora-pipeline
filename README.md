@@ -35,6 +35,7 @@ kaggle_moss_lora_pipeline/
 ├── train_moss.py                  # 生产级云端一键执行脚本 (Kaggle 专用)
 ├── train_local.py                 # 生产级本地消费级显卡执行引擎 (Windows 专属)
 ├── docs/
+│   ├── hyperparameter_tuning_guide.md # 画风与人物超参数调优指南 (Repeats/Epochs/打标解耦)
 │   ├── local_deployment_guide.md  # 消费级显卡 8GB 显存控制与 BF16 本地部署深度指南
 │   ├── troubleshooting_matrix.md  # 25 个迭代版本的 Exhaustive 排错矩阵与踩坑实录
 │   ├── dit_flow_matching_guide.md # 5B DiT 与 Flow Matching 连续流训练超参数理论
@@ -107,7 +108,18 @@ pip install -r requirements-local.txt
 
 ---
 
-## 🛠️ 排错矩阵与技术实录 (Troubleshooting)
+## 📖 核心技术文档体系 (Documentation)
 
-本项目在演进过程中完整跨越了从 Version 1 到 Version 25 的 25 个版本。关于完整的 17 项致命报错排查实录（包括 PyTorch 动态库脱节、Flow Matching 假性收敛、ComfyUI 键名桥接失配等），请详细查阅文档：
-👉 [docs/troubleshooting_matrix.md](docs/troubleshooting_matrix.md)
+1. **超参数调优指南 (画风 vs 人物)**：
+   深入推演 Token Packing 批次换算机制，系统对比画风与人物在图片重复次数、轮数、步数、Rank/Alpha 以及打标剪枝（Token Pruning）上的本质区别：
+   👉 [docs/hyperparameter_tuning_guide.md](docs/hyperparameter_tuning_guide.md)
+2. **消费级显卡本地部署指南**：
+   详解 8GB 显存三阶解耦、CPU 文本特征路由与 BF16 硬件加速原理：
+   👉 [docs/local_deployment_guide.md](docs/local_deployment_guide.md)
+3. **排错矩阵与踩坑实录 (Troubleshooting)**：
+   25 个迭代版本沉淀的 17 项致命报错排查实录（包括 PyTorch 动态库脱节、Flow Matching 假性收敛、ComfyUI 键名桥接失配等）：
+   👉 [docs/troubleshooting_matrix.md](docs/troubleshooting_matrix.md)
+4. **DiT 与 Flow Matching 理论**：
+   👉 [docs/dit_flow_matching_guide.md](docs/dit_flow_matching_guide.md)
+5. **ComfyUI 官方原生推理规范**：
+   👉 [docs/comfyui_inference_guide.md](docs/comfyui_inference_guide.md)

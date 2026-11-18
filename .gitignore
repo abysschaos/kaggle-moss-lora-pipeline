@@ -24,6 +24,10 @@ workspace/
 output/
 KohakuMossTrainer/
 
+# User local config (Private paths and preferences, never commit)
+local_config.json
+local_env.bat
+
 # OS specific
 .DS_Store
 Thumbs.db

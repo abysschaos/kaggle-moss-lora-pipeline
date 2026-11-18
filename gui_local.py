@@ -43,15 +43,30 @@ class ModernLocalTrainerGUI:
         self.root.configure(bg=self.bg_dark)
         self.setup_styles()
 
-        # 核心变量初始化
+        # 本地持久化配置（已在 .gitignore 中忽略，保障隐私且自动记忆用户选择）
+        self.config_file = Path("./local_config.json").resolve()
+        local_cfg = self.load_local_config()
+
+        # 核心变量初始化（通用默认值 + 宽域自动探测，杜绝任何个人信息硬编码）
         self.current_process = None
         self.is_training = False
 
-        self.var_lora_name = tk.StringVar(value="my_lora")
-        self.var_trigger_word = tk.StringVar(value="")
-        self.var_data_dir = tk.StringVar(value="C:/Users/白音华/Pictures/ness")
-        self.var_comfy_models = tk.StringVar(value="C:/dowmload idm/ComfyUI-aki-v3.2(1)/ComfyUI-aki-v3.2/ComfyUI/models")
-        self.var_output_dir = tk.StringVar(value=str(Path("./output").resolve()))
+        self.var_lora_name = tk.StringVar(value=local_cfg.get("lora_name", "my_lora"))
+        self.var_trigger_word = tk.StringVar(value=local_cfg.get("trigger_word", ""))
+        self.var_data_dir = tk.StringVar(value=local_cfg.get("data_dir", str(Path("./dataset").resolve())))
+        
+        # 优先读取本地保存的 ComfyUI 模型库，若无则自动宽域探测
+        default_comfy_models = local_cfg.get("comfy_models_dir", "")
+        if not default_comfy_models or not os.path.exists(default_comfy_models):
+            try:
+                import train_local
+                discovered_models, _ = train_local.find_broad_comfy_paths()
+                if discovered_models:
+                    default_comfy_models = str(discovered_models[0])
+            except Exception:
+                default_comfy_models = ""
+        self.var_comfy_models = tk.StringVar(value=default_comfy_models)
+        self.var_output_dir = tk.StringVar(value=local_cfg.get("output_dir", str(Path("./output").resolve())))
         self.var_copy_comfy = tk.BooleanVar(value=True)
 
         # 自选底模与组件权重路径
@@ -93,6 +108,31 @@ class ModernLocalTrainerGUI:
 
         # 监听名称变动实时刷新产出路径预览
         self.var_lora_name.trace_add("write", lambda *args: self.update_output_preview())
+
+    def load_local_config(self) -> dict:
+        """从本地私有配置文件读取用户历史偏好路径（该文件不入 Git）。"""
+        if self.config_file.exists():
+            try:
+                import json
+                return json.loads(self.config_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {}
+
+    def save_local_config(self):
+        """将当前用户选定的本地路径记忆到本地私有配置文件中。"""
+        try:
+            import json
+            cfg = {
+                "data_dir": self.var_data_dir.get(),
+                "comfy_models_dir": self.var_comfy_models.get(),
+                "output_dir": self.var_output_dir.get(),
+                "lora_name": self.var_lora_name.get(),
+                "trigger_word": self.var_trigger_word.get()
+            }
+            self.config_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
     def setup_styles(self):
         style = ttk.Style()
@@ -600,6 +640,7 @@ class ModernLocalTrainerGUI:
 
             if all_found:
                 self.var_models_status.set("✅ 全部自动就绪！")
+                self.save_local_config()
                 if not silent:
                     messagebox.showinfo("扫描成功", "已成功自动检索并匹配到全部三大核心模型权重！\n路径已自动填入输入框。")
             else:
@@ -661,18 +702,21 @@ class ModernLocalTrainerGUI:
             self.var_data_dir.set(selected)
             self.update_dataset_stats()
             self.recalculate_math()
+            self.save_local_config()
 
     def browse_comfy_dir(self):
         selected = filedialog.askdirectory(initialdir=self.var_comfy_models.get(), title="选择 ComfyUI 模型库目录")
         if selected:
             self.var_comfy_models.set(selected)
             self.auto_scan_models(silent=True)
+            self.save_local_config()
 
     def browse_output_dir(self):
         selected = filedialog.askdirectory(initialdir=self.var_output_dir.get(), title="选择权重产出保存根目录")
         if selected:
             self.var_output_dir.set(selected)
             self.update_output_preview()
+            self.save_local_config()
 
     def update_dataset_stats(self):
         dpath = Path(self.var_data_dir.get())

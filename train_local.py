@@ -24,16 +24,98 @@ def sanitize_path(p: str) -> str:
     """标准化路径为 POSIX 正斜杠格式，防止在生成的 Python 配置文件中发生反斜杠转义错误。"""
     return Path(p).resolve().as_posix()
 
+def find_broad_comfy_paths():
+    """全自动宽域智能检索本地 ComfyUI 模型库与 Python 解释器路径。
+    自动覆盖：环境变量、相对路径、系统常见盘符根目录与常用下载目录下的 ComfyUI / 秋叶整合包 / 便携版。
+    完全杜绝任何个人绝对路径的硬编码，确保开源泛用性与隐私安全。
+    """
+    candidates = []
+    
+    # 1. 检查环境变量
+    for env_key in ["COMFYUI_PATH", "COMFY_PATH", "COMFYUI_MODELS"]:
+        val = os.environ.get(env_key)
+        if val and os.path.exists(val):
+            p = Path(val)
+            if p.is_dir() and p not in candidates:
+                candidates.append(p)
+
+    # 2. 检查项目同级与上级相对路径
+    current = Path(".").resolve()
+    for parent in [current, current.parent, current.parent.parent]:
+        try:
+            for p in parent.glob("*[Cc]omfy*"):
+                if p.is_dir() and p not in candidates:
+                    candidates.append(p)
+        except Exception:
+            pass
+
+    # 3. 扫描 Windows 常见驱动器 (C:, D:, E:, F:, G:) 的一到两级目录
+    for drive_letter in ["C", "D", "E", "F", "G"]:
+        drive_root = Path(f"{drive_letter}:/")
+        if not drive_root.exists():
+            continue
+        try:
+            for p in drive_root.glob("*[Cc]omfy*"):
+                if p.is_dir() and p not in candidates:
+                    candidates.append(p)
+        except Exception:
+            pass
+        try:
+            for p in drive_root.glob("*/*[Cc]omfy*"):
+                if p.is_dir() and p not in candidates:
+                    candidates.append(p)
+        except Exception:
+            pass
+
+    # 4. 扫描用户当前主目录 (Downloads, Desktop)
+    home = Path.home()
+    for sub in ["Downloads", "Desktop"]:
+        sp = home / sub
+        if sp.exists():
+            try:
+                for p in sp.glob("*[Cc]omfy*"):
+                    if p.is_dir() and p not in candidates:
+                        candidates.append(p)
+                for p in sp.glob("*/*[Cc]omfy*"):
+                    if p.is_dir() and p not in candidates:
+                        candidates.append(p)
+            except Exception:
+                pass
+
+    found_models = []
+    found_pythons = []
+
+    for base in candidates:
+        # 探测模型库目录
+        for m_pat in ["models", "ComfyUI/models", "*/ComfyUI/models"]:
+            try:
+                for m in base.glob(m_pat):
+                    if m.is_dir() and m not in found_models:
+                        found_models.append(m)
+            except Exception:
+                pass
+        # 探测 Python 解释器
+        for py_pat in ["python/python.exe", "python_embeded/python.exe", "*/python/python.exe"]:
+            try:
+                for py in base.glob(py_pat):
+                    if py.is_file() and py not in found_pythons:
+                        found_pythons.append(py)
+            except Exception:
+                pass
+
+    return found_models, found_pythons
+
 def probe_local_models(comfy_models_dir: str = None) -> dict:
     """智能检索本地已有的 MOSS-Image 底模、文本编码器与 VAE，实现零下载秒级就绪。"""
     search_dirs = []
     if comfy_models_dir and os.path.exists(comfy_models_dir):
         search_dirs.append(Path(comfy_models_dir))
     
-    # 默认预设探测路径
-    default_comfy = Path("C:/dowmload idm/ComfyUI-aki-v3.2(1)/ComfyUI-aki-v3.2/ComfyUI/models")
-    if default_comfy.exists() and default_comfy not in search_dirs:
-        search_dirs.append(default_comfy)
+    # 动态宽域扫描系统已安装的 ComfyUI 模型库 (完全移除任何个人固定路径)
+    broad_models, _ = find_broad_comfy_paths()
+    for bm in broad_models:
+        if bm not in search_dirs:
+            search_dirs.append(bm)
 
     local_models = Path("./models").resolve()
     if local_models.exists() and local_models not in search_dirs:
@@ -190,9 +272,9 @@ def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, r
 
 def main():
     parser = argparse.ArgumentParser(description="OpenMOSS MOSS-Image Local Training Engine for Windows Consumer GPUs")
-    parser.add_argument("--data_dir", type=str, default="C:/Users/白音华/Pictures/ness",
+    parser.add_argument("--data_dir", type=str, default="./dataset",
                         help="Path to folder containing source images and .txt captions")
-    parser.add_argument("--comfy_models_dir", type=str, default="C:/dowmload idm/ComfyUI-aki-v3.2(1)/ComfyUI-aki-v3.2/ComfyUI/models",
+    parser.add_argument("--comfy_models_dir", type=str, default=None,
                         help="Path to ComfyUI models directory containing diffusion_models, text_encoders, and vae")
     parser.add_argument("--transformer_path", type=str, default="",
                         help="Explicit path to MOSS-Image DiT transformer weights (.safetensors)")
@@ -202,7 +284,7 @@ def main():
                         help="Explicit path to FLUX.2 VAE weights (.safetensors)")
     parser.add_argument("--output_dir", type=str, default="./output",
                         help="Root directory to save final LoRA folders and checkpoints")
-    parser.add_argument("--lora_name", "--run_name", type=str, default="ness_style", dest="lora_name",
+    parser.add_argument("--lora_name", "--run_name", type=str, default="my_lora", dest="lora_name",
                         help="Custom LoRA name and dedicated output folder name (e.g. makima_v1)")
     parser.add_argument("--trigger_word", type=str, default="",
                         help="Custom trigger word/phrase to prepend to captions (e.g. makima_char)")

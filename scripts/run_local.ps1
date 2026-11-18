@@ -37,9 +37,12 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# 2. 检查默认路径配置
-$defaultDataDir = "C:\Users\白音华\Pictures\ness"
-$defaultComfyModels = "C:\dowmload idm\ComfyUI-aki-v3.2(1)\ComfyUI-aki-v3.2\ComfyUI\models"
+# 2. 检查默认路径配置（优先使用项目标准相对路径，杜绝任何个人隐私路径）
+$defaultDataDir = ".\dataset"
+if (-not (Test-Path $defaultDataDir) -and (Test-Path "$env:USERPROFILE\Pictures")) {
+    $defaultDataDir = "$env:USERPROFILE\Pictures"
+}
+$defaultComfyModels = ".\models"
 $outputDir = ".\output"
 
 Write-Host "`n[2/4] Checking Local Dataset & Model Assets..." -ForegroundColor Yellow

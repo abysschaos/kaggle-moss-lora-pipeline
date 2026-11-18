@@ -34,7 +34,7 @@
 直接在终端或 PowerShell 中附加参数运行，优先级高于源码中的默认值：
 ```powershell
 python train_local.py `
-    --data_dir "C:/Users/白音华/Pictures/ness" `
+    --data_dir "./dataset" `
     --lora_name "my_character_v1" `
     --trigger_word "my_character_char" `
     --repeats 10 `
@@ -47,22 +47,18 @@ python train_local.py `
     --text_device cpu `
     --copy_to_comfy_loras
 ```
-    --text_device cpu `
-    --run_name "my_lora_name" `
-    --copy_to_comfy_loras
-```
 
 ### 方式二：直接在源码中修改默认值
 若希望每次双击或不带参数运行时默认生效，直接打开 [train_local.py](../train_local.py)：
 
-#### 1. 命令行默认值定义段落（第 173 ~ 203 行）
+#### 1. 命令行默认值定义段落
 找到 `def main():` 下方的参数解析代码：
 ```python
-# 第 175 行：修改默认数据集路径
-parser.add_argument("--data_dir", type=str, default="C:/Users/白音华/Pictures/ness", ...)
+# 修改默认数据集路径 (默认通用相对路径 ./dataset)
+parser.add_argument("--data_dir", type=str, default="./dataset", ...)
 
-# 第 183 行：修改默认产出权重的前缀名
-parser.add_argument("--run_name", type=str, default="ness_style", ...)
+# 修改默认产出权重的前缀名
+parser.add_argument("--lora_name", type=str, default="my_lora", ...)
 
 # 第 185 行：修改默认单图重复次数 (Repeats)
 parser.add_argument("--repeats", type=int, default=10, ...)
@@ -129,13 +125,13 @@ SCHEDULE = {{
 ### 1. 默认路径修改（第 41 ~ 43 行）
 打开该脚本，在开头可直接指定您的常用路径：
 ```powershell
-# 第 41 行：默认图片与标注所在路径
-$defaultDataDir = "C:\Users\白音华\Pictures\ness"
+# 默认图片与标注所在路径 (默认通用相对路径)
+$defaultDataDir = ".\dataset"
 
-# 第 42 行：本地 ComfyUI 模型库路径
-$defaultComfyModels = "C:\dowmload idm\ComfyUI-aki-v3.2(1)\ComfyUI-aki-v3.2\ComfyUI\models"
+# 本地 ComfyUI 模型库路径 (默认通用相对路径或由系统动态宽域探测)
+$defaultComfyModels = ".\models"
 
-# 第 43 行：产出保存目录
+# 产出保存目录
 $outputDir = ".\output"
 ```
 

@@ -99,7 +99,7 @@ $$\text{核心优化步数 (Steps)} \approx \frac{\text{总图文曝光次数}}{
 ### 5.1 人物角色训练模板 (以 30 张图为例)
 ```powershell
 python train_local.py `
-    --data_dir "C:/Users/白音华/Pictures/my_character" `
+    --data_dir "./dataset/my_character" `
     --output_dir "./output/my_character_lora" `
     --run_name "my_character" `
     --repeats 6 `
@@ -116,7 +116,7 @@ python train_local.py `
 ### 5.2 艺术画风训练模板 (以 50 张图为例)
 ```powershell
 python train_local.py `
-    --data_dir "C:/Users/白音华/Pictures/my_art_style" `
+    --data_dir "./dataset/my_art_style" `
     --output_dir "./output/my_style_lora" `
     --run_name "my_style" `
     --repeats 10 `

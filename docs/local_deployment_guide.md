@@ -55,7 +55,7 @@
 传统的云端训练脚本在每次初始化时都需要从 HuggingFace 重新拉取上百 GB 的底模与分词器，消耗巨额网络带宽与等待时间。
 
 `train_local.py` 内置了**智能资产探测器（Smart Model Discovery）**：
-- 能够自动遍历本地现有的 ComfyUI 模型库路径（例如 `C:\dowmload idm\ComfyUI-aki-v3.2(1)\ComfyUI-aki-v3.2\ComfyUI\models\`）；
+- 能够全自动跨盘符遍历本地现有的 ComfyUI 模型库路径（例如 `D:\ComfyUI\models\` 或 `E:\AI\ComfyUI-aki\ComfyUI\models\`）；
 - 自动识别并链接修复版底模 `moss_image_heal_bf16.safetensors`、文本编码器 `qwen3.5_9b_bf16.safetensors` 以及 `flux2-vae_small.safetensors`；
 - 通过文件级快速映射或硬链接在秒级内完成环境就绪，实现**全程零网络流量消耗**。
 
@@ -96,8 +96,9 @@ pip install -r requirements-local.txt
 支持通过 `train_local.py` 传入自定义超参数：
 ```powershell
 python train_local.py `
-    --data_dir "C:/Users/白音华/Pictures/ness" `
+    --data_dir "./dataset" `
     --output_dir "./output" `
+    --lora_name "my_lora" `
     --steps 600 `
     --rank 32 `
     --alpha 32.0 `
@@ -112,6 +113,6 @@ python train_local.py `
 ## 7. 训练产出物与 ComfyUI 推理对齐
 
 训练完成后，权重将自动归档至 `./output/` 目录（并可直通 `ComfyUI/models/loras/`）：
-- `ness_style-comfy.safetensors`：专为 ComfyUI 官方原生 `Load LoRA` 节点对齐，保留标准 `lora_unet_` 前缀，实现 100% 满额挂载。
+- `my_lora-comfy.safetensors`：专为 ComfyUI 官方原生 `Load LoRA` 节点对齐，保留标准 `lora_unet_` 前缀，实现 100% 满额挂载。
 - `ness_style-lycoris.safetensors`：保留完整 LyCORIS 架构标识，支持高级适配器加载器。
 - **推荐推理参数**：CFG 3.0 ~ 3.5，Shift 5.0，采样步数 >= 50 步，负向提示词留空。

@@ -16,9 +16,16 @@ except Exception:
 class ModernLocalTrainerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("OpenMOSS MOSS-Image 本地训练控制面板")
-        self.root.geometry("1160x860")
-        self.root.minsize(1020, 760)
+        self.root.title("OpenMOSS MOSS-Image 本地 LoRA 训练引擎控制台")
+        
+        # 窗口大小与屏幕居中适配 (适配 1080P 125%/150% 笔记本屏幕)
+        win_w, win_h = 1080, 760
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        pos_x = max(0, (screen_w - win_w) // 2)
+        pos_y = max(0, (screen_h - win_h) // 2)
+        self.root.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+        self.root.minsize(960, 680)
 
         # 调色盘与字体定义 (现代深色主题)
         self.bg_dark = "#181825"
@@ -65,48 +72,47 @@ class ModernLocalTrainerGUI:
         self.recalculate_math()
         self.update_output_preview()
 
-        # 绑定名称变动时实时刷新产出路径预览
+        # 监听名称变动实时刷新产出路径预览
         self.var_lora_name.trace_add("write", lambda *args: self.update_output_preview())
 
     def setup_styles(self):
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure(".", background=self.bg_dark, foreground=self.text_main, font=(self.font_family, 10))
+        style.configure(".", background=self.bg_dark, foreground=self.text_main, font=(self.font_family, 9))
         style.configure("Card.TFrame", background=self.card_bg)
-        style.configure("TLabel", background=self.card_bg, foreground=self.text_main, font=(self.font_family, 10))
-        style.configure("Sub.TLabel", background=self.card_bg, foreground=self.text_sub, font=(self.font_family, 9))
-        style.configure("Header.TLabel", background=self.card_bg, foreground=self.accent_blue, font=(self.font_family, 12, "bold"))
-        style.configure("TCheckbutton", background=self.card_bg, foreground=self.text_main, font=(self.font_family, 10))
+        style.configure("TLabel", background=self.card_bg, foreground=self.text_main, font=(self.font_family, 9))
+        style.configure("Sub.TLabel", background=self.card_bg, foreground=self.text_sub, font=(self.font_family, 8))
+        style.configure("Header.TLabel", background=self.card_bg, foreground=self.accent_blue, font=(self.font_family, 11, "bold"))
+        style.configure("TCheckbutton", background=self.card_bg, foreground=self.text_main, font=(self.font_family, 9))
         style.configure("TCombobox", fieldbackground=self.input_bg, background=self.card_bg, foreground=self.text_main)
 
     def build_ui(self):
-        # 1. 顶部 Header
-        header_frame = tk.Frame(self.root, bg=self.card_bg, height=65)
-        header_frame.pack(fill=tk.X, padx=12, pady=(12, 8))
+        # 1. 顶部 Header 状态条
+        header_frame = tk.Frame(self.root, bg=self.card_bg, height=55)
+        header_frame.pack(fill=tk.X, padx=10, pady=(10, 6))
 
         title_lbl = tk.Label(header_frame, text="OpenMOSS MOSS-Image 本地 LoRA 训练引擎",
-                             bg=self.card_bg, fg=self.accent_blue, font=(self.font_family, 15, "bold"))
-        title_lbl.pack(side=tk.LEFT, padx=16, pady=12)
+                             bg=self.card_bg, fg=self.accent_blue, font=(self.font_family, 13, "bold"))
+        title_lbl.pack(side=tk.LEFT, padx=14, pady=10)
 
-        # 硬件状态探测展示
         gpu_info = self.probe_gpu_quick()
-        gpu_lbl = tk.Label(header_frame, text=f"算力设备: {gpu_info}",
+        gpu_lbl = tk.Label(header_frame, text=f"设备状态: {gpu_info}",
                            bg=self.card_bg, fg=self.accent_green, font=(self.font_family, 9))
-        gpu_lbl.pack(side=tk.RIGHT, padx=16, pady=12)
+        gpu_lbl.pack(side=tk.RIGHT, padx=14, pady=10)
 
         # 2. 主体左右分栏
         main_paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg=self.bg_dark, sashwidth=4)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        # 左侧控制面板 (固定宽度)
-        left_container = tk.Frame(main_paned, bg=self.bg_dark, width=570)
-        main_paned.add(left_container, minsize=520)
+        # 左侧控制面板 (带滚动支持，防止在小屏幕笔记本身上被挤压)
+        left_outer = tk.Frame(main_paned, bg=self.card_bg, width=540)
+        main_paned.add(left_outer, minsize=480)
 
-        # 右侧实时监控与日志面板
-        right_container = tk.Frame(main_paned, bg=self.bg_dark)
-        main_paned.add(right_container, minsize=460)
+        # 右侧实时监控与日志控制台
+        right_container = tk.Frame(main_paned, bg=self.card_bg)
+        main_paned.add(right_container, minsize=420)
 
-        self.build_left_panel(left_container)
+        self.build_left_scrollable(left_outer)
         self.build_right_panel(right_container)
 
     def probe_gpu_quick(self) -> str:
@@ -121,155 +127,165 @@ class ModernLocalTrainerGUI:
         except Exception:
             return "PyTorch 未加载"
 
-    def build_left_panel(self, parent):
-        # 快捷预设按钮栏
+    def build_left_scrollable(self, parent):
+        canvas = tk.Canvas(parent, bg=self.card_bg, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=self.card_bg)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # 绑定鼠标滚轮
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        canvas.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        scrollbar.pack(side="right", fill="y", pady=8)
+
+        self.build_left_controls(scrollable_frame)
+
+    def build_left_controls(self, parent):
+        # 1. 快捷预设按钮栏
         preset_frame = tk.Frame(parent, bg=self.card_bg)
-        preset_frame.pack(fill=tk.X, pady=(0, 8))
+        preset_frame.pack(fill=tk.X, pady=(0, 6))
         
-        p_title = tk.Label(preset_frame, text="快速模板预设：", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 10, "bold"))
-        p_title.pack(side=tk.LEFT, padx=12, pady=10)
+        tk.Label(preset_frame, text="快速模板预设：", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).pack(side=tk.LEFT, padx=(4, 6), pady=6)
 
         btn_style = tk.Button(preset_frame, text="🎨 艺术画风模板", bg="#45475a", fg=self.text_main,
-                              activebackground=self.accent_blue, font=(self.font_family, 9, "bold"),
-                              relief=tk.FLAT, padx=10, pady=4, cursor="hand2", command=self.apply_style_preset)
-        btn_style.pack(side=tk.LEFT, padx=6)
+                              activebackground=self.accent_blue, font=(self.font_family, 8, "bold"),
+                              relief=tk.FLAT, padx=8, pady=3, cursor="hand2", command=self.apply_style_preset)
+        btn_style.pack(side=tk.LEFT, padx=4)
 
         btn_char = tk.Button(preset_frame, text="👤 人物角色模板", bg="#45475a", fg=self.text_main,
-                             activebackground=self.accent_blue, font=(self.font_family, 9, "bold"),
-                             relief=tk.FLAT, padx=10, pady=4, cursor="hand2", command=self.apply_character_preset)
-        btn_char.pack(side=tk.LEFT, padx=6)
+                             activebackground=self.accent_blue, font=(self.font_family, 8, "bold"),
+                             relief=tk.FLAT, padx=8, pady=3, cursor="hand2", command=self.apply_character_preset)
+        btn_char.pack(side=tk.LEFT, padx=4)
 
-        # 命名与触发词卡片 (新增与高亮)
-        name_card = tk.LabelFrame(parent, text=" 🏷️ 自定义 LoRA 标识与触发词 ", bg=self.card_bg, fg=self.accent_blue,
-                                  font=(self.font_family, 10, "bold"), padx=12, pady=8)
-        name_card.pack(fill=tk.X, pady=(0, 8))
+        # 2. 命名与触发词卡片
+        name_card = tk.LabelFrame(parent, text=" 🏷️ 自定义 LoRA 命名与触发词 ", bg=self.card_bg, fg=self.accent_blue,
+                                  font=(self.font_family, 9, "bold"), padx=10, pady=6)
+        name_card.pack(fill=tk.X, pady=(0, 6))
 
-        # LoRA 名称 (同步为专属文件夹名与权重名)
-        tk.Label(name_card, text="LoRA与文件夹名称:", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").grid(row=0, column=0, sticky=tk.W, pady=3)
+        tk.Label(name_card, text="LoRA与文件夹名称:", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").grid(row=0, column=0, sticky=tk.W, pady=2)
         ent_lora_name = tk.Entry(name_card, textvariable=self.var_lora_name, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
-        ent_lora_name.grid(row=0, column=1, sticky=tk.EW, padx=6, pady=3)
+        ent_lora_name.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
         name_card.columnconfigure(1, weight=1)
 
-        # 自定义触发词
-        tk.Label(name_card, text="自定义触发词 (Trigger):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").grid(row=1, column=0, sticky=tk.W, pady=3)
+        tk.Label(name_card, text="自定义触发词(Trigger):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").grid(row=1, column=0, sticky=tk.W, pady=2)
         ent_trigger = tk.Entry(name_card, textvariable=self.var_trigger_word, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
-        ent_trigger.grid(row=1, column=1, sticky=tk.EW, padx=6, pady=3)
+        ent_trigger.grid(row=1, column=1, sticky=tk.EW, padx=4, pady=2)
 
-        tk.Label(name_card, text="说明: 若填写触发词，系统将自动注入每张图片标注首部；留空则直接使用原标注。",
-                 bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
+        tk.Label(name_card, text="说明: 若填写触发词，系统自动前置注入每张图片标注；留空则直接使用原标注。",
+                 bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(1, 2))
 
-        # 动态产出文件夹与文件预览
         lbl_preview = tk.Label(name_card, textvariable=self.var_output_preview, bg=self.card_bg, fg=self.accent_green, font=(self.font_family, 8))
         lbl_preview.grid(row=3, column=0, columnspan=2, sticky=tk.W)
 
-        # 资产与路径卡片
+        # 3. 资产与路径卡片
         path_card = tk.LabelFrame(parent, text=" 📂 资产与目录设置 ", bg=self.card_bg, fg=self.accent_blue,
-                                  font=(self.font_family, 10, "bold"), padx=12, pady=8)
-        path_card.pack(fill=tk.X, pady=(0, 8))
+                                  font=(self.font_family, 9, "bold"), padx=10, pady=6)
+        path_card.pack(fill=tk.X, pady=(0, 6))
 
-        # 数据集路径
         self.create_path_row(path_card, "训练图片目录:", self.var_data_dir, self.browse_data_dir, 0)
-        stat_lbl = tk.Label(path_card, textvariable=self.var_dataset_stat, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 9))
-        stat_lbl.grid(row=1, column=1, sticky=tk.W, pady=(0, 4))
+        stat_lbl = tk.Label(path_card, textvariable=self.var_dataset_stat, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8))
+        stat_lbl.grid(row=1, column=1, sticky=tk.W, pady=(0, 3))
 
-        # ComfyUI 模型库路径
         self.create_path_row(path_card, "ComfyUI模型库:", self.var_comfy_models, self.browse_comfy_dir, 2)
-        # 结果根保存路径
         self.create_path_row(path_card, "结果存放根目录:", self.var_output_dir, self.browse_output_dir, 3)
 
-        chk_comfy = tk.Checkbutton(path_card, text="训练完成后自动同步复制权重至 ComfyUI models/loras 专属子目录",
+        chk_comfy = tk.Checkbutton(path_card, text="训练完成后自动复制权重至 ComfyUI models/loras 专属子目录",
                                    variable=self.var_copy_comfy, bg=self.card_bg, fg=self.text_main,
-                                   selectcolor=self.input_bg, activebackground=self.card_bg, font=(self.font_family, 9))
-        chk_comfy.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(4, 2))
+                                   selectcolor=self.input_bg, activebackground=self.card_bg, font=(self.font_family, 8))
+        chk_comfy.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(3, 1))
 
-        # 超参数配置卡片
+        # 4. 超参数配置卡片
         hp_card = tk.LabelFrame(parent, text=" ⚙️ 核心训练超参数 ", bg=self.card_bg, fg=self.accent_blue,
-                                font=(self.font_family, 10, "bold"), padx=12, pady=8)
-        hp_card.pack(fill=tk.BOTH, expand=True)
+                                font=(self.font_family, 9, "bold"), padx=10, pady=6)
+        hp_card.pack(fill=tk.X, pady=(0, 6))
 
-        # 重复次数 与 Epoch
         r_f = tk.Frame(hp_card, bg=self.card_bg)
-        r_f.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=3)
-        tk.Label(r_f, text="单图重复 (Repeats):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
-        sp_rep = tk.Spinbox(r_f, from_=1, to=100, textvariable=self.var_repeats, width=8, bg=self.input_bg, fg=self.text_main, command=self.recalculate_math)
-        sp_rep.pack(side=tk.LEFT, padx=(0, 16))
+        r_f.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        tk.Label(r_f, text="单图重复 (Repeats):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        sp_rep = tk.Spinbox(r_f, from_=1, to=100, textvariable=self.var_repeats, width=7, bg=self.input_bg, fg=self.text_main, command=self.recalculate_math)
+        sp_rep.pack(side=tk.LEFT, padx=(0, 14))
         sp_rep.bind("<KeyRelease>", lambda e: self.recalculate_math())
 
         tk.Label(r_f, text="训练轮数 (Epochs):", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
-        sp_ep = tk.Spinbox(r_f, from_=1, to=100, textvariable=self.var_epochs, width=8, bg=self.input_bg, fg=self.text_main, command=self.recalculate_math)
-        sp_ep.pack(side=tk.LEFT, padx=(6, 0))
+        sp_ep = tk.Spinbox(r_f, from_=1, to=100, textvariable=self.var_epochs, width=7, bg=self.input_bg, fg=self.text_main, command=self.recalculate_math)
+        sp_ep.pack(side=tk.LEFT, padx=(4, 0))
         sp_ep.bind("<KeyRelease>", lambda e: self.recalculate_math())
 
-        # 总训练步数
         s_f = tk.Frame(hp_card, bg=self.card_bg)
-        s_f.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=3)
-        tk.Label(s_f, text="核心步数 (Steps):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
-        ent_steps = tk.Entry(s_f, textvariable=self.var_steps, width=10, bg=self.input_bg, fg=self.text_main)
+        s_f.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        tk.Label(s_f, text="核心步数 (Steps):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        ent_steps = tk.Entry(s_f, textvariable=self.var_steps, width=9, bg=self.input_bg, fg=self.text_main)
         ent_steps.pack(side=tk.LEFT)
         btn_calc = tk.Button(s_f, text="⚡ 按公式对齐", bg="#45475a", fg=self.text_main, relief=tk.FLAT, font=(self.font_family, 8),
                              cursor="hand2", command=self.align_steps_by_formula)
-        btn_calc.pack(side=tk.LEFT, padx=8)
+        btn_calc.pack(side=tk.LEFT, padx=6)
 
-        # 换算公式联动展示
-        math_lbl = tk.Label(hp_card, textvariable=self.var_calc_stat, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 9))
-        math_lbl.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
+        math_lbl = tk.Label(hp_card, textvariable=self.var_calc_stat, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8))
+        math_lbl.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
 
-        # Rank 与 Alpha
         ra_f = tk.Frame(hp_card, bg=self.card_bg)
-        ra_f.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=3)
-        tk.Label(ra_f, text="LoRA 矩阵秩 (Rank):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
-        cb_rank = ttk.Combobox(ra_f, textvariable=self.var_rank, values=[16, 32, 64, 128], width=8, state="readonly")
-        cb_rank.pack(side=tk.LEFT, padx=(0, 16))
+        ra_f.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        tk.Label(ra_f, text="LoRA 矩阵秩 (Rank):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        cb_rank = ttk.Combobox(ra_f, textvariable=self.var_rank, values=[16, 32, 64, 128], width=7, state="readonly")
+        cb_rank.pack(side=tk.LEFT, padx=(0, 14))
 
         tk.Label(ra_f, text="缩放系数 (Alpha):", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
-        ent_alpha = tk.Entry(ra_f, textvariable=self.var_alpha, width=8, bg=self.input_bg, fg=self.text_main)
-        ent_alpha.pack(side=tk.LEFT, padx=(6, 0))
+        ent_alpha = tk.Entry(ra_f, textvariable=self.var_alpha, width=7, bg=self.input_bg, fg=self.text_main)
+        ent_alpha.pack(side=tk.LEFT, padx=(4, 0))
 
-        # 学习率 与 精度
         lr_f = tk.Frame(hp_card, bg=self.card_bg)
-        lr_f.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=3)
-        tk.Label(lr_f, text="基础学习率 (LR):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
-        ent_lr = tk.Entry(lr_f, textvariable=self.var_lr, width=10, bg=self.input_bg, fg=self.text_main)
-        ent_lr.pack(side=tk.LEFT, padx=(0, 16))
+        lr_f.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        tk.Label(lr_f, text="基础学习率 (LR):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        ent_lr = tk.Entry(lr_f, textvariable=self.var_lr, width=9, bg=self.input_bg, fg=self.text_main)
+        ent_lr.pack(side=tk.LEFT, padx=(0, 14))
 
         tk.Label(lr_f, text="计算精度:", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
-        cb_prec = ttk.Combobox(lr_f, textvariable=self.var_precision, values=["bf16", "fp16"], width=8, state="readonly")
-        cb_prec.pack(side=tk.LEFT, padx=(6, 0))
+        cb_prec = ttk.Combobox(lr_f, textvariable=self.var_precision, values=["bf16", "fp16"], width=7, state="readonly")
+        cb_prec.pack(side=tk.LEFT, padx=(4, 0))
 
-        # 离线设备路由 (显存防爆设置)
         dev_f = tk.Frame(hp_card, bg=self.card_bg)
-        dev_f.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(3, 6))
-        tk.Label(dev_f, text="文本提取设备:", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
-        cb_txt_dev = ttk.Combobox(dev_f, textvariable=self.var_text_device, values=["cpu", "cuda"], width=8, state="readonly")
-        cb_txt_dev.pack(side=tk.LEFT, padx=(0, 8))
+        dev_f.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(2, 4))
+        tk.Label(dev_f, text="文本提取设备:", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        cb_txt_dev = ttk.Combobox(dev_f, textvariable=self.var_text_device, values=["cpu", "cuda"], width=7, state="readonly")
+        cb_txt_dev.pack(side=tk.LEFT, padx=(0, 6))
         tk.Label(dev_f, text="(8GB 显卡请锁定 CPU 避免 OOM)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
 
     def create_path_row(self, parent, label_text, var, browse_cmd, row_idx):
-        tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=15, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=3)
+        tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=14, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=2)
         ent = tk.Entry(parent, textvariable=var, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
-        ent.grid(row=row_idx, column=1, sticky=tk.EW, padx=6, pady=3)
+        ent.grid(row=row_idx, column=1, sticky=tk.EW, padx=4, pady=2)
         parent.columnconfigure(1, weight=1)
         btn = tk.Button(parent, text="浏览...", bg="#45475a", fg=self.text_main, relief=tk.FLAT, font=(self.font_family, 8),
                         cursor="hand2", command=browse_cmd)
-        btn.grid(row=row_idx, column=2, padx=2, pady=3)
+        btn.grid(row=row_idx, column=2, padx=2, pady=2)
 
     def update_output_preview(self):
         name = self.var_lora_name.get().strip()
         if not name:
             name = "my_lora"
         out_root = self.var_output_dir.get().strip()
-        preview_text = f"产出归档: {out_root}/{name}/ -> [{name}-comfy.safetensors, {name}-lycoris.safetensors]"
+        preview_text = f"产出归档: {out_root}/{name}/ -> [{name}-comfy.safetensors, ...]"
         self.var_output_preview.set(preview_text)
 
     def build_right_panel(self, parent):
-        card = tk.Frame(parent, bg=self.card_bg, padx=12, pady=10)
+        card = tk.Frame(parent, bg=self.card_bg, padx=10, pady=8)
         card.pack(fill=tk.BOTH, expand=True)
 
         header_box = tk.Frame(card, bg=self.card_bg)
-        header_box.pack(fill=tk.X, pady=(0, 6))
+        header_box.pack(fill=tk.X, pady=(0, 4))
 
         tk.Label(header_box, text="🖥️ 训练实时日志与终端控制台", bg=self.card_bg, fg=self.accent_blue,
-                 font=(self.font_family, 11, "bold")).pack(side=tk.LEFT)
+                 font=(self.font_family, 10, "bold")).pack(side=tk.LEFT)
 
         btn_clear = tk.Button(header_box, text="清空控制台", bg="#313244", fg=self.text_sub, relief=tk.FLAT,
                               font=(self.font_family, 8), command=self.clear_console)
@@ -278,21 +294,21 @@ class ModernLocalTrainerGUI:
         # 终端文本框 (黑底绿字 Terminal 风格)
         self.console = tk.Text(card, bg="#11111b", fg="#a6e3a1", insertbackground="#a6e3a1",
                                font=("Consolas", 9), wrap=tk.WORD)
-        self.console.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.console.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
         # 底部大按钮操作区
         btn_bar = tk.Frame(card, bg=self.card_bg)
         btn_bar.pack(fill=tk.X)
 
         self.btn_start = tk.Button(btn_bar, text="🚀 启动本地极速训练", bg="#2e7d32", fg="white",
-                                   activebackground="#388e3c", font=(self.font_family, 11, "bold"),
-                                   relief=tk.FLAT, pady=8, cursor="hand2", command=self.start_training)
-        self.btn_start.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+                                   activebackground="#388e3c", font=(self.font_family, 10, "bold"),
+                                   relief=tk.FLAT, pady=7, cursor="hand2", command=self.start_training)
+        self.btn_start.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
         self.btn_stop = tk.Button(btn_bar, text="⏹ 终止训练", bg="#c62828", fg="white",
-                                  activebackground="#d32f2f", font=(self.font_family, 11, "bold"),
-                                  relief=tk.FLAT, pady=8, state=tk.DISABLED, cursor="hand2", command=self.stop_training)
-        self.btn_stop.pack(side=tk.RIGHT, padx=(6, 0), ipadx=16)
+                                  activebackground="#d32f2f", font=(self.font_family, 10, "bold"),
+                                  relief=tk.FLAT, pady=7, state=tk.DISABLED, cursor="hand2", command=self.stop_training)
+        self.btn_stop.pack(side=tk.RIGHT, padx=(4, 0), ipadx=14)
 
     # 路径浏览与检测
     def browse_data_dir(self):
@@ -333,7 +349,7 @@ class ModernLocalTrainerGUI:
         total_exposures = img_count * rep * ep
         recommended_steps = max(1, total_exposures // 4)
         
-        self.var_calc_stat.set(f"曝光换算：{img_count}图 × {rep}重复 × {ep}轮 = {total_exposures}次曝光 (等效推荐约 {recommended_steps} 步)")
+        self.var_calc_stat.set(f"换算：{img_count}图 × {rep}重复 × {ep}轮 = {total_exposures}次曝光 (等效推荐约 {recommended_steps} 步)")
 
     def align_steps_by_formula(self):
         dpath = Path(self.var_data_dir.get())

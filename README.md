@@ -20,7 +20,8 @@
 | **8GB 显存控制** | 默认全载入离线缓存 | **CPU 路由提取文本 Embeddings (显存恒等于 0 GiB)** |
 | **反向传播显存峰值** | 3.5 GiB | **3.5 GiB (在 8GB 显卡下保留 4.5GB 巨大冗余)** |
 | **模型资产依赖** | 每次启动需从 HuggingFace 重新下载 | **直连本地 ComfyUI 现有模型库，零网络下载秒级启动** |
-| **启动命令** | `.\scripts\push_to_kaggle.ps1` | `.\scripts\run_local.ps1` |
+| **启动命令** | `.\scripts\push_to_kaggle.ps1` | `.\scripts\run_local.ps1` 或双击 `launch_ui.bat` |
+| **自定义命名与触发词** | 配置文件中修改 `RUN_NAME` | **GUI / CLI 全自定义：自动创建专属产出子文件夹、同步权重名称、前置注入触发词** |
 
 ---
 

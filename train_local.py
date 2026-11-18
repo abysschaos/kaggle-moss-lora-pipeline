@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import glob
+import json
 import shutil
 import argparse
 import subprocess
@@ -134,40 +135,52 @@ def apply_compatibility_patches(trainer_dir: Path):
         except Exception as e:
             print(f" Warning patching objective.py: {e}")
 
-def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, repeats: int, run_name: str) -> Path:
-    """将散装图集自动标准化为 Kohya 规范的 <repeats>_<name> 结构，支持 Windows 硬链接/文件复制。"""
-    target_folder = workspace_data_dir / f"{repeats}_{run_name}"
+def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, repeats: int, lora_name: str, trigger_word: str = "") -> Path:
+    """
+    将散装图集自动标准化为 Kohya 规范的 <repeats>_<name> 结构。
+    支持自定义触发词自动注入：若提供了 trigger_word 且原标注首部未包含，则自动前置注入。
+    """
+    target_folder = workspace_data_dir / f"{repeats}_{lora_name}"
     target_folder.mkdir(parents=True, exist_ok=True)
     
     img_exts = {".jpg", ".jpeg", ".png", ".webp"}
     raw_images = [f for f in source_data_dir.iterdir() if f.suffix.lower() in img_exts]
-    raw_texts = [f for f in source_data_dir.iterdir() if f.suffix.lower() == ".txt"]
     
-    print(f"Source Dataset: Found {len(raw_images)} images and {len(raw_texts)} text files.")
+    print(f"Source Dataset: Found {len(raw_images)} images in {source_data_dir}")
     if len(raw_images) == 0:
         raise ValueError(f"No image files found in {source_data_dir}")
 
-    # 拷贝或建立硬链接至结构化目录
+    trigger_clean = trigger_word.strip() if trigger_word else ""
+    if trigger_clean:
+        print(f" [Trigger Injection] Active Trigger Word: '{trigger_clean}' (will be prepended to captions)")
+
     linked_count = 0
     for img in raw_images:
         dest_img = target_folder / img.name
         dest_txt = target_folder / f"{img.stem}.txt"
         src_txt = source_data_dir / f"{img.stem}.txt"
 
+        # 1. 复制或硬链接图像文件
         if not dest_img.exists():
             try:
                 os.link(str(img), str(dest_img))
             except Exception:
                 shutil.copy2(str(img), str(dest_img))
 
-        if src_txt.exists() and not dest_txt.exists():
-            try:
-                os.link(str(src_txt), str(dest_txt))
-            except Exception:
-                shutil.copy2(str(src_txt), str(dest_txt))
+        # 2. 处理自然语言标注文本与触发词自动注入
+        caption_content = ""
+        if src_txt.exists():
+            caption_content = src_txt.read_text(encoding="utf-8", errors="ignore").strip()
+
+        if trigger_clean:
+            # 检查原标注首部是否已经包含该触发词，避免重复堆叠
+            if not caption_content.lower().startswith(trigger_clean.lower()):
+                caption_content = f"{trigger_clean}, {caption_content}" if caption_content else trigger_clean
+
+        dest_txt.write_text(caption_content, encoding="utf-8")
         linked_count += 1
 
-    print(f" [OK] Structured dataset directory ready: {target_folder} ({linked_count} pairs)")
+    print(f" [OK] Structured dataset directory ready: {target_folder} ({linked_count} image-text pairs)")
     return workspace_data_dir
 
 def main():
@@ -177,11 +190,13 @@ def main():
     parser.add_argument("--comfy_models_dir", type=str, default="C:/dowmload idm/ComfyUI-aki-v3.2(1)/ComfyUI-aki-v3.2/ComfyUI/models",
                         help="Path to ComfyUI models directory containing diffusion_models, text_encoders, and vae")
     parser.add_argument("--output_dir", type=str, default="./output",
-                        help="Directory to save final LoRA weights and checkpoints")
+                        help="Root directory to save final LoRA folders and checkpoints")
+    parser.add_argument("--lora_name", "--run_name", type=str, default="ness_style", dest="lora_name",
+                        help="Custom LoRA name and dedicated output folder name (e.g. makima_v1)")
+    parser.add_argument("--trigger_word", type=str, default="",
+                        help="Custom trigger word/phrase to prepend to captions (e.g. makima_char)")
     parser.add_argument("--copy_to_comfy_loras", action="store_true",
                         help="Automatically copy trained .safetensors to ComfyUI models/loras folder upon completion")
-    parser.add_argument("--run_name", type=str, default="ness_style",
-                        help="Run identifier and output prefix")
     parser.add_argument("--repeats", type=int, default=10,
                         help="Kohya folder repeats per image (default: 10)")
     parser.add_argument("--epochs", type=int, default=6,
@@ -205,10 +220,16 @@ def main():
     project_root = Path(__file__).resolve().parent
     workspace_dir = project_root / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
-    output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 建立以用户自定义 LoRA 名称命名的专属产出文件夹
+    base_output_dir = Path(args.output_dir).resolve()
+    lora_dedicated_folder = base_output_dir / args.lora_name
+    lora_dedicated_folder.mkdir(parents=True, exist_ok=True)
 
-    print_banner(f"OpenMOSS MOSS-Image Local LoRA Training Pipeline ({args.run_name})")
+    print_banner(f"OpenMOSS MOSS-Image Local LoRA Training Pipeline: {args.lora_name}")
+    print(f"Target LoRA Name & Subfolder: {args.lora_name}")
+    print(f"Custom Trigger Word:          {args.trigger_word if args.trigger_word else '(None, using original captions)'}")
+    print(f"Dedicated Output Directory:   {lora_dedicated_folder}")
     print(f"OS: Windows | Target Precision: {args.precision.upper()} | Text Device: {args.text_device.upper()}")
     print(f"Hyperparameters: Steps={args.steps}, Dim={args.rank}, Alpha={args.alpha}, LR={args.lr}")
 
@@ -264,11 +285,11 @@ def main():
             except Exception:
                 shutil.copyfile(str(src), str(dst))
 
-    # 3. 准备 Kohya 结构化数据集
-    print_banner("Preparing Dataset Structure")
+    # 3. 准备 Kohya 结构化数据集并注入自定义触发词
+    print_banner("Preparing Dataset Structure with Custom Trigger Word")
     src_data_path = Path(args.data_dir).resolve()
     workspace_data_root = workspace_dir / "dataset"
-    prepare_dataset_structure(src_data_path, workspace_data_root, args.repeats, args.run_name)
+    prepare_dataset_structure(src_data_path, workspace_data_root, args.repeats, args.lora_name, args.trigger_word)
 
     # 4. 检查并准备 KohakuMossTrainer 训练器
     trainer_dir = project_root / "KohakuMossTrainer"
@@ -287,8 +308,8 @@ def main():
         "kohaku-engine", "kohakuvault", "lycoris-lora", "anyschedule", "safetensors"
     ], check=True)
 
-    # 5. 生成本地训练与离线缓存专属配置文件
-    print_banner("Generating Local Configurations")
+    # 5. 生成本地训练与离线缓存专属配置文件 (名称与 lora_name 强对齐)
+    print_banner(f"Generating Local Configurations for '{args.lora_name}'")
     user_cfg_dir = trainer_dir / "configs" / "user"
     user_cfg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -332,9 +353,9 @@ IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
 from kohakuengine import use_config
 
 use_config("../moss/recipes/recipes_lora_16g_fp16.py")
-use_config("{args.run_name}_local_data.py")
+use_config("{args.lora_name}_local_data.py")
 
-RUN_NAME = "{args.run_name}"
+RUN_NAME = "{args.lora_name}"
 TRANSFORMER = "{transformer_filename}"
 FP16_FIX = "none"
 PRECISION = "{args.precision}"
@@ -352,8 +373,8 @@ SCHEDULE = {{
 }}
 """
 
-    data_cfg_file = user_cfg_dir / f"{args.run_name}_local_data.py"
-    train_cfg_file = user_cfg_dir / f"{args.run_name}_local.py"
+    data_cfg_file = user_cfg_dir / f"{args.lora_name}_local_data.py"
+    train_cfg_file = user_cfg_dir / f"{args.lora_name}_local.py"
 
     data_cfg_file.write_text(data_cfg_code.strip(), encoding="utf-8")
     train_cfg_file.write_text(train_cfg_code.strip(), encoding="utf-8")
@@ -364,13 +385,13 @@ SCHEDULE = {{
     print_banner(f"Step 1/2: Extracting Text Embeddings (Device: {args.text_device.upper()})")
     subprocess.run([
         "kogine", "run", "scripts/data/cache_text.py",
-        "--config", f"configs/user/{args.run_name}_local_data.py"
+        "--config", f"configs/user/{args.lora_name}_local_data.py"
     ], cwd=str(trainer_dir), check=True)
 
     print_banner(f"Step 2/2: Extracting Image Latents (Device: {args.vae_device.upper()})")
     subprocess.run([
         "kogine", "run", "scripts/data/cache_latents.py",
-        "--config", f"configs/user/{args.run_name}_local_data.py"
+        "--config", f"configs/user/{args.lora_name}_local_data.py"
     ], cwd=str(trainer_dir), check=True)
 
     # 7. 物理级清洗配置文件中的临时离线编码器旋钮
@@ -382,19 +403,19 @@ SCHEDULE = {{
     print(" [OK] Knobs TEXT_ENCODER_KWARGS and IMAGE_ENCODER_KWARGS cleanly sanitized.")
 
     # 8. 启动主训练循环
-    print_banner(f"Starting {args.steps}-step Local LoRA Training (Precision: {args.precision.upper()})")
+    print_banner(f"Starting {args.steps}-step Local LoRA Training: '{args.lora_name}' (Precision: {args.precision.upper()})")
     start_time = time.time()
     train_cmd = [
         "kogine", "run", "scripts/train/moss.py",
-        "--config", f"configs/user/{args.run_name}_local.py"
+        "--config", f"configs/user/{args.lora_name}_local.py"
     ]
     print(f"Executing: {' '.join(train_cmd)}")
     subprocess.run(train_cmd, cwd=str(trainer_dir), check=True)
     elapsed = time.time() - start_time
     print(f" [OK] Core training completed in {elapsed / 60:.2f} minutes ({elapsed / args.steps:.2f} s/step)!")
 
-    # 9. 智能检索导出的 LoRA 权重并归档 (严格保留 comfy 与 lycoris 官方标准键名)
-    print_banner("Locating and Exporting Generated LoRA Weights")
+    # 9. 智能检索导出的 LoRA 权重，规范重命名并归档至专属子文件夹
+    print_banner(f"Locating and Exporting LoRA Weights to '{lora_dedicated_folder}'")
     search_paths = list(trainer_dir.glob("runs/**/*.safetensors")) + list(trainer_dir.glob("checkpoints/**/*.safetensors"))
     exported_files = []
     
@@ -402,25 +423,59 @@ SCHEDULE = {{
         sf_str = sf.as_posix().lower()
         if "moss_image" in sf_str or "qwen" in sf_str or "flux2" in sf_str:
             continue
-        # 严格保留官方 Comfy 与 LyCORIS 权重
-        if "-comfy" in sf_str or "-lycoris" in sf_str or sf.name.endswith(".safetensors"):
-            dst = output_dir / sf.name
-            shutil.copy2(str(sf), str(dst))
-            exported_files.append(dst)
-            print(f" Exported: {sf} -> {dst}")
+        
+        # 匹配 ComfyUI 原生权重与 LyCORIS 标准权重并对齐用户自定义名称
+        dest_filename = sf.name
+        if "-comfy" in sf_str or sf.stem.endswith("_comfy"):
+            dest_filename = f"{args.lora_name}-comfy.safetensors"
+        elif "-lycoris" in sf_str or sf.stem.endswith("_lycoris"):
+            dest_filename = f"{args.lora_name}-lycoris.safetensors"
+        else:
+            dest_filename = f"{args.lora_name}-{sf.name}"
 
-    # 可选：直接复制到 ComfyUI 的 loras 目录
+        dst = lora_dedicated_folder / dest_filename
+        shutil.copy2(str(sf), str(dst))
+        exported_files.append(dst)
+        print(f" Exported: {sf.name} -> {dst}")
+
+    # 生成训练摘要与触发词元数据文件
+    summary_file = lora_dedicated_folder / "training_summary.json"
+    summary_data = {
+        "lora_name": args.lora_name,
+        "trigger_word": args.trigger_word if args.trigger_word else "(None)",
+        "output_folder": str(lora_dedicated_folder),
+        "steps": args.steps,
+        "repeats": args.repeats,
+        "epochs": args.epochs,
+        "rank": args.rank,
+        "alpha": args.alpha,
+        "learning_rate": args.lr,
+        "precision": args.precision,
+        "text_device": args.text_device,
+        "comfyui_prompt_example": (
+            f"A high quality digital painting of {args.trigger_word}, in the style of {args.lora_name}, masterpiece, cinematic lighting"
+            if args.trigger_word else
+            f"A high quality digital painting in the style of {args.lora_name}, masterpiece, cinematic lighting"
+        )
+    }
+    summary_file.write_text(json.dumps(summary_data, indent=4, ensure_ascii=False), encoding="utf-8")
+    print(f" [OK] Saved training summary & trigger metadata to: {summary_file}")
+
+    # 可选：直接复制到 ComfyUI 的 loras 目录 (支持专属子文件夹或扁平文件)
     if args.copy_to_comfy_loras:
         comfy_loras_dir = Path(args.comfy_models_dir) / "loras"
         if comfy_loras_dir.exists():
             print_banner(f"Deploying Weights to ComfyUI Loras Folder: {comfy_loras_dir}")
+            # 同时在 ComfyUI loras 下建立专属子目录
+            target_comfy_sub = comfy_loras_dir / args.lora_name
+            target_comfy_sub.mkdir(parents=True, exist_ok=True)
             for ef in exported_files:
-                target_comfy_dst = comfy_loras_dir / ef.name
+                target_comfy_dst = target_comfy_sub / ef.name
                 shutil.copy2(str(ef), str(target_comfy_dst))
                 print(f" [ComfyUI Ready] Copied {ef.name} -> {target_comfy_dst}")
 
     print_banner("Training Pipeline Completed Successfully!")
-    print(f"Trained weights are available in: {output_dir}")
+    print(f"Trained weights are available in: {lora_dedicated_folder}")
 
 if __name__ == "__main__":
     main()

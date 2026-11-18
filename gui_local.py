@@ -17,8 +17,8 @@ class ModernLocalTrainerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("OpenMOSS MOSS-Image 本地训练控制面板")
-        self.root.geometry("1120x820")
-        self.root.minsize(980, 720)
+        self.root.geometry("1160x860")
+        self.root.minsize(1020, 760)
 
         # 调色盘与字体定义 (现代深色主题)
         self.bg_dark = "#181825"
@@ -39,7 +39,8 @@ class ModernLocalTrainerGUI:
         self.current_process = None
         self.is_training = False
 
-        self.var_run_name = tk.StringVar(value="ness_style")
+        self.var_lora_name = tk.StringVar(value="my_lora")
+        self.var_trigger_word = tk.StringVar(value="")
         self.var_data_dir = tk.StringVar(value="C:/Users/白音华/Pictures/ness")
         self.var_comfy_models = tk.StringVar(value="C:/dowmload idm/ComfyUI-aki-v3.2(1)/ComfyUI-aki-v3.2/ComfyUI/models")
         self.var_output_dir = tk.StringVar(value=str(Path("./output").resolve()))
@@ -57,10 +58,15 @@ class ModernLocalTrainerGUI:
 
         self.var_dataset_stat = tk.StringVar(value="未检测")
         self.var_calc_stat = tk.StringVar(value="曝光计算：就绪")
+        self.var_output_preview = tk.StringVar(value="")
 
         self.build_ui()
         self.update_dataset_stats()
         self.recalculate_math()
+        self.update_output_preview()
+
+        # 绑定名称变动时实时刷新产出路径预览
+        self.var_lora_name.trace_add("write", lambda *args: self.update_output_preview())
 
     def setup_styles(self):
         style = ttk.Style()
@@ -84,7 +90,7 @@ class ModernLocalTrainerGUI:
 
         # 硬件状态探测展示
         gpu_info = self.probe_gpu_quick()
-        gpu_lbl = tk.Label(header_frame, text=f"当前算力设备: {gpu_info}",
+        gpu_lbl = tk.Label(header_frame, text=f"算力设备: {gpu_info}",
                            bg=self.card_bg, fg=self.accent_green, font=(self.font_family, 9))
         gpu_lbl.pack(side=tk.RIGHT, padx=16, pady=12)
 
@@ -93,12 +99,12 @@ class ModernLocalTrainerGUI:
         main_paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
 
         # 左侧控制面板 (固定宽度)
-        left_container = tk.Frame(main_paned, bg=self.bg_dark, width=540)
-        main_paned.add(left_container, minsize=480)
+        left_container = tk.Frame(main_paned, bg=self.bg_dark, width=570)
+        main_paned.add(left_container, minsize=520)
 
         # 右侧实时监控与日志面板
         right_container = tk.Frame(main_paned, bg=self.bg_dark)
-        main_paned.add(right_container, minsize=450)
+        main_paned.add(right_container, minsize=460)
 
         self.build_left_panel(left_container)
         self.build_right_panel(right_container)
@@ -133,38 +139,57 @@ class ModernLocalTrainerGUI:
                              relief=tk.FLAT, padx=10, pady=4, cursor="hand2", command=self.apply_character_preset)
         btn_char.pack(side=tk.LEFT, padx=6)
 
+        # 命名与触发词卡片 (新增与高亮)
+        name_card = tk.LabelFrame(parent, text=" 🏷️ 自定义 LoRA 标识与触发词 ", bg=self.card_bg, fg=self.accent_blue,
+                                  font=(self.font_family, 10, "bold"), padx=12, pady=8)
+        name_card.pack(fill=tk.X, pady=(0, 8))
+
+        # LoRA 名称 (同步为专属文件夹名与权重名)
+        tk.Label(name_card, text="LoRA与文件夹名称:", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").grid(row=0, column=0, sticky=tk.W, pady=3)
+        ent_lora_name = tk.Entry(name_card, textvariable=self.var_lora_name, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
+        ent_lora_name.grid(row=0, column=1, sticky=tk.EW, padx=6, pady=3)
+        name_card.columnconfigure(1, weight=1)
+
+        # 自定义触发词
+        tk.Label(name_card, text="自定义触发词 (Trigger):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").grid(row=1, column=0, sticky=tk.W, pady=3)
+        ent_trigger = tk.Entry(name_card, textvariable=self.var_trigger_word, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
+        ent_trigger.grid(row=1, column=1, sticky=tk.EW, padx=6, pady=3)
+
+        tk.Label(name_card, text="说明: 若填写触发词，系统将自动注入每张图片标注首部；留空则直接使用原标注。",
+                 bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
+
+        # 动态产出文件夹与文件预览
+        lbl_preview = tk.Label(name_card, textvariable=self.var_output_preview, bg=self.card_bg, fg=self.accent_green, font=(self.font_family, 8))
+        lbl_preview.grid(row=3, column=0, columnspan=2, sticky=tk.W)
+
         # 资产与路径卡片
         path_card = tk.LabelFrame(parent, text=" 📂 资产与目录设置 ", bg=self.card_bg, fg=self.accent_blue,
-                                  font=(self.font_family, 10, "bold"), padx=12, pady=10)
+                                  font=(self.font_family, 10, "bold"), padx=12, pady=8)
         path_card.pack(fill=tk.X, pady=(0, 8))
 
         # 数据集路径
         self.create_path_row(path_card, "训练图片目录:", self.var_data_dir, self.browse_data_dir, 0)
-        # 数据集文件统计展示
         stat_lbl = tk.Label(path_card, textvariable=self.var_dataset_stat, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 9))
-        stat_lbl.grid(row=1, column=1, sticky=tk.W, pady=(0, 6))
+        stat_lbl.grid(row=1, column=1, sticky=tk.W, pady=(0, 4))
 
         # ComfyUI 模型库路径
         self.create_path_row(path_card, "ComfyUI模型库:", self.var_comfy_models, self.browse_comfy_dir, 2)
-        # 结果保存路径
-        self.create_path_row(path_card, "产出保存目录:", self.var_output_dir, self.browse_output_dir, 3)
+        # 结果根保存路径
+        self.create_path_row(path_card, "结果存放根目录:", self.var_output_dir, self.browse_output_dir, 3)
 
-        chk_comfy = tk.Checkbutton(path_card, text="训练完成后自动同步复制权重至 ComfyUI models/loras 目录",
+        chk_comfy = tk.Checkbutton(path_card, text="训练完成后自动同步复制权重至 ComfyUI models/loras 专属子目录",
                                    variable=self.var_copy_comfy, bg=self.card_bg, fg=self.text_main,
                                    selectcolor=self.input_bg, activebackground=self.card_bg, font=(self.font_family, 9))
-        chk_comfy.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(6, 2))
+        chk_comfy.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(4, 2))
 
         # 超参数配置卡片
         hp_card = tk.LabelFrame(parent, text=" ⚙️ 核心训练超参数 ", bg=self.card_bg, fg=self.accent_blue,
-                                font=(self.font_family, 10, "bold"), padx=12, pady=10)
+                                font=(self.font_family, 10, "bold"), padx=12, pady=8)
         hp_card.pack(fill=tk.BOTH, expand=True)
-
-        # 任务名称
-        self.create_input_row(hp_card, "产出名称 (run_name):", self.var_run_name, 0)
 
         # 重复次数 与 Epoch
         r_f = tk.Frame(hp_card, bg=self.card_bg)
-        r_f.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=4)
+        r_f.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=3)
         tk.Label(r_f, text="单图重复 (Repeats):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
         sp_rep = tk.Spinbox(r_f, from_=1, to=100, textvariable=self.var_repeats, width=8, bg=self.input_bg, fg=self.text_main, command=self.recalculate_math)
         sp_rep.pack(side=tk.LEFT, padx=(0, 16))
@@ -177,7 +202,7 @@ class ModernLocalTrainerGUI:
 
         # 总训练步数
         s_f = tk.Frame(hp_card, bg=self.card_bg)
-        s_f.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=4)
+        s_f.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=3)
         tk.Label(s_f, text="核心步数 (Steps):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
         ent_steps = tk.Entry(s_f, textvariable=self.var_steps, width=10, bg=self.input_bg, fg=self.text_main)
         ent_steps.pack(side=tk.LEFT)
@@ -187,11 +212,11 @@ class ModernLocalTrainerGUI:
 
         # 换算公式联动展示
         math_lbl = tk.Label(hp_card, textvariable=self.var_calc_stat, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 9))
-        math_lbl.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(0, 6))
+        math_lbl.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
 
         # Rank 与 Alpha
         ra_f = tk.Frame(hp_card, bg=self.card_bg)
-        ra_f.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=4)
+        ra_f.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=3)
         tk.Label(ra_f, text="LoRA 矩阵秩 (Rank):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
         cb_rank = ttk.Combobox(ra_f, textvariable=self.var_rank, values=[16, 32, 64, 128], width=8, state="readonly")
         cb_rank.pack(side=tk.LEFT, padx=(0, 16))
@@ -202,7 +227,7 @@ class ModernLocalTrainerGUI:
 
         # 学习率 与 精度
         lr_f = tk.Frame(hp_card, bg=self.card_bg)
-        lr_f.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=4)
+        lr_f.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=3)
         tk.Label(lr_f, text="基础学习率 (LR):", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
         ent_lr = tk.Entry(lr_f, textvariable=self.var_lr, width=10, bg=self.input_bg, fg=self.text_main)
         ent_lr.pack(side=tk.LEFT, padx=(0, 16))
@@ -213,11 +238,11 @@ class ModernLocalTrainerGUI:
 
         # 离线设备路由 (显存防爆设置)
         dev_f = tk.Frame(hp_card, bg=self.card_bg)
-        dev_f.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(4, 8))
+        dev_f.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(3, 6))
         tk.Label(dev_f, text="文本提取设备:", bg=self.card_bg, fg=self.text_main, width=18, anchor="w").pack(side=tk.LEFT)
         cb_txt_dev = ttk.Combobox(dev_f, textvariable=self.var_text_device, values=["cpu", "cuda"], width=8, state="readonly")
         cb_txt_dev.pack(side=tk.LEFT, padx=(0, 8))
-        tk.Label(dev_f, text="(8GB 卡请锁定 CPU 避免 OOM)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        tk.Label(dev_f, text="(8GB 显卡请锁定 CPU 避免 OOM)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
 
     def create_path_row(self, parent, label_text, var, browse_cmd, row_idx):
         tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=15, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=3)
@@ -228,11 +253,13 @@ class ModernLocalTrainerGUI:
                         cursor="hand2", command=browse_cmd)
         btn.grid(row=row_idx, column=2, padx=2, pady=3)
 
-    def create_input_row(self, parent, label_text, var, row_idx):
-        tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=18, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=4)
-        ent = tk.Entry(parent, textvariable=var, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
-        ent.grid(row=row_idx, column=1, sticky=tk.EW, pady=4)
-        parent.columnconfigure(1, weight=1)
+    def update_output_preview(self):
+        name = self.var_lora_name.get().strip()
+        if not name:
+            name = "my_lora"
+        out_root = self.var_output_dir.get().strip()
+        preview_text = f"产出归档: {out_root}/{name}/ -> [{name}-comfy.safetensors, {name}-lycoris.safetensors]"
+        self.var_output_preview.set(preview_text)
 
     def build_right_panel(self, parent):
         card = tk.Frame(parent, bg=self.card_bg, padx=12, pady=10)
@@ -281,9 +308,10 @@ class ModernLocalTrainerGUI:
             self.var_comfy_models.set(selected)
 
     def browse_output_dir(self):
-        selected = filedialog.askdirectory(initialdir=self.var_output_dir.get(), title="选择权重产出保存目录")
+        selected = filedialog.askdirectory(initialdir=self.var_output_dir.get(), title="选择权重产出保存根目录")
         if selected:
             self.var_output_dir.set(selected)
+            self.update_output_preview()
 
     def update_dataset_stats(self):
         dpath = Path(self.var_data_dir.get())
@@ -325,9 +353,11 @@ class ModernLocalTrainerGUI:
         self.var_rank.set(32)
         self.var_alpha.set(32.0)
         self.var_lr.set("1e-4")
-        self.var_run_name.set("ness_style")
+        self.var_lora_name.set("my_art_style")
+        self.var_trigger_word.set("in the style of my_art_style")
         self.align_steps_by_formula()
-        messagebox.showinfo("模板切换", "已成功加载【艺术画风模板】：\nRepeats=10, Epochs=6, Rank=32, Alpha=32.0, LR=1e-4")
+        self.update_output_preview()
+        messagebox.showinfo("模板切换", "已成功加载【艺术画风模板】：\nLoRA名称: my_art_style\n触发词: in the style of my_art_style\nRepeats=10, Epochs=6, Rank=32, Alpha=32.0, LR=1e-4")
 
     def apply_character_preset(self):
         self.var_repeats.set(6)
@@ -335,9 +365,11 @@ class ModernLocalTrainerGUI:
         self.var_rank.set(32)
         self.var_alpha.set(16.0)
         self.var_lr.set("8e-5")
-        self.var_run_name.set("my_character")
+        self.var_lora_name.set("my_character")
+        self.var_trigger_word.set("my_character_char")
         self.align_steps_by_formula()
-        messagebox.showinfo("模板切换", "已成功加载【人物角色模板】：\nRepeats=6, Epochs=3, Rank=32, Alpha=16.0, LR=8e-5")
+        self.update_output_preview()
+        messagebox.showinfo("模板切换", "已成功加载【人物角色模板】：\nLoRA名称: my_character\n触发词: my_character_char\nRepeats=6, Epochs=3, Rank=32, Alpha=16.0, LR=8e-5")
 
     def clear_console(self):
         self.console.delete("1.0", tk.END)
@@ -357,12 +389,17 @@ class ModernLocalTrainerGUI:
             messagebox.showerror("错误", f"训练数据集路径不存在: {dpath}")
             return
 
+        lora_name_clean = self.var_lora_name.get().strip()
+        if not lora_name_clean:
+            lora_name_clean = "my_lora"
+
         cmd = [
             sys.executable, "-u", "train_local.py",
             "--data_dir", self.var_data_dir.get(),
             "--comfy_models_dir", self.var_comfy_models.get(),
             "--output_dir", self.var_output_dir.get(),
-            "--run_name", self.var_run_name.get(),
+            "--lora_name", lora_name_clean,
+            "--trigger_word", self.var_trigger_word.get().strip(),
             "--repeats", str(self.var_repeats.get()),
             "--epochs", str(self.var_epochs.get()),
             "--steps", str(self.var_steps.get()),
@@ -426,8 +463,10 @@ class ModernLocalTrainerGUI:
         self.btn_stop.config(state=tk.DISABLED)
 
         if return_code == 0:
-            self.log(f"\n{'='*75}\n>>> [成功] 本地训练已圆满完成！权重已归档至输出目录。<<<\n{'='*75}\n")
-            messagebox.showinfo("训练成功", "LoRA 训练已圆满完成！\n权重文件已自动导出并同步。")
+            lora_name = self.var_lora_name.get().strip() or "my_lora"
+            dest_dir = Path(self.var_output_dir.get()) / lora_name
+            self.log(f"\n{'='*75}\n>>> [成功] 本地训练已圆满完成！权重已归档至专属子文件夹: {dest_dir} <<<\n{'='*75}\n")
+            messagebox.showinfo("训练成功", f"LoRA 训练已圆满完成！\n专属产出文件夹:\n{dest_dir}\n包含: {lora_name}-comfy.safetensors 等。")
         else:
             self.log(f"\n>>> [提示] 训练进程已结束，退出码: {return_code} <<<\n")
 

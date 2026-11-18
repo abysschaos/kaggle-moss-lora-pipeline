@@ -8,17 +8,18 @@
 
 | 参数名称 | 物理含义 | 推荐值 | 本地命令行开关 | 本地源码定义行 (`train_local.py`) | 云端源码修改行 (`train_moss.py`) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **单图重复次数** | 每张图片在单轮中的采样倍数 | 4 ~ 15 | `--repeats <int>` | 第 185 行 (`default=10`) | 第 65 行 (目录名 `10_...`) |
-| **训练轮数 (Epochs)** | 全量数据集完整遍历轮次 | 3 ~ 8 | `--epochs <int>` | 第 187 行 (`default=6`) | 影响总迭代次数换算 |
-| **优化器步数 (Steps)** | 梯度反向传播总更新步数 | 200 ~ 800 | `--steps <int>` | 第 189 行 (`default=600`) | 第 288 行 (`STEPS = 600`) |
-| **LoRA 矩阵秩 (Rank)** | 权重低秩适应矩阵维度 | 16 ~ 64 | `--rank <int>` | 第 191 行 (`default=32`) | 第 286 行 (`DIM = 32`) |
-| **LoRA 缩放倍率 (Alpha)**| 权重注入强度系数 | 16.0 ~ 64.0 | `--alpha <float>` | 第 193 行 (`default=32.0`)| 第 287 行 (`ALPHA = 32.0`) |
-| **学习率 (LR)** | 优化器学习速率 | 8e-5 ~ 1e-4 | `--lr <float>` | 第 195 行 (`default=1e-4`) | 第 289 行 (`LR = 1e-4`) |
-| **训练计算精度** | 浮点运算精度模式 | `bf16` | `--precision` | 第 197 行 (`default="bf16"`)| 第 280 行 (`recipes_...fp16.py`)|
-| **文本提取设备** | Qwen3.5-9B 特征提取宿主 | `cpu` | `--text_device` | 第 199 行 (`default="cpu"`)| 云端 16GB 默认使用 `cuda` |
-| **任务标识/名称** | 输出权重文件的前缀命名 | 字符串 | `--run_name` | 第 183 行 (`default="ness_style"`)| 第 283 行 (`RUN_NAME = ...`) |
-| **数据集路径** | 输入图片与 txt 所在文件夹 | 绝对路径 | `--data_dir` | 第 175 行 | 第 65 行 (`target_data_dir`) |
-| **模型库路径** | ComfyUI 模型存放根目录 | 绝对路径 | `--comfy_models_dir`| 第 177 行 | 第 61 ~ 63 行 (`/tmp/models`) |
+| **LoRA名称与文件夹** | 产出权重文件前缀与专属保存子文件夹名 | 字符串 | `--lora_name` (或 `--run_name`) | 第 182 行 (`default="ness_style"`) | 第 283 行 (`RUN_NAME = ...`) |
+| **自定义触发词** | 自动注入每张图片标注首部的触发词 | 字符串 | `--trigger_word` | 第 184 行 (`default=""`) | 写入标注文本首部 |
+| **单图重复次数** | 每张图片在单轮中的采样倍数 | 4 ~ 15 | `--repeats <int>` | 第 188 行 (`default=10`) | 第 65 行 (目录名 `10_...`) |
+| **训练轮数 (Epochs)** | 全量数据集完整遍历轮次 | 3 ~ 8 | `--epochs <int>` | 第 190 行 (`default=6`) | 影响总迭代次数换算 |
+| **优化器步数 (Steps)** | 梯度反向传播总更新步数 | 200 ~ 800 | `--steps <int>` | 第 192 行 (`default=600`) | 第 288 行 (`STEPS = 600`) |
+| **LoRA 矩阵秩 (Rank)** | 权重低秩适应矩阵维度 | 16 ~ 64 | `--rank <int>` | 第 194 行 (`default=32`) | 第 286 行 (`DIM = 32`) |
+| **LoRA 缩放倍率 (Alpha)**| 权重注入强度系数 | 16.0 ~ 64.0 | `--alpha <float>` | 第 196 行 (`default=32.0`)| 第 287 行 (`ALPHA = 32.0`) |
+| **学习率 (LR)** | 优化器学习速率 | 8e-5 ~ 1e-4 | `--lr <float>` | 第 198 行 (`default=1e-4`) | 第 289 行 (`LR = 1e-4`) |
+| **训练计算精度** | 浮点运算精度模式 | `bf16` | `--precision` | 第 200 行 (`default="bf16"`)| 第 280 行 (`recipes_...fp16.py`)|
+| **文本提取设备** | Qwen3.5-9B 特征提取宿主 | `cpu` | `--text_device` | 第 202 行 (`default="cpu"`)| 云端 16GB 默认使用 `cuda` |
+| **数据集路径** | 输入图片与 txt 所在文件夹 | 绝对路径 | `--data_dir` | 第 176 行 | 第 65 行 (`target_data_dir`) |
+| **模型库路径** | ComfyUI 模型存放根目录 | 绝对路径 | `--comfy_models_dir`| 第 178 行 | 第 61 ~ 63 行 (`/tmp/models`) |
 
 ---
 
@@ -31,6 +32,8 @@
 ```powershell
 python train_local.py `
     --data_dir "C:/Users/白音华/Pictures/ness" `
+    --lora_name "my_character_v1" `
+    --trigger_word "my_character_char" `
     --repeats 10 `
     --epochs 6 `
     --steps 600 `
@@ -38,6 +41,9 @@ python train_local.py `
     --alpha 32.0 `
     --lr 1e-4 `
     --precision bf16 `
+    --text_device cpu `
+    --copy_to_comfy_loras
+```
     --text_device cpu `
     --run_name "my_lora_name" `
     --copy_to_comfy_loras

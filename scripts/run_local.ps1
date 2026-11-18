@@ -58,17 +58,28 @@ if (Test-Path $defaultComfyModels) {
 }
 
 # 3. 运行参数确认
+$defaultLoraName = "my_lora"
+$defaultTriggerWord = ""
+
 Write-Host "`n[3/4] Default Training Profile for RTX 4070 (8GB VRAM):" -ForegroundColor Cyan
+Write-Host " - LoRA Name:      $defaultLoraName (output subfolder and weights prefix)"
+Write-Host " - Trigger Word:   $($defaultTriggerWord ? $defaultTriggerWord : '(None, using original captions)')"
 Write-Host " - Precision:      BF16 (Ada Lovelace Tensor Core acceleration)"
 Write-Host " - Text Device:    CPU (prevents Qwen3.5-9B OOM on 8GB VRAM)"
 Write-Host " - VAE Device:     CUDA (flux2-vae_small, ~168MB)"
 Write-Host " - Steps / Epochs: 600 Steps / 6 Epochs (Repeats=10)"
 Write-Host " - LoRA Dim/Alpha: Rank=32, Alpha=32.0 (Full 1.0 Strength)"
 Write-Host " - Learning Rate:  1e-4"
-Write-Host " - Output Path:    $outputDir"
+Write-Host " - Output Path:    $outputDir\$defaultLoraName"
 
 $confirm = Read-Host "`nPress Enter to start training immediately (or type 'custom' to adjust arguments)"
 if ($confirm -eq "custom") {
+    $customName = Read-Host "Enter custom LoRA name / folder name [$defaultLoraName]"
+    if ($customName) { $defaultLoraName = $customName }
+
+    $customTrigger = Read-Host "Enter custom trigger word (e.g. makima_char) [None]"
+    if ($customTrigger) { $defaultTriggerWord = $customTrigger }
+
     $customData = Read-Host "Enter dataset path [$defaultDataDir]"
     if ($customData) { $defaultDataDir = $customData }
     
@@ -83,6 +94,8 @@ if ($confirm -eq "custom") {
         --data_dir "$defaultDataDir" `
         --comfy_models_dir "$defaultComfyModels" `
         --output_dir "$outputDir" `
+        --lora_name "$defaultLoraName" `
+        --trigger_word "$defaultTriggerWord" `
         --steps $customSteps `
         --precision $customPrecision `
         --copy_to_comfy_loras
@@ -92,6 +105,8 @@ if ($confirm -eq "custom") {
         --data_dir "$defaultDataDir" `
         --comfy_models_dir "$defaultComfyModels" `
         --output_dir "$outputDir" `
+        --lora_name "$defaultLoraName" `
+        --trigger_word "$defaultTriggerWord" `
         --copy_to_comfy_loras
 }
 

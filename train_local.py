@@ -15,12 +15,25 @@ if py_scripts_dir.exists():
     os.environ["PATH"] = str(py_scripts_dir) + os.pathsep + os.environ.get("PATH", "")
 
 # 防御 Windows 中文用户名路径导致 Triton / TorchInductor 发生 UnicodeDecodeError 崩溃
-safe_temp_dir = (Path(__file__).resolve().parent / "workspace" / "temp").resolve()
-safe_temp_dir.mkdir(parents=True, exist_ok=True)
-os.environ["TEMP"] = str(safe_temp_dir)
-os.environ["TMP"] = str(safe_temp_dir)
-os.environ["TRITON_CACHE_DIR"] = str(safe_temp_dir / "triton")
-os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(safe_temp_dir / "inductor")
+# 优先使用纯 ASCII 根路径（如 C:/tmp/moss_pipeline），彻底阻绝 Triton C++ getenv utf-8 致命解析异常
+root_c = Path("C:/tmp/moss_pipeline")
+try:
+    root_c.mkdir(parents=True, exist_ok=True)
+    safe_temp_dir = root_c
+except Exception:
+    safe_temp_dir = (Path(__file__).resolve().parent / "workspace" / "temp").resolve()
+    safe_temp_dir.mkdir(parents=True, exist_ok=True)
+
+for sub_name in ["triton", "dump", "override", "inductor"]:
+    (safe_temp_dir / sub_name).mkdir(parents=True, exist_ok=True)
+
+safe_temp_posix = safe_temp_dir.as_posix()
+os.environ["TEMP"] = safe_temp_posix
+os.environ["TMP"] = safe_temp_posix
+os.environ["TRITON_CACHE_DIR"] = f"{safe_temp_posix}/triton"
+os.environ["TRITON_DUMP_DIR"] = f"{safe_temp_posix}/dump"
+os.environ["TRITON_OVERRIDE_DIR"] = f"{safe_temp_posix}/override"
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"{safe_temp_posix}/inductor"
 
 def print_banner(msg: str):
     width = 78
@@ -558,6 +571,7 @@ TRANSFORMER = "{transformer_filename}"
 {memory_profile_str}
 SAMPLE_EVERY = 0
 VALIDATE_EVERY = 0
+TUNE = "off"
 FP16_FIX = "none"
 PRECISION = "{args.precision}"
 DIM = {args.rank}

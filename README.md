@@ -35,6 +35,7 @@ kaggle_moss_lora_pipeline/
 ├── train_moss.py                  # 生产级云端一键执行脚本 (Kaggle 专用)
 ├── train_local.py                 # 生产级本地消费级显卡执行引擎 (Windows 专属)
 ├── docs/
+│   ├── parameter_configuration_reference.md # 参数调节位置与实操修改手册 (行号/CLI/配置速查)
 │   ├── hyperparameter_tuning_guide.md # 画风与人物超参数调优指南 (Repeats/Epochs/打标解耦)
 │   ├── local_deployment_guide.md  # 消费级显卡 8GB 显存控制与 BF16 本地部署深度指南
 │   ├── troubleshooting_matrix.md  # 25 个迭代版本的 Exhaustive 排错矩阵与踩坑实录
@@ -110,7 +111,10 @@ pip install -r requirements-local.txt
 
 ## 📖 核心技术文档体系 (Documentation)
 
-1. **超参数调优指南 (画风 vs 人物)**：
+1. **参数调节位置与实操修改手册 (Where & How to Configure)**：
+   精准罗列图片重复次数（Repeats）、训练轮数（Epochs）、优化步数（Steps）、Rank/Alpha、学习率等在本地与云端各文件中的确切行号与命令行传参方法：
+   👉 [docs/parameter_configuration_reference.md](docs/parameter_configuration_reference.md)
+2. **超参数调优指南 (画风 vs 人物)**：
    深入推演 Token Packing 批次换算机制，系统对比画风与人物在图片重复次数、轮数、步数、Rank/Alpha 以及打标剪枝（Token Pruning）上的本质区别：
    👉 [docs/hyperparameter_tuning_guide.md](docs/hyperparameter_tuning_guide.md)
 2. **消费级显卡本地部署指南**：

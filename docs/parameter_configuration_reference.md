@@ -19,7 +19,10 @@
 | **训练计算精度** | 浮点运算精度模式 | `bf16` | `--precision` | 第 200 行 (`default="bf16"`)| 第 280 行 (`recipes_...fp16.py`)|
 | **文本提取设备** | Qwen3.5-9B 特征提取宿主 | `cpu` | `--text_device` | 第 202 行 (`default="cpu"`)| 云端 16GB 默认使用 `cuda` |
 | **数据集路径** | 输入图片与 txt 所在文件夹 | 绝对路径 | `--data_dir` | 第 176 行 | 第 65 行 (`target_data_dir`) |
-| **模型库路径** | ComfyUI 模型存放根目录 | 绝对路径 | `--comfy_models_dir`| 第 178 行 | 第 61 ~ 63 行 (`/tmp/models`) |
+| **ComfyUI模型库路径** | ComfyUI 模型存放根目录 | 绝对路径 | `--comfy_models_dir`| 第 178 行 | 第 61 ~ 63 行 (`/tmp/models`) |
+| **DiT 底模单文件** | 自选 MOSS-Image 底模文件路径 | 绝对路径 | `--transformer_path` | 第 180 行 (`default=""`) | 自动下载 |
+| **文本编码器单文件** | 自选 Qwen3.5-9B 编码器文件路径 | 绝对路径 | `--text_encoder_path` | 第 182 行 (`default=""`) | 自动下载 |
+| **图像 VAE 单文件** | 自选 FLUX.2 VAE 权重文件路径 | 绝对路径 | `--vae_path` | 第 184 行 (`default=""`) | 自动下载 |
 
 ---
 

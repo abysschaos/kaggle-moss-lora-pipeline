@@ -18,14 +18,14 @@ class ModernLocalTrainerGUI:
         self.root = root
         self.root.title("OpenMOSS MOSS-Image 本地 LoRA 训练引擎控制台")
         
-        # 窗口大小与屏幕居中适配 (适配 1080P 125%/150% 笔记本屏幕)
-        win_w, win_h = 1080, 760
+        # 窗口大小与屏幕居中适配 (适配各类笔记本与显示器)
+        win_w, win_h = 1120, 800
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         pos_x = max(0, (screen_w - win_w) // 2)
         pos_y = max(0, (screen_h - win_h) // 2)
         self.root.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
-        self.root.minsize(960, 680)
+        self.root.minsize(1000, 700)
 
         # 调色盘与字体定义 (现代深色主题)
         self.bg_dark = "#181825"
@@ -53,6 +53,12 @@ class ModernLocalTrainerGUI:
         self.var_output_dir = tk.StringVar(value=str(Path("./output").resolve()))
         self.var_copy_comfy = tk.BooleanVar(value=True)
 
+        # 自选底模与组件权重路径
+        self.var_transformer_path = tk.StringVar(value="")
+        self.var_text_encoder_path = tk.StringVar(value="")
+        self.var_vae_path = tk.StringVar(value="")
+        self.var_models_status = tk.StringVar(value="点击【🔍 自动扫描】或手动点选文件")
+
         self.var_repeats = tk.IntVar(value=10)
         self.var_epochs = tk.IntVar(value=6)
         self.var_steps = tk.IntVar(value=600)
@@ -72,6 +78,9 @@ class ModernLocalTrainerGUI:
         self.recalculate_math()
         self.update_output_preview()
 
+        # 启动时执行一次静默自动底模探测并预填
+        self.auto_scan_models(silent=True)
+
         # 监听名称变动实时刷新产出路径预览
         self.var_lora_name.trace_add("write", lambda *args: self.update_output_preview())
 
@@ -82,7 +91,7 @@ class ModernLocalTrainerGUI:
         style.configure("Card.TFrame", background=self.card_bg)
         style.configure("TLabel", background=self.card_bg, foreground=self.text_main, font=(self.font_family, 9))
         style.configure("Sub.TLabel", background=self.card_bg, foreground=self.text_sub, font=(self.font_family, 8))
-        style.configure("Header.TLabel", background=self.card_bg, foreground=self.accent_blue, font=(self.font_family, 11, "bold"))
+        style.configure("Header.TLabel", background=self.card_bg, foreground=self.accent_blue, font=(self.font_family, 10, "bold"))
         style.configure("TCheckbutton", background=self.card_bg, foreground=self.text_main, font=(self.font_family, 9))
         style.configure("TCombobox", fieldbackground=self.input_bg, background=self.card_bg, foreground=self.text_main)
 
@@ -104,13 +113,13 @@ class ModernLocalTrainerGUI:
         main_paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg=self.bg_dark, sashwidth=4)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        # 左侧控制面板 (带滚动支持，防止在小屏幕笔记本身上被挤压)
-        left_outer = tk.Frame(main_paned, bg=self.card_bg, width=540)
-        main_paned.add(left_outer, minsize=480)
+        # 左侧控制面板 (带平滑滚动条，确保小屏幕不被挤压)
+        left_outer = tk.Frame(main_paned, bg=self.card_bg, width=580)
+        main_paned.add(left_outer, minsize=520)
 
         # 右侧实时监控与日志控制台
         right_container = tk.Frame(main_paned, bg=self.card_bg)
-        main_paned.add(right_container, minsize=420)
+        main_paned.add(right_container, minsize=440)
 
         self.build_left_scrollable(left_outer)
         self.build_right_panel(right_container)
@@ -127,6 +136,16 @@ class ModernLocalTrainerGUI:
         except Exception:
             return "PyTorch 未加载"
 
+    def open_in_explorer(self, target_path: str):
+        """在 Windows 资源管理器中打开指定文件夹，不存在则先自动创建。"""
+        try:
+            p = Path(target_path).resolve()
+            if not p.exists():
+                p.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(p))
+        except Exception as e:
+            messagebox.showerror("打开文件夹失败", f"无法打开指定路径:\n{target_path}\n错误信息: {e}")
+
     def build_left_scrollable(self, parent):
         canvas = tk.Canvas(parent, bg=self.card_bg, highlightthickness=0)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -140,13 +159,12 @@ class ModernLocalTrainerGUI:
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        # 绑定鼠标滚轮
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         canvas.bind_all("<MouseWheel>", on_mousewheel)
 
-        canvas.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
-        scrollbar.pack(side="right", fill="y", pady=8)
+        canvas.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+        scrollbar.pack(side="right", fill="y", pady=6)
 
         self.build_left_controls(scrollable_frame)
 
@@ -155,7 +173,7 @@ class ModernLocalTrainerGUI:
         preset_frame = tk.Frame(parent, bg=self.card_bg)
         preset_frame.pack(fill=tk.X, pady=(0, 6))
         
-        tk.Label(preset_frame, text="快速模板预设：", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).pack(side=tk.LEFT, padx=(4, 6), pady=6)
+        tk.Label(preset_frame, text="快速模板预设：", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).pack(side=tk.LEFT, padx=(4, 6), pady=4)
 
         btn_style = tk.Button(preset_frame, text="🎨 艺术画风模板", bg="#45475a", fg=self.text_main,
                               activebackground=self.accent_blue, font=(self.font_family, 8, "bold"),
@@ -187,24 +205,67 @@ class ModernLocalTrainerGUI:
         lbl_preview = tk.Label(name_card, textvariable=self.var_output_preview, bg=self.card_bg, fg=self.accent_green, font=(self.font_family, 8))
         lbl_preview.grid(row=3, column=0, columnspan=2, sticky=tk.W)
 
-        # 3. 资产与路径卡片
-        path_card = tk.LabelFrame(parent, text=" 📂 资产与目录设置 ", bg=self.card_bg, fg=self.accent_blue,
+        # 3. 训练底模与组件权重设置卡片 (新增高亮功能：支持自选单文件 + 目录直达)
+        model_card = tk.LabelFrame(parent, text=" 📦 训练底模与组件权重设置 (支持自选或自动探测) ", bg=self.card_bg, fg=self.accent_blue,
+                                   font=(self.font_family, 9, "bold"), padx=10, pady=6)
+        model_card.pack(fill=tk.X, pady=(0, 6))
+
+        # 顶端自动扫描按钮与状态展示
+        scan_bar = tk.Frame(model_card, bg=self.card_bg)
+        scan_bar.grid(row=0, column=0, columnspan=4, sticky=tk.EW, pady=(0, 4))
+        btn_scan = tk.Button(scan_bar, text="🔍 自动扫描识别本地模型", bg="#313244", fg=self.accent_blue,
+                             activebackground=self.accent_blue, font=(self.font_family, 8, "bold"),
+                             relief=tk.FLAT, padx=8, pady=2, cursor="hand2", command=lambda: self.auto_scan_models(silent=False))
+        btn_scan.pack(side=tk.LEFT)
+        lbl_mstat = tk.Label(scan_bar, textvariable=self.var_models_status, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8))
+        lbl_mstat.pack(side=tk.LEFT, padx=8)
+
+        # (1) DiT 底模单文件选择 + 直达目录
+        self.create_file_row_with_folder(
+            model_card, "DiT 底模文件:", self.var_transformer_path,
+            browse_title="选择 MOSS-Image 底模文件 (moss_image_heal_bf16.safetensors 等)",
+            folder_path="models/diffusion_models", folder_tooltip="📂 打开底模放置目录",
+            row_idx=1
+        )
+
+        # (2) 文本编码器单文件选择 + 直达目录
+        self.create_file_row_with_folder(
+            model_card, "文本编码器文件:", self.var_text_encoder_path,
+            browse_title="选择 Qwen3.5-9B 文本编码器 (qwen3.5_9b_bf16.safetensors 等)",
+            folder_path="models/text_encoders", folder_tooltip="📂 打开编码器放置目录",
+            row_idx=2
+        )
+
+        # (3) VAE 单文件选择 + 直达目录
+        self.create_file_row_with_folder(
+            model_card, "图像 VAE 文件:", self.var_vae_path,
+            browse_title="选择 FLUX.2 VAE 文件 (flux2-vae_small.safetensors)",
+            folder_path="models/vae", folder_tooltip="📂 打开 VAE 放置目录",
+            row_idx=3
+        )
+
+        # 4. 数据集与产出目录卡片 (带打开目录按钮)
+        path_card = tk.LabelFrame(parent, text=" 📂 数据集与产出目录 ", bg=self.card_bg, fg=self.accent_blue,
                                   font=(self.font_family, 9, "bold"), padx=10, pady=6)
         path_card.pack(fill=tk.X, pady=(0, 6))
 
-        self.create_path_row(path_card, "训练图片目录:", self.var_data_dir, self.browse_data_dir, 0)
+        # 训练图片目录
+        self.create_dir_row_with_open(path_card, "训练图片目录:", self.var_data_dir, self.browse_data_dir, 0)
         stat_lbl = tk.Label(path_card, textvariable=self.var_dataset_stat, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8))
-        stat_lbl.grid(row=1, column=1, sticky=tk.W, pady=(0, 3))
+        stat_lbl.grid(row=1, column=1, sticky=tk.W, pady=(0, 2))
 
-        self.create_path_row(path_card, "ComfyUI模型库:", self.var_comfy_models, self.browse_comfy_dir, 2)
-        self.create_path_row(path_card, "结果存放根目录:", self.var_output_dir, self.browse_output_dir, 3)
+        # 结果存放根目录
+        self.create_dir_row_with_open(path_card, "结果存放根目录:", self.var_output_dir, self.browse_output_dir, 2)
 
-        chk_comfy = tk.Checkbutton(path_card, text="训练完成后自动复制权重至 ComfyUI models/loras 专属子目录",
+        # ComfyUI 模型库路径
+        self.create_dir_row_with_open(path_card, "ComfyUI模型库:", self.var_comfy_models, self.browse_comfy_dir, 3)
+
+        chk_comfy = tk.Checkbutton(path_card, text="训练完成后自动同步复制权重至 ComfyUI models/loras 专属子目录",
                                    variable=self.var_copy_comfy, bg=self.card_bg, fg=self.text_main,
                                    selectcolor=self.input_bg, activebackground=self.card_bg, font=(self.font_family, 8))
-        chk_comfy.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(3, 1))
+        chk_comfy.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(3, 1))
 
-        # 4. 超参数配置卡片
+        # 5. 超参数配置卡片
         hp_card = tk.LabelFrame(parent, text=" ⚙️ 核心训练超参数 ", bg=self.card_bg, fg=self.accent_blue,
                                 font=(self.font_family, 9, "bold"), padx=10, pady=6)
         hp_card.pack(fill=tk.X, pady=(0, 6))
@@ -260,14 +321,82 @@ class ModernLocalTrainerGUI:
         cb_txt_dev.pack(side=tk.LEFT, padx=(0, 6))
         tk.Label(dev_f, text="(8GB 显卡请锁定 CPU 避免 OOM)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
 
-    def create_path_row(self, parent, label_text, var, browse_cmd, row_idx):
+    def create_file_row_with_folder(self, parent, label_text, var, browse_title, folder_path, folder_tooltip, row_idx):
+        """创建带文件选择按钮与对应放置目录直达按钮的行。"""
         tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=14, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=2)
         ent = tk.Entry(parent, textvariable=var, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
         ent.grid(row=row_idx, column=1, sticky=tk.EW, padx=4, pady=2)
         parent.columnconfigure(1, weight=1)
-        btn = tk.Button(parent, text="浏览...", bg="#45475a", fg=self.text_main, relief=tk.FLAT, font=(self.font_family, 8),
-                        cursor="hand2", command=browse_cmd)
-        btn.grid(row=row_idx, column=2, padx=2, pady=2)
+
+        def browse_file():
+            selected = filedialog.askopenfilename(
+                title=browse_title,
+                filetypes=[("Safetensors模型", "*.safetensors"), ("所有模型", "*.safetensors *.pt *.bin"), ("所有文件", "*.*")]
+            )
+            if selected:
+                var.set(selected)
+                self.var_models_status.set("已手动自选模型权重")
+
+        btn_browse = tk.Button(parent, text="选择文件...", bg="#45475a", fg=self.text_main, relief=tk.FLAT, font=(self.font_family, 8),
+                               cursor="hand2", command=browse_file)
+        btn_browse.grid(row=row_idx, column=2, padx=2, pady=2)
+
+        btn_open_dir = tk.Button(parent, text="📂 打开放置目录", bg="#313244", fg=self.accent_green, relief=tk.FLAT, font=(self.font_family, 8),
+                                 cursor="hand2", command=lambda: self.open_in_explorer(folder_path))
+        btn_open_dir.grid(row=row_idx, column=3, padx=2, pady=2)
+
+    def create_dir_row_with_open(self, parent, label_text, var, browse_cmd, row_idx):
+        """创建带文件夹选择与直接打开文件夹按钮的行。"""
+        tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=14, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=2)
+        ent = tk.Entry(parent, textvariable=var, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
+        ent.grid(row=row_idx, column=1, sticky=tk.EW, padx=4, pady=2)
+        parent.columnconfigure(1, weight=1)
+
+        btn_browse = tk.Button(parent, text="浏览...", bg="#45475a", fg=self.text_main, relief=tk.FLAT, font=(self.font_family, 8),
+                               cursor="hand2", command=browse_cmd)
+        btn_browse.grid(row=row_idx, column=2, padx=2, pady=2)
+
+        btn_open_dir = tk.Button(parent, text="📂 打开目录", bg="#313244", fg=self.accent_green, relief=tk.FLAT, font=(self.font_family, 8),
+                                 cursor="hand2", command=lambda: self.open_in_explorer(var.get()))
+        btn_open_dir.grid(row=row_idx, column=3, padx=2, pady=2)
+
+    def auto_scan_models(self, silent=False):
+        """自动从 ComfyUI 模型库或项目 ./models 探测并预填模型路径。"""
+        try:
+            import train_local
+            found = train_local.probe_local_models(self.var_comfy_models.get())
+            all_found = True
+            if found["transformer"]:
+                self.var_transformer_path.set(str(found["transformer"]))
+            else:
+                all_found = False
+            
+            if found["text_encoder"]:
+                self.var_text_encoder_path.set(str(found["text_encoder"]))
+            else:
+                all_found = False
+
+            if found["vae"]:
+                self.var_vae_path.set(str(found["vae"]))
+            else:
+                all_found = False
+
+            if all_found:
+                self.var_models_status.set("✅ 底模/文本编码器/VAE 全部自动就绪！")
+                if not silent:
+                    messagebox.showinfo("扫描成功", "已成功自动检索并匹配到全部三大核心模型权重！\n路径已自动填入输入框。")
+            else:
+                missing = []
+                if not found["transformer"]: missing.append("DiT 底模")
+                if not found["text_encoder"]: missing.append("Qwen3.5 文本编码器")
+                if not found["vae"]: missing.append("FLUX.2 VAE")
+                self.var_models_status.set(f"⚠️ 尚缺: {', '.join(missing)}")
+                if not silent:
+                    messagebox.showwarning("部分缺失", f"未找到以下组件: {', '.join(missing)}\n请点击【📂 打开放置目录】将模型放入对应文件夹，或手动选择文件。")
+        except Exception as e:
+            self.var_models_status.set("扫描异常")
+            if not silent:
+                messagebox.showerror("扫描失败", f"自动探测异常: {e}")
 
     def update_output_preview(self):
         name = self.var_lora_name.get().strip()
@@ -322,6 +451,7 @@ class ModernLocalTrainerGUI:
         selected = filedialog.askdirectory(initialdir=self.var_comfy_models.get(), title="选择 ComfyUI 模型库目录")
         if selected:
             self.var_comfy_models.set(selected)
+            self.auto_scan_models(silent=True)
 
     def browse_output_dir(self):
         selected = filedialog.askdirectory(initialdir=self.var_output_dir.get(), title="选择权重产出保存根目录")
@@ -426,6 +556,15 @@ class ModernLocalTrainerGUI:
             "--text_device", self.var_text_device.get(),
             "--vae_device", self.var_vae_device.get()
         ]
+
+        # 自选单模型文件透传
+        if self.var_transformer_path.get().strip():
+            cmd.extend(["--transformer_path", self.var_transformer_path.get().strip()])
+        if self.var_text_encoder_path.get().strip():
+            cmd.extend(["--text_encoder_path", self.var_text_encoder_path.get().strip()])
+        if self.var_vae_path.get().strip():
+            cmd.extend(["--vae_path", self.var_vae_path.get().strip()])
+
         if self.var_copy_comfy.get():
             cmd.append("--copy_to_comfy_loras")
 

@@ -189,6 +189,12 @@ def main():
                         help="Path to folder containing source images and .txt captions")
     parser.add_argument("--comfy_models_dir", type=str, default="C:/dowmload idm/ComfyUI-aki-v3.2(1)/ComfyUI-aki-v3.2/ComfyUI/models",
                         help="Path to ComfyUI models directory containing diffusion_models, text_encoders, and vae")
+    parser.add_argument("--transformer_path", type=str, default="",
+                        help="Explicit path to MOSS-Image DiT transformer weights (.safetensors)")
+    parser.add_argument("--text_encoder_path", type=str, default="",
+                        help="Explicit path to Qwen3.5-9B text encoder weights (.safetensors)")
+    parser.add_argument("--vae_path", type=str, default="",
+                        help="Explicit path to FLUX.2 VAE weights (.safetensors)")
     parser.add_argument("--output_dir", type=str, default="./output",
                         help="Root directory to save final LoRA folders and checkpoints")
     parser.add_argument("--lora_name", "--run_name", type=str, default="ness_style", dest="lora_name",
@@ -252,16 +258,43 @@ def main():
         print(f"Error checking PyTorch/CUDA environment: {e}")
         sys.exit(1)
 
-    # 2. 智能检索本地已有的模型权重
+    # 2. 定位或自选模型权重 (支持用户点选单文件与自动探测混合模式)
     print_banner("Locating Base Models and Weights")
-    weights_info = probe_local_models(args.comfy_models_dir)
-    print(f"Found Transformer:  {weights_info['transformer']}")
-    print(f"Found Text Encoder: {weights_info['text_encoder']}")
-    print(f"Found VAE:          {weights_info['vae']}")
+    weights_info = {"transformer": None, "text_encoder": None, "vae": None}
+    auto_detected = None
+
+    # (1) DiT Transformer 判定
+    if args.transformer_path and os.path.exists(args.transformer_path):
+        weights_info["transformer"] = Path(args.transformer_path).resolve()
+        print(f" [User Specified] Transformer:  {weights_info['transformer']}")
+    else:
+        auto_detected = probe_local_models(args.comfy_models_dir)
+        weights_info["transformer"] = auto_detected["transformer"]
+        print(f" [Auto Probed]    Transformer:  {weights_info['transformer']}")
+
+    # (2) Text Encoder 判定
+    if args.text_encoder_path and os.path.exists(args.text_encoder_path):
+        weights_info["text_encoder"] = Path(args.text_encoder_path).resolve()
+        print(f" [User Specified] Text Encoder: {weights_info['text_encoder']}")
+    else:
+        if not auto_detected:
+            auto_detected = probe_local_models(args.comfy_models_dir)
+        weights_info["text_encoder"] = auto_detected["text_encoder"]
+        print(f" [Auto Probed]    Text Encoder: {weights_info['text_encoder']}")
+
+    # (3) VAE 判定
+    if args.vae_path and os.path.exists(args.vae_path):
+        weights_info["vae"] = Path(args.vae_path).resolve()
+        print(f" [User Specified] VAE:          {weights_info['vae']}")
+    else:
+        if not auto_detected:
+            auto_detected = probe_local_models(args.comfy_models_dir)
+        weights_info["vae"] = auto_detected["vae"]
+        print(f" [Auto Probed]    VAE:          {weights_info['vae']}")
 
     if not weights_info["transformer"] or not weights_info["text_encoder"] or not weights_info["vae"]:
         raise FileNotFoundError(
-            "Missing core weights! Ensure MOSS-Image-heal (or base), Qwen3.5-9B, and FLUX.2 VAE exist in your ComfyUI models folder."
+            "Missing core weights! Ensure MOSS-Image DiT, Qwen3.5-9B, and FLUX.2 VAE exist or specify their paths explicitly."
         )
 
     # 构建统一模型映射目录 (便于 KohakuMossTrainer 结构化索引)

@@ -29,6 +29,7 @@
 ```
 kaggle_moss_lora_pipeline/
 ├── README.md                      # 项目核心说明与双轨使用指南
+├── install_windows.bat            # Windows 专属一键自动部署虚拟环境与 CUDA 依赖
 ├── launch_ui.bat                  # Windows 专属一键双击启动 GUI 控制面板
 ├── gui_local.py                   # 现代极简本地训练 GUI (图形化参数调节/模板切换/实时日志)
 ├── train_local.py                 # 生产级本地消费级显卡执行引擎 (Windows 专属)
@@ -37,6 +38,7 @@ kaggle_moss_lora_pipeline/
 ├── requirements-local.txt         # 本地 Windows 平台依赖清单
 ├── kernel-metadata.json           # Kaggle CLI 专用元数据配置
 ├── docs/
+│   ├── local_installation_guide.md # Windows 本地部署与环境安装完全手册 (零基础一键上手)
 │   ├── parameter_configuration_reference.md # 参数调节位置与实操修改手册 (行号/CLI/配置速查)
 │   ├── hyperparameter_tuning_guide.md # 画风与人物超参数调优指南 (Repeats/Epochs/打标解耦)
 │   ├── local_deployment_guide.md  # 消费级显卡 8GB 显存控制与 BF16 本地部署深度指南
@@ -44,6 +46,7 @@ kaggle_moss_lora_pipeline/
 │   ├── dit_flow_matching_guide.md # 5B DiT 与 Flow Matching 连续流训练超参数理论
 │   └── comfyui_inference_guide.md # ComfyUI 官方原生推理规范 (CFG 3.0 / Shift 5.0)
 └── scripts/
+    ├── install.ps1                # 本地环境一键安装脚本 (PowerShell 版)
     ├── launch_ui.ps1              # 本地 GUI 启动脚本 (PowerShell 版)
     ├── run_local.ps1              # 本地一键启动与硬件自检交互式脚本 (CLI 版)
     ├── push_to_kaggle.ps1         # 本地一键推送任务至 Kaggle 云端
@@ -57,11 +60,16 @@ kaggle_moss_lora_pipeline/
 ### 1. 适用场景
 适用于拥有个人电脑或游戏笔记本（例如配备 RTX 4070 Laptop 8GB / RTX 4060 8GB / RTX 3060 12GB）的用户，追求本地数据隐私、免排队即时调试与 4.5 倍以上的极速迭代效率。
 
-### 2. 环境安装
-确保本地安装了支持 CUDA 的 PyTorch（建议 CUDA 12.1 或 12.4）：
-```powershell
-pip install -r requirements-local.txt
-```
+### 2. 环境一键安装 (极简部署)
+全新设备直接双击运行根目录下的 **`install_windows.bat`**（或执行 `.\scripts\install.ps1`）：
+- 自动检测 Python 64-bit 与 Git 环境；
+- 自动建立 `venv` 纯净隔离虚拟环境；
+- 自动安装带 **CUDA 12.4** 的 PyTorch 与 TorchVision；
+- 自动安装 `requirements-local.txt` 辅助依赖；
+- 自动初始化预创标准资产目录（`models/`、`dataset/`、`output/`）。
+
+详细图文指导与底模获取，请参考：
+👉 [docs/local_installation_guide.md](docs/local_installation_guide.md)
 
 ### 3. 一键启动方式
 
@@ -124,7 +132,10 @@ pip install -r requirements-local.txt
 
 ## 📖 核心技术文档体系 (Documentation)
 
-1. **参数调节位置与实操修改手册 (Where & How to Configure)**：
+1. **Windows 本地部署与环境安装完全手册 (New)**：
+   包含前置硬件环境自检、Python/Git 准备、`install_windows.bat` 一键部署、底模下载源与放置目录详解，以及 ComfyUI 现有资产零拷贝直连指南：
+   👉 [docs/local_installation_guide.md](docs/local_installation_guide.md)
+2. **参数调节位置与实操修改手册 (Where & How to Configure)**：
    精准罗列图片重复次数（Repeats）、训练轮数（Epochs）、优化步数（Steps）、Rank/Alpha、学习率等在本地与云端各文件中的确切行号与命令行传参方法：
    👉 [docs/parameter_configuration_reference.md](docs/parameter_configuration_reference.md)
 2. **超参数调优指南 (画风 vs 人物)**：

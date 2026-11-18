@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.log
+venv/
+.venv/
+env/
 
 # Model Weights & Data (Too large for Git)
 *.safetensors
@@ -10,6 +13,8 @@ __pycache__/
 *.bin
 *.zip
 *.tar.gz
+models/
+dataset/
 runs/
 checkpoints/
 final_output*/

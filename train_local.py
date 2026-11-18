@@ -494,10 +494,11 @@ def main():
     is_int8_transformer = "int8" in transformer_filename.lower()
     
     if vram_gb <= 10.0:
-        recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_8g.py")'
+        # 针对 8G 消费级显卡（如 RTX 3070 / 4060 等），应用官方极限 4G 压制配方：两层流式环形缓冲 + 激活与梯度全面卸载 + CPU 优化器
+        recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_6g.py")'
         max_tokens_val = 4352
-        memory_profile_str = 'MEMORY_PROFILE = "minimal"'
-        print(f" [VRAM Auto-Tune] Detected {vram_gb:.1f} GB VRAM (<=10GB). Applied vram_8g.py with minimal streaming profile.")
+        memory_profile_str = 'MEMORY_PROFILE = "ckpt-ring2-actoff-optcpu-gradoff"'
+        print(f" [VRAM Auto-Tune] Detected {vram_gb:.1f} GB VRAM (<=10GB). Applied vram_6g.py (extreme ~3.5G-4G VRAM profile).")
     elif vram_gb <= 14.0:
         recipe_import = 'use_config("../moss/recipes/recipes_lora_12g_stream.py")'
         max_tokens_val = 8192

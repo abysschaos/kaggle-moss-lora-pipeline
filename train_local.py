@@ -136,11 +136,12 @@ def probe_local_models(comfy_models_dir: str = None) -> dict:
         "base_weights_dir": None
     }
 
-    # 1. 查找 Transformer (优先选择 MOSS-Image-heal 修复版)
+    # 1. 查找 Transformer (消费级显卡优先选择 MOSS-Image-heal int8 旋转量化版，防御 8G/12G 显存 OOM)
     heal_candidates = [
+        "**/moss_image_heal_int8_convrot.safetensors",
+        "**/moss_image_base_int8_convrot.safetensors",
         "**/moss_image_heal_bf16.safetensors",
         "**/moss_image_heal_fp16.safetensors",
-        "**/moss_image_heal_int8_convrot.safetensors",
         "**/moss_image_base_bf16.safetensors",
         "**/moss_image_base.safetensors"
     ]
@@ -481,6 +482,34 @@ def main():
     sanitized_weights_dir = sanitize_path(models_stage_dir)
     transformer_filename = target_transformer.name
 
+    # 动态检测当前硬件 VRAM，精准匹配显存优化层
+    vram_gb = 16.0
+    try:
+        import torch
+        if torch.cuda.is_available():
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    except Exception:
+        pass
+
+    is_int8_transformer = "int8" in transformer_filename.lower()
+    
+    if vram_gb <= 10.0:
+        recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_8g.py")'
+        max_tokens_val = 4352
+        memory_profile_str = 'MEMORY_PROFILE = "minimal"'
+        print(f" [VRAM Auto-Tune] Detected {vram_gb:.1f} GB VRAM (<=10GB). Applied vram_8g.py with minimal streaming profile.")
+    elif vram_gb <= 14.0:
+        recipe_import = 'use_config("../moss/recipes/recipes_lora_12g_stream.py")'
+        max_tokens_val = 8192
+        memory_profile_str = 'MEMORY_PROFILE = "low"'
+        print(f" [VRAM Auto-Tune] Detected {vram_gb:.1f} GB VRAM (<=14GB). Applied recipes_lora_12g_stream.py.")
+    else:
+        recipe_import = 'use_config("../moss/recipes/recipes_lora_16g_fp16.py")'
+        max_tokens_val = 16384
+        memory_profile_str = ""
+
+    base_prec_str = 'BASE_PRECISION = "int8"' if is_int8_transformer else ""
+
     data_cfg_code = f"""
 data_root = "{sanitized_data_root}"
 WEIGHTS = "{sanitized_weights_dir}"
@@ -499,7 +528,7 @@ TARGET_AREA = 1024 * 1024
 UPSCALE = "never"
 ASPECT_RANGE = (0.33, 3.0)
 BATCHING = "tokens"
-MAX_TOKENS = 16384
+MAX_TOKENS = {max_tokens_val}
 OVERLONG = "drop"
 CAPTION = {{
     "template": "nl",
@@ -519,11 +548,13 @@ VAE_ENCODE = {{"compile": "off"}}
     train_cfg_code = f"""
 from kohakuengine import use_config
 
-use_config("../moss/recipes/recipes_lora_16g_fp16.py")
+{recipe_import}
 use_config("{args.lora_name}_local_data.py")
 
 RUN_NAME = "{args.lora_name}"
 TRANSFORMER = "{transformer_filename}"
+{base_prec_str}
+{memory_profile_str}
 FP16_FIX = "none"
 PRECISION = "{args.precision}"
 DIM = {args.rank}

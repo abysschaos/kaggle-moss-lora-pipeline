@@ -272,13 +272,14 @@ def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, r
                 print(f" Warning cleaning obsolete dir {sub_dir.name}: {e}")
 
     # 3. 若检测到旧数据残留被清理，同步重置 cache 目录以防脏缓存污染
-    cache_dir = workspace_data_dir / "cache"
-    if orphan_purged > 0 and cache_dir.exists():
-        try:
-            shutil.rmtree(str(cache_dir))
-            print(f" [Cleanup] Purged {orphan_purged} orphan items and reset stale dataset cache directory")
-        except Exception as e:
-            print(f" Warning resetting dataset cache: {e}")
+    if orphan_purged > 0:
+        cache_dir = workspace_data_dir / "cache"
+        if cache_dir.exists():
+            try:
+                shutil.rmtree(str(cache_dir))
+            except Exception as e:
+                print(f" Warning resetting dataset cache: {e}")
+        print(f" [Cleanup] Purged {orphan_purged} orphan files from previous runs to align 1:1 with active dataset")
 
     trigger_clean = trigger_word.strip() if trigger_word else ""
     if trigger_clean:

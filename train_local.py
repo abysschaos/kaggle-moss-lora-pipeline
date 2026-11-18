@@ -9,6 +9,11 @@ import subprocess
 import time
 from pathlib import Path
 
+# 确保当前 Python 解释器配套的 Scripts 目录进入系统 PATH，保障 kogine、accelerate 等 CLI 工具顺利执行
+py_scripts_dir = Path(sys.executable).parent / "Scripts"
+if py_scripts_dir.exists():
+    os.environ["PATH"] = str(py_scripts_dir) + os.pathsep + os.environ.get("PATH", "")
+
 def print_banner(msg: str):
     width = 78
     print("=" * width)

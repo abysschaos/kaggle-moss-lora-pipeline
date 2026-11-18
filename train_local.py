@@ -234,6 +234,7 @@ def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, r
     """
     将散装图集自动标准化为 Kohya 规范的 <repeats>_<name> 结构。
     支持自定义触发词自动注入：若提供了 trigger_word 且原标注首部未包含，则自动前置注入。
+    严格执行孤儿文件清理与缓存一致性维护，确保工作区图集与源目录 1:1 严格对齐。
     """
     target_folder = workspace_data_dir / f"{repeats}_{lora_name}"
     target_folder.mkdir(parents=True, exist_ok=True)
@@ -245,6 +246,40 @@ def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, r
     if len(raw_images) == 0:
         raise ValueError(f"No image files found in {source_data_dir}")
 
+    # 构建当前有效图片与标注文件名称集合
+    valid_img_names = {img.name for img in raw_images}
+    valid_txt_names = {f"{img.stem}.txt" for img in raw_images}
+
+    # 1. 扫描并彻底清理 target_folder 内历史遗留的孤儿文件（旧图与旧标注）
+    orphan_purged = 0
+    for existing_file in list(target_folder.iterdir()):
+        if existing_file.is_file():
+            if existing_file.name not in valid_img_names and existing_file.name not in valid_txt_names:
+                try:
+                    existing_file.unlink()
+                    orphan_purged += 1
+                except Exception as e:
+                    print(f" Warning deleting orphan file {existing_file.name}: {e}")
+
+    # 2. 清理 workspace_data_dir 下其他非当前 target_folder 的陈旧数据集目录
+    for sub_dir in list(workspace_data_dir.iterdir()):
+        if sub_dir.is_dir() and sub_dir.name != "cache" and sub_dir.name != target_folder.name:
+            try:
+                shutil.rmtree(str(sub_dir))
+                print(f" [Cleanup] Removed obsolete dataset directory from previous runs: {sub_dir.name}")
+                orphan_purged += 1
+            except Exception as e:
+                print(f" Warning cleaning obsolete dir {sub_dir.name}: {e}")
+
+    # 3. 若检测到旧数据残留被清理，同步重置 cache 目录以防脏缓存污染
+    cache_dir = workspace_data_dir / "cache"
+    if orphan_purged > 0 and cache_dir.exists():
+        try:
+            shutil.rmtree(str(cache_dir))
+            print(f" [Cleanup] Purged {orphan_purged} orphan items and reset stale dataset cache directory")
+        except Exception as e:
+            print(f" Warning resetting dataset cache: {e}")
+
     trigger_clean = trigger_word.strip() if trigger_word else ""
     if trigger_clean:
         print(f" [Trigger Injection] Active Trigger Word: '{trigger_clean}' (will be prepended to captions)")
@@ -255,14 +290,14 @@ def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, r
         dest_txt = target_folder / f"{img.stem}.txt"
         src_txt = source_data_dir / f"{img.stem}.txt"
 
-        # 1. 复制或硬链接图像文件
+        # 4. 复制或硬链接图像文件
         if not dest_img.exists():
             try:
                 os.link(str(img), str(dest_img))
             except Exception:
                 shutil.copy2(str(img), str(dest_img))
 
-        # 2. 处理自然语言标注文本与触发词自动注入
+        # 5. 处理自然语言标注文本与触发词自动注入
         caption_content = ""
         if src_txt.exists():
             caption_content = src_txt.read_text(encoding="utf-8", errors="ignore").strip()

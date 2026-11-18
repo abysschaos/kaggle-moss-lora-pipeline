@@ -79,7 +79,15 @@ STEPS = 400                         # 核心步数 (公式: 图片数 * REPEATS 
 
 RANK = 32                           # LoRA 矩阵秩 (推荐 32)
 ALPHA = 16.0                        # 缩放系数 (人物推荐 16.0，画风推荐 32.0)
-LR = "1e-4"                         # 学习率 (默认 1e-4 最佳)
+LR = "1e-4"                         # 学习率 (Base/Heal 推荐 1e-4，SFT 画风推荐 1.2e-4~1.5e-4)
+
+# --- 云端显存优化、分辨率与底模变体控制 ---
+MODEL_VARIANT = "heal"              # 底模分支: "heal"(推荐防溢出) | "base"(官方原版) | "sft"(官方SFT对齐版)
+VRAM_PRESET = "auto"                # 显存档位: "auto" | "6g"(极限4.4G) | "8g"(均衡5.5G) | "12g"(流式8.5G) | "16g"(满血)
+RESOLUTION = 1024                   # 目标分辨率: 1024(标准高清) | 768(T4加速约44%) | 512(快速测试)
+BASE_QUANT = "auto"                 # 底模量化: "auto" | "int8"(下载体积减半且省显存) | "full"
+PRECISION = "auto"                  # 计算精度: "auto"(T4自动FP16，L4/A100自动BF16) | "fp16" | "bf16"
+TEXT_DEVICE = "auto"                # 文本编码器设备: "auto" | "cuda" | "cpu"
 # ==============================================================================
 
 # 1. 克隆训练工程
@@ -98,15 +106,21 @@ if not os.path.exists("kaggle-moss-lora-pipeline"):
     --steps {STEPS} \
     --rank {RANK} \
     --alpha {ALPHA} \
-    --lr "{LR}"
+    --lr "{LR}" \
+    --variant "{MODEL_VARIANT}" \
+    --vram_preset "{VRAM_PRESET}" \
+    --resolution {RESOLUTION} \
+    --base_quant "{BASE_QUANT}" \
+    --precision "{PRECISION}" \
+    --text_device "{TEXT_DEVICE}"
 ```
 
 #### 系统在后台执行的自动化过程：
-1. 自动扫描挂载在 `/kaggle/input/` 的任意图集，自动建立 Kohya 标准目录；
+1. 自动扫描挂载在 `/kaggle/input/` 的任意图集，自动清理旧图孤儿文件并建立 1:1 对齐的 Kohya 标准目录；
 2. 若填写了 `TRIGGER_WORD`，自动将触发词前置拼接至每一张图片的标注头部；
-3. 依托 Kaggle 云端千兆带宽，自动从 HuggingFace 极速下载 MOSS-Image-heal (FP16 全精度) 底模、Qwen3.5-9B 与 FLUX.2 VAE；
-4. 自动打入 17 项 PyTorch 2.11 驱动兼容性自愈补丁；
-5. 在 16GB T4 显卡上执行离线特征提取与 Flow Matching 反向传播训练（400~600 步约耗时 40~60 分钟）。
+3. 自动嗅探云端 GPU 型号（T4 / P100 / L4 / A100）、显存容量与原生 BF16 能力，按所选 `MODEL_VARIANT`（`heal` / `base` / `sft`）与量化模式从 HuggingFace 极速下载对应底模，并对未治愈的 Base/SFT 权重在 FP16 模式下自动开启 `FP16_FIX="online"` 防溢出守卫；
+4. 自动打入 PyTorch 2.11 驱动兼容性自愈补丁，同时关闭训练中途采样与盲测防 OOM；
+5. 按照设定的 `VRAM_PRESET` 与 `RESOLUTION` 执行离线双特征提取与 Flow Matching 反向传播训练（在 T4 上切换 `RESOLUTION = 768` 可显著加速，400~600 步约耗时 30~50 分钟）。
 
 ---
 

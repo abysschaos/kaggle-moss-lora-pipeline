@@ -16,8 +16,12 @@
 | **LoRA 矩阵秩 (Rank)** | 权重低秩适应矩阵维度 | 16 ~ 64 | `--rank <int>` | 第 194 行 (`default=32`) | 第 286 行 (`DIM = 32`) |
 | **LoRA 缩放倍率 (Alpha)**| 权重注入强度系数 | 16.0 ~ 64.0 | `--alpha <float>` | 第 196 行 (`default=32.0`)| 第 287 行 (`ALPHA = 32.0`) |
 | **学习率 (LR)** | 优化器学习速率 | 8e-5 ~ 1e-4 | `--lr <float>` | 第 198 行 (`default=1e-4`) | 第 289 行 (`LR = 1e-4`) |
-| **训练计算精度** | 浮点运算精度模式 | `bf16` | `--precision` | 第 200 行 (`default="bf16"`)| 第 280 行 (`recipes_...fp16.py`)|
-| **文本提取设备** | Qwen3.5-9B 特征提取宿主 | `cpu` | `--text_device` | 第 202 行 (`default="cpu"`)| 云端 16GB 默认使用 `cuda` |
+| **训练计算精度** | 浮点运算精度模式 | `auto` / `bf16` | `--precision` | `default="bf16"` | `--precision` (`auto`/`fp16`/`bf16`) |
+| **显存优化档位** | 流式缓冲、卸载与最大 Token 预算 | `auto` (`6g`/`8g`/`12g`/`16g`) | `--vram_preset` | `default="auto"` | `--vram_preset` (`VRAM_PRESET`) |
+| **训练目标分辨率** | 动态分桶像素面积池 (`TARGET_AREA`) | `1024` / `768` / `512` | `--resolution` | `default=1024` | `--resolution` (`RESOLUTION`) |
+| **模型架构变体** | 切换 Base / Heal / SFT 底模分支 | `auto` / `heal` / `sft` | `--variant` | `default="auto"` | `--variant` (`heal`/`base`/`sft`) |
+| **云端底模量化** | 云端拉取 int8 量化版或全精度底模 | `auto` (`int8`/`full`) | 自动识别本地文件 | 本地自动匹配 | `--base_quant` (`BASE_QUANT`) |
+| **文本提取设备** | Qwen3.5-9B 特征提取宿主 | `cpu` / `auto` | `--text_device` | `default="cpu"` | `--text_device` (`auto`/`cuda`/`cpu`) |
 | **数据集路径** | 输入图片与 txt 所在文件夹 | 绝对路径 | `--data_dir` | 第 176 行 | 第 65 行 (`target_data_dir`) |
 | **ComfyUI模型库路径** | ComfyUI 模型存放根目录 | 绝对路径 | `--comfy_models_dir`| 第 178 行 | 第 61 ~ 63 行 (`/tmp/models`) |
 | **DiT 底模单文件** | 自选 MOSS-Image 底模文件路径 | 绝对路径 | `--transformer_path` | 第 180 行 (`default=""`) | 自动下载 |

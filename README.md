@@ -33,17 +33,17 @@ cd kaggle-moss-lora-pipeline
 
 ## 🌟 双轨架构对比矩阵
 
-| 评估维度 | 模式 A：云端 Kaggle 自动化模式 | 模式 B：本地消费级显卡极速模式 |
+| 评估维度 | 模式 A：云端 Kaggle / Colab 自动化模式 | 模式 B：本地消费级显卡极速模式 |
 | :--- | :--- | :--- |
-| **目标硬件** | Tesla T4 GPU (16GB VRAM, Turing 架构) | RTX 4070 Laptop / 4060 / 3060 (8GB~12GB VRAM, Ada / Ampere) |
-| **计算精度** | FP16 全精度 (依托 MOSS-Image-heal 防溢出) | **原生硬件级 BF16** (Ada Lovelace Tensor Core, 零 NaN 风险) |
-| **单步运算耗时** | ~42 秒 / step | **~8 - 10 秒 / step (性能跃升 4.5 倍)** |
-| **600 步训练周期**| 约 7.5 小时 | **约 1.0 - 1.5 小时** |
-| **8GB 显存控制** | 默认全载入离线缓存 | **CPU 路由提取文本 Embeddings (显存恒等于 0 GiB)** |
-| **反向传播显存峰值** | 3.5 GiB | **3.5 GiB (在 8GB 显卡下保留 4.5GB 巨大冗余)** |
-| **模型资产依赖** | 每次启动需从 HuggingFace 重新下载 | **直连本地 ComfyUI 现有模型库，零网络下载秒级启动** |
-| **启动命令** | `.\scripts\push_to_kaggle.ps1` | `.\scripts\run_local.ps1` 或双击 `launch_ui.bat` |
-| **自定义命名与触发词** | 配置文件中修改 `RUN_NAME` | **GUI / CLI 全自定义：自动创建专属产出子文件夹、同步权重名称、前置注入触发词** |
+| **目标硬件** | Tesla T4 / P100 (16GB) / Colab L4 / A100 | RTX 4070 Laptop / 4060 / 3060 (8GB~12GB VRAM, Ada / Ampere) |
+| **计算精度** | **`auto` 智能嗅探** (T4 用 FP16，L4/A100 用 BF16，Base/SFT 自动开启防溢出) | **原生硬件级 BF16** (Ada Lovelace Tensor Core, 零 NaN 风险) |
+| **显存优化与分辨率** | **支持 `auto`/`6g`/`8g`/`12g`/`16g` 与 `1024`/`768`/`512` 自由切换** | **GUI / CLI 自由切换 `auto`/`6g`/`8g`/`12g`/`16g` 与 `1024`/`768`/`512`** |
+| **底模变体支持** | **支持 `heal` / `base` / `sft` 全谱系自动拉取与架构注入** | **自动探测并支持 Base / Heal / SFT 权重与变体感知** |
+| **单步运算耗时** | ~42 秒 / step (1024) 或 ~24 秒 / step (768) | **~7 - 9 秒 / step (性能跃升 4.5 倍)** |
+| **600 步训练周期**| 约 4.0 ~ 7.0 小时 (按分辨率) | **约 1.0 - 1.5 小时** |
+| **模型资产依赖** | 按所选变体与量化规格从 HuggingFace 极速下载 | **直连本地 ComfyUI 现有模型库，零网络下载秒级启动** |
+| **启动命令** | `.\scripts\push_to_kaggle.ps1` 或导入 Notebook | `.\scripts\run_local.ps1` 或双击 `launch_ui.bat` |
+| **自定义命名与触发词** | **Notebook / CLI / 环境变量全自定义，自动生成专属归档与元数据** | **GUI / CLI 全自定义：自动创建专属产出子文件夹、同步权重名称、前置注入触发词** |
 
 ---
 

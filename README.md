@@ -38,7 +38,10 @@ kaggle_moss_lora_pipeline/
 ├── requirements.txt               # 云端辅助工具与 CLI 依赖清单
 ├── requirements-local.txt         # 本地 Windows 平台依赖清单
 ├── kernel-metadata.json           # Kaggle CLI 专用元数据配置
+├── notebooks/
+│   └── kaggle_moss_lora_training.ipynb # Kaggle 云端一键开箱即用 Notebook 模板 (支持自定义图集/参数)
 ├── docs/
+│   ├── kaggle_deployment_guide.md # Kaggle 云端部署与自定义训练完全手册 (无需 AI Agent，纯网页交互)
 │   ├── local_installation_guide.md # Windows 本地部署与环境安装完全手册 (零基础一键上手)
 │   ├── parameter_configuration_reference.md # 参数调节位置与实操修改手册 (行号/CLI/配置速查)
 │   ├── hyperparameter_tuning_guide.md # 画风与人物超参数调优指南 (Repeats/Epochs/打标解耦)
@@ -104,12 +107,21 @@ kaggle_moss_lora_pipeline/
 
 ---
 
-## ☁️ 模式 A：云端 Kaggle 自动化部署
+## ☁️ 模式 A：云端 Kaggle 自动化部署 (免费 T4 GPU 16GB)
 
 ### 1. 适用场景
-适用于本地显卡算力不足或显存过小（< 6GB），希望利用 Kaggle 每周免费 30 小时 GPU 算力的用户。
+适用于本地显卡算力不足或显存过小（< 6GB），希望利用 Kaggle 每周免费 30 小时 GPU 算力的用户。支持在无任何本地环境、无 AI Agent 辅助的情况下，纯靠浏览器完成自定义图集训练。
 
-### 2. 配置与推送
+### 2. 方式 1：纯网页端交互式训练 (零基础小白首选)
+1. **上传图集**：在 Kaggle 网页端点击 **+ Create -> New Dataset**，上传您的训练图片与 txt 标注压缩包（保持 Private）；
+2. **创建 Notebook**：点击 **+ Create -> New Notebook**，在右侧面板开启 **GPU T4 x1**，打开 **Internet on**，并在 Data 面板中点击 **+ Add Input** 挂载您上传的图集；
+3. **导入模板运行**：直接导入项目自带的 [notebooks/kaggle_moss_lora_training.ipynb](notebooks/kaggle_moss_lora_training.ipynb)，在顶部控制面板填入您的 `LORA_NAME`、`TRIGGER_WORD`、`REPEATS`、`EPOCHS` 等参数，一键点击运行；
+4. **下载成果**：训练完毕后，在右侧 **Output** 面板一键下载生成好的 `.safetensors` 或 `*_lora_results.zip`。
+
+完整图文与参数指导，请参考：
+👉 [docs/kaggle_deployment_guide.md](docs/kaggle_deployment_guide.md)
+
+### 3. 方式 2：本地 CLI 命令行一键投递 (进阶玩家首选)
 1. 配置 Kaggle 凭据 `~/.kaggle/kaggle.json`；
 2. 在 PowerShell 中运行：
 ```powershell

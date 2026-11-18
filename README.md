@@ -136,7 +136,7 @@ kaggle_moss_lora_pipeline/
 
 ### 2. 方式 1：纯网页端交互式训练 (零基础小白首选)
 1. **上传图集**：在 Kaggle 网页端点击 **+ Create -> New Dataset**，上传您的训练图片与 txt 标注压缩包（保持 Private）；
-2. **创建 Notebook**：点击 **+ Create -> New Notebook**，在右侧面板开启 **GPU T4 x1**，打开 **Internet on**，并在 Data 面板中点击 **+ Add Input** 挂载您上传的图集；
+2. **创建 Notebook**：点击 **+ Create -> New Notebook**，在上方菜单栏 **Settings** 中开启 **GPU T4 x1**，切换 **Internet on**，并通过菜单 **File -> Add Data** 挂载您上传的私有图集；
 3. **导入模板运行**：直接导入项目自带的 [notebooks/kaggle_moss_lora_training.ipynb](notebooks/kaggle_moss_lora_training.ipynb)，在顶部控制面板填入您的 `LORA_NAME`、`TRIGGER_WORD`、`REPEATS`、`EPOCHS` 等参数，一键点击运行；
 4. **下载成果**：训练完毕后，在右侧 **Output** 面板一键下载生成好的 `.safetensors` 或 `*_lora_results.zip`。
 

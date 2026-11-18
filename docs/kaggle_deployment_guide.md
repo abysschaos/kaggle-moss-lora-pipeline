@@ -49,14 +49,14 @@
 
 ### 第二步：创建 Notebook 并配置 GPU 算力
 
-1. 点击 Kaggle 页面左侧的 **+ Create** -> **New Notebook**，进入 Jupyter 在线编程界面。
-2. **配置运行环境 (右侧 Notebook settings 面板，极为重要)**：
-   - **Accelerator (加速硬件)**：点击下拉菜单，选择 **GPU T4 x1**；
-   - **Internet (网络开关)**：**必须切换为 "Internet on"**（因为需要下载官方修复版底模与训练依赖，必须开启网络访问权限）。
+1. 点击 Kaggle 页面左侧的 **+ Create** -> **New Notebook**，进入在线编程界面。
+2. **配置运行环境 (点击顶部菜单栏中的 Settings)**：
+   - **Accelerator (加速硬件)**：点击顶部菜单 **Settings** -> **Accelerator**，选择 **GPU T4 x1** (16GB VRAM)；
+   - **Internet (网络开关)**：点击顶部菜单 **Settings** -> **Internet**，切换为 **Internet on** (必须开启网络权限以拉取底模与依赖)。
 3. **挂载您的图集**：
-   - 在右侧面板中找到 **Data**（或 **Input**）区域，点击 **+ Add Input** 按钮；
-   - 点击 **Your Work**，即可看到刚才上传的 `my-lora-dataset`，点击右侧的 **+** 号挂载进当前 Notebook；
-   - 挂载成功后，您的数据集路径通常为：`/kaggle/input/my-lora-dataset`。
+   - 点击顶部菜单 **File** -> **Add Data** (或展开右侧面板中的 **+ Add Input**)；
+   - 在 **Your Work** 中找到刚才上传的私有数据集，点击右侧的 **+** 号挂载进当前 Notebook；
+   - 挂载成功后，您的数据集路径通常位于：`/kaggle/input/` 目录下。
 
 ---
 

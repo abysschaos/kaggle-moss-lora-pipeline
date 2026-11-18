@@ -3,9 +3,31 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Base Model](https://img.shields.io/badge/Base%20Model-MOSS--Image--heal-green.svg)](https://huggingface.co/KBlueLeaf/MOSS-Image-heal)
 [![Framework](https://img.shields.io/badge/Framework-KohakuMossTrainer-orange.svg)](https://github.com/KohakuBlueleaf/KohakuMossTrainer)
-[![Dual Platform](https://img.shields.io/badge/Platform-Kaggle%20%7C%20Windows%20Local-20BEFF.svg)](https://github.com/abysschaos/kaggle-moss-lora-pipeline)
+[![Latest Release](https://img.shields.io/badge/Release-v1.0.0%20Stable-blueviolet.svg)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/tag/v1.0.0)
+[![Direct Download](https://img.shields.io/badge/Download-Source%20ZIP-success.svg)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)
 
 一套专为 **OpenMOSS MOSS-Image (5B Single-Stream DiT)** 打造的工业级 LoRA 自动化炼制工程方案。依托 [KohakuBlueleaf/KohakuMossTrainer](https://github.com/KohakuBlueleaf/KohakuMossTrainer) 架构，支持 **云端 Kaggle 免费算力** 与 **本地 Windows 消费级显卡 (RTX 4070/4060/3060 8GB~12GB)** 双轨运行。
+
+---
+
+## 📥 项目一键获取与下载指引 (Quick Download)
+
+无论您是初学者还是开发者，均可通过以下方式秒级获取本项目并开启训练：
+
+### 1. 方式 A：纯小白一键直接下载 ZIP (推荐，免 Git 环境)
+- **直接下载主分支最新包**：👉 [**【⬇️ 点击直接下载最新项目压缩包 (main.zip)】**](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)
+- **官方发行版本页面**：👉 [**【🏷️ GitHub Releases 官方稳定版页面 (v1.0.0)】**](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases)
+- **新手解压避坑关键**：
+  下载后请解压到纯英文路径（例如 `D:\kaggle_moss_lora_pipeline\`）。**路径中严禁包含中文、空格或特殊符号**，以避免 Windows 下 PyTorch C++ 底层算子加载崩溃。
+
+### 2. 方式 B：Git 命令行克隆 (开发者推荐)
+```bash
+git clone https://github.com/abysschaos/kaggle-moss-lora-pipeline.git
+cd kaggle-moss-lora-pipeline
+```
+
+### 3. 方式 C：Kaggle 云端免下载 (纯浏览器运行)
+云端训练用户无需在本地下载任何代码，在 Kaggle 网页端直接导入 [notebooks/kaggle_moss_lora_training.ipynb](notebooks/kaggle_moss_lora_training.ipynb) 即可直接利用云端 16GB T4 GPU 开始炼丹。详细教程见 [docs/kaggle_deployment_guide.md](docs/kaggle_deployment_guide.md)。
 
 ---
 

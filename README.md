@@ -29,11 +29,13 @@
 ```
 kaggle_moss_lora_pipeline/
 ├── README.md                      # 项目核心说明与双轨使用指南
+├── launch_ui.bat                  # Windows 专属一键双击启动 GUI 控制面板
+├── gui_local.py                   # 现代极简本地训练 GUI (图形化参数调节/模板切换/实时日志)
+├── train_local.py                 # 生产级本地消费级显卡执行引擎 (Windows 专属)
+├── train_moss.py                  # 生产级云端一键执行脚本 (Kaggle 专用)
 ├── requirements.txt               # 云端辅助工具与 CLI 依赖清单
 ├── requirements-local.txt         # 本地 Windows 平台依赖清单
 ├── kernel-metadata.json           # Kaggle CLI 专用元数据配置
-├── train_moss.py                  # 生产级云端一键执行脚本 (Kaggle 专用)
-├── train_local.py                 # 生产级本地消费级显卡执行引擎 (Windows 专属)
 ├── docs/
 │   ├── parameter_configuration_reference.md # 参数调节位置与实操修改手册 (行号/CLI/配置速查)
 │   ├── hyperparameter_tuning_guide.md # 画风与人物超参数调优指南 (Repeats/Epochs/打标解耦)
@@ -42,7 +44,8 @@ kaggle_moss_lora_pipeline/
 │   ├── dit_flow_matching_guide.md # 5B DiT 与 Flow Matching 连续流训练超参数理论
 │   └── comfyui_inference_guide.md # ComfyUI 官方原生推理规范 (CFG 3.0 / Shift 5.0)
 └── scripts/
-    ├── run_local.ps1              # 本地一键启动与硬件自检交互式脚本
+    ├── launch_ui.ps1              # 本地 GUI 启动脚本 (PowerShell 版)
+    ├── run_local.ps1              # 本地一键启动与硬件自检交互式脚本 (CLI 版)
     ├── push_to_kaggle.ps1         # 本地一键推送任务至 Kaggle 云端
     └── pull_weights.ps1           # 本地一键从 Kaggle 拉取训练产出物
 ```
@@ -60,7 +63,17 @@ kaggle_moss_lora_pipeline/
 pip install -r requirements-local.txt
 ```
 
-### 3. 一键启动
+### 3. 一键启动方式
+
+#### 方式 1：双击图形化控制面板 (GUI 模式，强烈推荐)
+直接双击项目根目录下的 **`launch_ui.bat`**（或在终端运行 `python gui_local.py`）：
+- **全可视化操作**：自带 Windows 文件夹“浏览”选择器，选定图集后自动统计当前图片与 txt 数量；
+- **模板一键切换**：内置【🎨 艺术画风模板】与【👤 人物角色模板】，单选自动填入最佳参数；
+- **智能公式联动**：动态计算总样本曝光量，提供一键“按公式对齐”核心步数按钮；
+- **实时流式控制台**：多线程终端监控面板，实时回传日志与进度，支持中途安全终止与完成提示；
+- **无缝部署**：勾选“自动复制到 ComfyUI”，训练完毕后自动将权重直推 `models/loras/`。
+
+#### 方式 2：终端交互式脚本 (CLI 模式)
 在 PowerShell 终端中执行：
 ```powershell
 .\scripts\run_local.ps1

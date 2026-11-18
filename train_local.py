@@ -556,6 +556,8 @@ RUN_NAME = "{args.lora_name}"
 TRANSFORMER = "{transformer_filename}"
 {base_prec_str}
 {memory_profile_str}
+SAMPLE_EVERY = 0
+VALIDATE_EVERY = 0
 FP16_FIX = "none"
 PRECISION = "{args.precision}"
 DIM = {args.rank}
@@ -591,13 +593,13 @@ SCHEDULE = {{
     subprocess.run([
         kogine_cmd, "run", "scripts/data/cache_text.py",
         "--config", f"configs/user/{args.lora_name}_local_data.py"
-    ], cwd=str(trainer_dir), check=True)
+    ], cwd=str(trainer_dir), env=os.environ, check=True)
 
     print_banner(f"Step 2/2: Extracting Image Latents (Device: {args.vae_device.upper()})")
     subprocess.run([
         kogine_cmd, "run", "scripts/data/cache_latents.py",
         "--config", f"configs/user/{args.lora_name}_local_data.py"
-    ], cwd=str(trainer_dir), check=True)
+    ], cwd=str(trainer_dir), env=os.environ, check=True)
 
     # 7. 物理级清洗配置文件中的临时离线编码器旋钮
     print_banner("Sanitizing Configuration Knobs for moss.py Validation")
@@ -615,7 +617,7 @@ SCHEDULE = {{
         "--config", f"configs/user/{args.lora_name}_local.py"
     ]
     print(f"Executing: {' '.join(train_cmd)}")
-    subprocess.run(train_cmd, cwd=str(trainer_dir), check=True)
+    subprocess.run(train_cmd, cwd=str(trainer_dir), env=os.environ, check=True)
     elapsed = time.time() - start_time
     print(f" [OK] Core training completed in {elapsed / 60:.2f} minutes ({elapsed / args.steps:.2f} s/step)!")
 

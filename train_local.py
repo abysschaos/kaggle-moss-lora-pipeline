@@ -14,6 +14,14 @@ py_scripts_dir = Path(sys.executable).parent / "Scripts"
 if py_scripts_dir.exists():
     os.environ["PATH"] = str(py_scripts_dir) + os.pathsep + os.environ.get("PATH", "")
 
+# 防御 Windows 中文用户名路径导致 Triton / TorchInductor 发生 UnicodeDecodeError 崩溃
+safe_temp_dir = (Path(__file__).resolve().parent / "workspace" / "temp").resolve()
+safe_temp_dir.mkdir(parents=True, exist_ok=True)
+os.environ["TEMP"] = str(safe_temp_dir)
+os.environ["TMP"] = str(safe_temp_dir)
+os.environ["TRITON_CACHE_DIR"] = str(safe_temp_dir / "triton")
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(safe_temp_dir / "inductor")
+
 def print_banner(msg: str):
     width = 78
     print("=" * width)
@@ -145,10 +153,10 @@ def probe_local_models(comfy_models_dir: str = None) -> dict:
         if found["transformer"]:
             break
 
-    # 2. 查找 Text Encoder (Qwen3.5-9B)
+    # 2. 查找 Text Encoder (Qwen3.5-9B，优先匹配量化版 int8 避免 16GB 物理内存发生溢出换页)
     text_candidates = [
-        "**/qwen3.5_9b_bf16.safetensors",
         "**/qwen3.5_9b_int8_convrot.safetensors",
+        "**/qwen3.5_9b_bf16.safetensors",
         "**/qwen3.5_9b.safetensors"
     ]
     for sdir in search_dirs:
@@ -467,7 +475,10 @@ TEXT_CACHE = "offline"
 FLIP = False
 TEXT_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.text_device}"}}
 IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
+VAE_ENCODE = {{"compile": "off"}}
 """
+
+    warmup_steps = min(30, max(1, int(args.steps * 0.05))) if args.steps > 5 else 0
 
     train_cfg_code = f"""
 from kohakuengine import use_config
@@ -487,7 +498,7 @@ SAVE_MINUTES = 20
 SAVE_FORMAT = "both"
 SCHEDULE = {{
     "mode": "cosine",
-    "warmup": 30,
+    "warmup": {warmup_steps},
     "end": -1,
     "min_value": 0.1
 }}
@@ -501,16 +512,22 @@ SCHEDULE = {{
     print(f" [OK] Generated Data Config:  {data_cfg_file}")
     print(f" [OK] Generated Train Config: {train_cfg_file}")
 
+    # 定位 kogine 可执行命令绝对路径，防御环境变量未刷新导致的 WinError 2
+    kogine_cmd = "kogine"
+    py_scripts_kogine = Path(sys.executable).parent / "Scripts" / "kogine.exe"
+    if py_scripts_kogine.exists():
+        kogine_cmd = str(py_scripts_kogine)
+
     # 6. 执行离线双特征提取 (双离线缓存)
     print_banner(f"Step 1/2: Extracting Text Embeddings (Device: {args.text_device.upper()})")
     subprocess.run([
-        "kogine", "run", "scripts/data/cache_text.py",
+        kogine_cmd, "run", "scripts/data/cache_text.py",
         "--config", f"configs/user/{args.lora_name}_local_data.py"
     ], cwd=str(trainer_dir), check=True)
 
     print_banner(f"Step 2/2: Extracting Image Latents (Device: {args.vae_device.upper()})")
     subprocess.run([
-        "kogine", "run", "scripts/data/cache_latents.py",
+        kogine_cmd, "run", "scripts/data/cache_latents.py",
         "--config", f"configs/user/{args.lora_name}_local_data.py"
     ], cwd=str(trainer_dir), check=True)
 
@@ -526,7 +543,7 @@ SCHEDULE = {{
     print_banner(f"Starting {args.steps}-step Local LoRA Training: '{args.lora_name}' (Precision: {args.precision.upper()})")
     start_time = time.time()
     train_cmd = [
-        "kogine", "run", "scripts/train/moss.py",
+        kogine_cmd, "run", "scripts/train/moss.py",
         "--config", f"configs/user/{args.lora_name}_local.py"
     ]
     print(f"Executing: {' '.join(train_cmd)}")

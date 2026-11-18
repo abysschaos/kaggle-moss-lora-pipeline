@@ -149,14 +149,17 @@ def probe_local_models(comfy_models_dir: str = None) -> dict:
         "base_weights_dir": None
     }
 
-    # 1. 查找 Transformer (消费级显卡优先选择 MOSS-Image-heal int8 旋转量化版，防御 8G/12G 显存 OOM)
+    # 1. 查找 Transformer (优先选择 int8 旋转量化版，防御 8G/12G 显存 OOM，全面兼容 Base/Heal/SFT)
     heal_candidates = [
         "**/moss_image_heal_int8_convrot.safetensors",
         "**/moss_image_base_int8_convrot.safetensors",
+        "**/moss_image_sft_int8_convrot.safetensors",
         "**/moss_image_heal_bf16.safetensors",
         "**/moss_image_heal_fp16.safetensors",
         "**/moss_image_base_bf16.safetensors",
-        "**/moss_image_base.safetensors"
+        "**/moss_image_sft_bf16.safetensors",
+        "**/moss_image_base.safetensors",
+        "**/moss_image_sft.safetensors"
     ]
     for sdir in search_dirs:
         for pat in heal_candidates:
@@ -366,6 +369,8 @@ def main():
                         help="VRAM optimization preset (auto, 6g, 8g, 12g, 16g)")
     parser.add_argument("--resolution", type=int, default=1024,
                         help="Target image resolution area for training (e.g. 1024, 768, 512)")
+    parser.add_argument("--variant", type=str, default="auto", choices=["auto", "base", "sft"],
+                        help="Model architecture variant ('auto', 'base', 'sft'). Auto-detected from weights filename by default.")
     parser.add_argument("--text_device", type=str, default="cpu", choices=["cpu", "cuda"],
                         help="Device for offline text encoder embedding extraction (cpu recommended for 8GB cards to prevent OOM)")
     parser.add_argument("--vae_device", type=str, default="cuda", choices=["cpu", "cuda"],
@@ -551,6 +556,16 @@ def main():
 
     print(f" [Resolution] Target Area: {args.resolution}x{args.resolution} ({args.resolution * args.resolution} px)")
 
+    # 确定模型架构变体 (Base 还是 SFT)
+    if args.variant.lower() == "auto":
+        is_sft_model = "sft" in transformer_filename.lower()
+        model_variant = "sft" if is_sft_model else "base"
+        variant_note = f"(Auto-detected from backbone: '{transformer_filename}')"
+    else:
+        model_variant = args.variant.lower()
+        variant_note = "(Manually specified)"
+    print(f" [Model Variant] Architecture: {model_variant.upper()} {variant_note}")
+
     base_prec_str = 'BASE_PRECISION = "int8"' if is_int8_transformer else ""
 
     data_cfg_code = f"""
@@ -594,6 +609,7 @@ from kohakuengine import use_config
 {recipe_import}
 use_config("{args.lora_name}_local_data.py")
 
+VARIANT = "{model_variant}"
 RUN_NAME = "{args.lora_name}"
 TRANSFORMER = "{transformer_filename}"
 {base_prec_str}

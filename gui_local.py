@@ -336,7 +336,7 @@ class ModernLocalTrainerGUI:
         # (1) DiT 底模
         self.create_file_picker_block(
             model_card, "DiT 底模文件 (Diffusion Model):", self.var_transformer_path,
-            browse_title="选择 MOSS-Image 底模文件 (moss_image_heal_bf16.safetensors 等)",
+            browse_title="选择 MOSS-Image 底模文件 (支持 Base/Heal/SFT，如 moss_image_heal_bf16.safetensors 等)",
             folder_path="models/diffusion_models"
         )
 
@@ -706,10 +706,12 @@ class ModernLocalTrainerGUI:
                 all_found = False
 
             if all_found:
-                self.var_models_status.set("✅ 全部自动就绪！")
+                m_name = Path(str(found["transformer"])).name.lower()
+                arch_tag = "SFT" if "sft" in m_name else "Base/Heal"
+                self.var_models_status.set(f"✅ 全部自动就绪！[{arch_tag}]")
                 self.save_local_config()
                 if not silent:
-                    messagebox.showinfo("扫描成功", "已成功自动检索并匹配到全部三大核心模型权重！\n路径已自动填入输入框。")
+                    messagebox.showinfo("扫描成功", f"已成功自动检索并匹配到全部三大核心模型权重！\n识别架构变体: {arch_tag}\n路径已自动填入输入框。")
             else:
                 missing = []
                 if not found["transformer"]: missing.append("DiT 底模")
@@ -886,6 +888,7 @@ class ModernLocalTrainerGUI:
             "--precision", self.var_precision.get(),
             "--vram_preset", self.var_vram_preset.get(),
             "--resolution", str(self.var_resolution.get()),
+            "--variant", "auto",
             "--text_device", self.var_text_device.get(),
             "--vae_device", self.var_vae_device.get()
         ]

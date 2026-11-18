@@ -504,24 +504,74 @@ class ModernLocalTrainerGUI:
     def download_or_clone_trainer(self):
         trainer_dir = Path("./KohakuMossTrainer").resolve()
         if (trainer_dir / "pyproject.toml").exists():
-            if not messagebox.askyesno("已存在", "检测到 KohakuMossTrainer 已经存在，是否强制重新克隆？"):
+            if not messagebox.askyesno("已存在", "检测到 KohakuMossTrainer 已经存在且完整，是否强制重新拉取覆盖？"):
                 return
 
         def worker():
-            self.log(f"\n{'='*75}\n>>> 正在从官方源拉取 KohakuMossTrainer 训练器...\n{'='*75}\n")
+            self.log(f"\n{'='*75}\n>>> 正在拉取 KohakuMossTrainer 训练器框架...\n{'='*75}\n")
             try:
-                cmd = ["git", "clone", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(trainer_dir)]
-                p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
-                self.log(p.stdout + "\n")
-                if p.returncode == 0:
+                # 1. 核心关键清理：若目录存在且仅包含说明文件或未完成内容，必须先清除，防止 Git 报目标目录非空错误
+                if trainer_dir.exists() and not (trainer_dir / "pyproject.toml").exists():
+                    shutil.rmtree(trainer_dir, ignore_errors=True)
+
+                # 2. 尝试使用 Git 克隆 (检测并附加常见代理参数)
+                git_success = False
+                git_cmds = [
+                    ["git", "-c", "http.proxy=http://127.0.0.1:7890", "clone", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(trainer_dir)],
+                    ["git", "clone", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(trainer_dir)]
+                ]
+                for cmd in git_cmds:
+                    self.log(f"执行命令: {' '.join(cmd)}\n")
+                    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+                    self.log(p.stdout + "\n")
+                    if p.returncode == 0 and (trainer_dir / "pyproject.toml").exists():
+                        git_success = True
+                        break
+
+                # 3. 容灾方案：若系统未装 Git 或 Git 网络超时，使用 Python urllib 自动拉取 ZIP 压缩包并扁平化解压
+                if not git_success:
+                    self.log("[提示] Git 拉取未成功，自动切换至 Python 直链下载 ZIP 容灾通道...\n")
+                    zip_url = "https://github.com/KohakuBlueleaf/KohakuMossTrainer/archive/refs/heads/main.zip"
+                    import urllib.request
+                    import zipfile
+                    import io
+                    
+                    proxies = {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
+                    try:
+                        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+                        req = urllib.request.Request(zip_url, headers={"User-Agent": "Mozilla/5.0"})
+                        resp = opener.open(req, timeout=30)
+                        zip_bytes = resp.read()
+                    except Exception:
+                        req = urllib.request.Request(zip_url, headers={"User-Agent": "Mozilla/5.0"})
+                        resp = urllib.request.urlopen(req, timeout=30)
+                        zip_bytes = resp.read()
+                        
+                    trainer_dir.mkdir(parents=True, exist_ok=True)
+                    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                        # 扁平化解压，去除第一层 KohakuMossTrainer-main/ 避免套娃
+                        for member in zf.infolist():
+                            parts = Path(member.filename).parts
+                            if len(parts) > 1:
+                                target_path = trainer_dir / Path(*parts[1:])
+                                if member.is_dir():
+                                    target_path.mkdir(parents=True, exist_ok=True)
+                                else:
+                                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                                    with zf.open(member) as source, open(target_path, "wb") as target:
+                                        shutil.copyfileobj(source, target)
+                    if (trainer_dir / "pyproject.toml").exists():
+                        git_success = True
+
+                if (trainer_dir / "pyproject.toml").exists():
                     import train_local
                     train_local.apply_compatibility_patches(trainer_dir)
                     self.root.after(0, self.check_trainer_status)
-                    self.log("[成功] 训练器框架克隆完成并已打入全套自愈补丁！\n")
+                    self.log("[成功] 训练器框架已成功就绪并打入全部自愈补丁！\n")
                     self.root.after(0, lambda: messagebox.showinfo("成功", "训练器框架下载并补丁成功，已完全就绪！"))
                 else:
-                    self.log("[失败] Git 克隆失败，请检查网络或点击【📂 打开训练器放置目录】手动下载放置 ZIP。\n")
-                    self.root.after(0, lambda: messagebox.showerror("克隆失败", "Git 克隆失败，建议使用浏览器下载 ZIP 手动解压放入。"))
+                    self.log("[失败] 自动拉取失败。请点击【📂 打开训练器放置目录】，手动下载 ZIP 解压放入。\n")
+                    self.root.after(0, lambda: messagebox.showerror("下载失败", "无法自动拉取训练器。建议点击【📂 打开训练器放置目录】手动下载 ZIP 解压放入。"))
             except Exception as e:
                 self.log(f"[异常] {e}\n")
 

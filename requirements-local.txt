@@ -1,0 +1,17 @@
+# OpenMOSS MOSS-Image Local Training Engine Requirements (Windows 11)
+# PyTorch with CUDA 12.1+ or 12.4+ is required.
+# Example install command: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+torch>=2.2.0
+torchvision>=0.17.0
+safetensors>=0.4.3
+transformers>=4.40.0
+diffusers>=0.28.0
+accelerate>=0.29.0
+peft>=0.10.0
+bitsandbytes>=0.43.0
+huggingface_hub>=0.23.0
+ftfy>=6.2.0
+anyschedule>=0.0.5
+lycoris-lora>=3.0.0
+kohaku-engine>=0.1.0

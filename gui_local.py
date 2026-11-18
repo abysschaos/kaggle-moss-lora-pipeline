@@ -147,7 +147,58 @@ class ModernLocalTrainerGUI:
         style.configure("Sub.TLabel", background=self.card_bg, foreground=self.text_sub, font=(self.font_family, 8))
         style.configure("Header.TLabel", background=self.card_bg, foreground=self.accent_blue, font=(self.font_family, 10, "bold"))
         style.configure("TCheckbutton", background=self.card_bg, foreground=self.text_main, font=(self.font_family, 9))
-        style.configure("TCombobox", fieldbackground=self.input_bg, background=self.card_bg, foreground=self.text_main)
+        
+        # 彻底解决 ttk.Combobox 在 Windows 下 readonly 状态出现浅米黄底色导致白字隐形的问题
+        style.configure(
+            "TCombobox",
+            fieldbackground=self.input_bg,
+            background="#45475a",
+            foreground=self.text_main,
+            darkcolor=self.card_bg,
+            lightcolor=self.card_bg,
+            arrowcolor=self.text_main,
+            bordercolor=self.card_bg,
+            padding=3,
+            font=(self.font_family, 9)
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[
+                ("readonly", self.input_bg),
+                ("disabled", "#1e1e2e"),
+                ("focus", self.input_bg),
+                ("active", self.input_bg)
+            ],
+            foreground=[
+                ("readonly", self.text_main),
+                ("disabled", self.text_sub),
+                ("focus", self.text_main),
+                ("active", self.text_main)
+            ],
+            selectbackground=[
+                ("readonly", self.input_bg),
+                ("focus", self.accent_blue)
+            ],
+            selectforeground=[
+                ("readonly", self.text_main),
+                ("focus", "#11111b")
+            ],
+            background=[
+                ("readonly", "#45475a"),
+                ("active", self.accent_blue)
+            ],
+            arrowcolor=[
+                ("readonly", self.text_main),
+                ("active", "#11111b")
+            ]
+        )
+
+        # 修复下拉弹出菜单 (Listbox) 的背景与高亮对比度
+        self.root.option_add("*TCombobox*Listbox*Background", self.input_bg)
+        self.root.option_add("*TCombobox*Listbox*Foreground", self.text_main)
+        self.root.option_add("*TCombobox*Listbox*selectBackground", self.accent_blue)
+        self.root.option_add("*TCombobox*Listbox*selectForeground", "#11111b")
+        self.root.option_add("*TCombobox*Listbox*font", (self.font_family, 9))
 
     def build_ui(self):
         # 1. 顶部 Header 状态条

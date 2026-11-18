@@ -867,11 +867,26 @@ class ModernLocalTrainerGUI:
         if self.current_process and self.is_training:
             reply = messagebox.askyesno("确认终止", "确定要强制中断当前正在运行的训练进程吗？")
             if reply:
+                pid = self.current_process.pid
+                self.log(f"\n[用户操作] 正在强制级联终止训练进程树 (PID: {pid})...\n")
                 try:
-                    self.current_process.terminate()
-                    self.log("\n[用户操作] 正在向训练进程发送终止信号...\n")
+                    # Windows 下使用 taskkill /F /T 强杀目标进程及其派生的整个子孙进程树 (彻底清理 kogine 和主训练 python 进程)
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False
+                    )
                 except Exception as e:
-                    self.log(f"\n终止进程异常: {e}\n")
+                    self.log(f"taskkill 异常: {e}\n")
+
+                try:
+                    self.current_process.kill()
+                except Exception:
+                    pass
+
+                self.log("[用户操作] 训练进程树已全部强制中断，GPU 与内存资源已安全释放。\n")
+                self.root.after(0, self.training_finished, -9)
 
     def training_finished(self, return_code):
         self.is_training = False

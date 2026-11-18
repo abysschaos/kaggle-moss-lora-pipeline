@@ -1,0 +1,4 @@
+kaggle>=1.6.0
+six>=1.16.0
+huggingface_hub>=0.20.0
+safetensors>=0.4.0

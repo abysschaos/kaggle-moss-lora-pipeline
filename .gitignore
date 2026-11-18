@@ -1,0 +1,21 @@
+# Python & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+
+# Model Weights & Data (Too large for Git)
+*.safetensors
+*.pt
+*.bin
+*.zip
+*.tar.gz
+runs/
+checkpoints/
+final_output*/
+temp_check/
+lora_export/
+
+# OS specific
+.DS_Store
+Thumbs.db

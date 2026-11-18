@@ -1,0 +1,13 @@
+{
+  "id": "norrisgavincortni/ness-style-lora-training",
+  "title": "Ness Style LoRA Training",
+  "code_file": "train_moss.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

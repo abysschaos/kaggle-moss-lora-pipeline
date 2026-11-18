@@ -26,7 +26,7 @@ def sanitize_path(p: str) -> str:
 
 def find_broad_comfy_paths():
     """全自动宽域智能检索本地 ComfyUI 模型库与 Python 解释器路径。
-    自动覆盖：环境变量、相对路径、系统常见盘符根目录与常用下载目录下的 ComfyUI / 秋叶整合包 / 便携版。
+    自动覆盖：环境变量、相对路径、系统常见盘符根目录与常用下载目录下的 ComfyUI 便携版或各类独立环境。
     完全杜绝任何个人绝对路径的硬编码，确保开源泛用性与隐私安全。
     """
     candidates = []

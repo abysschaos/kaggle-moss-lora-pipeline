@@ -51,7 +51,28 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "`nInstalling local auxiliary requirements..." -ForegroundColor Yellow
 & $venvPip install -r (Join-Path $projectRoot "requirements-local.txt")
 
-# 5. 校验环境
+# 5. 初始化资产目录与训练器结构
+Write-Host "`nInitializing project directories..." -ForegroundColor Yellow
+$dirs = @("models\diffusion_models", "models\text_encoders", "models\vae", "dataset", "output", "KohakuMossTrainer")
+foreach ($d in $dirs) {
+    $fullPath = Join-Path $projectRoot $d
+    if (-not (Test-Path $fullPath)) {
+        New-Item -ItemType Directory -Path $fullPath | Out-Null
+    }
+}
+$trainerNotice = Join-Path $projectRoot "KohakuMossTrainer\训练器放置说明.txt"
+if (-not (Test-Path $trainerNotice)) {
+    @"
+[KohakuMossTrainer 训练器框架放置说明]
+官方源码: https://github.com/KohakuBlueleaf/KohakuMossTrainer
+
+1. 推荐自动化方案: 启动 launch_ui.bat，在【训练器框架管理】卡片点击【一键自动克隆/下载】。
+2. 手动离线解压: 解压后必须确保本目录 (KohakuMossTrainer\) 下直接包含 pyproject.toml、src/ 等，严禁双层嵌套套娃结构！
+3. 补丁注入: 放置后在 GUI 中点击【检查并注入补丁】即可。
+"@ | Out-File -FilePath $trainerNotice -Encoding utf8
+}
+
+# 6. 校验环境
 Write-Host "`nVerifying PyTorch CUDA..." -ForegroundColor Yellow
 & $venvPython -c "import torch; print('PyTorch:', torch.__version__, '| CUDA Available:', torch.cuda.is_available(), '| Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
 

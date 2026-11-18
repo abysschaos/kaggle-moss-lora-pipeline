@@ -103,12 +103,38 @@ if errorlevel 1 (
 
 :: 6. 自动预创本地标准资产目录与说明
 echo.
-echo [6/6] 初始化本地资产目录结构...
+echo [6/6] 初始化本地资产目录与训练器结构...
 if not exist "models\diffusion_models\" mkdir "models\diffusion_models"
 if not exist "models\text_encoders\" mkdir "models\text_encoders"
 if not exist "models\vae\" mkdir "models\vae"
 if not exist "dataset\" mkdir "dataset"
 if not exist "output\" mkdir "output"
+if not exist "KohakuMossTrainer\" mkdir "KohakuMossTrainer"
+
+:: 写入训练器框架说明
+> "KohakuMossTrainer\训练器放置说明.txt" (
+    echo ================================================================================
+    echo   KohakuMossTrainer 训练器框架放置说明
+    echo ================================================================================
+    echo.
+    echo 1. 自动化方案 (推荐):
+    echo    启动本项目图形界面 launch_ui.bat，在左侧【训练器框架管理】卡片中，
+    echo    点击【一键自动克隆/下载】按钮，系统将自动拉取并打入全套自愈补丁！
+    echo.
+    echo 2. 手动离线解压方案 (防套娃重点):
+    echo    官方源码仓库: https://github.com/KohakuBlueleaf/KohakuMossTrainer
+    echo    若下载 ZIP 压缩包手动解压，请务必注意解压目录层级！
+    echo    解压后必须确保本目录 (KohakuMossTrainer\) 下直接包含以下文件与目录:
+    echo      - pyproject.toml
+    echo      - src/
+    echo      - configs/
+    echo      - scripts/
+    echo    严禁出现 KohakuMossTrainer\KohakuMossTrainer-main\... 这种双层嵌套套娃结构！
+    echo.
+    echo 3. 补丁注入:
+    echo    解压放置完成后，在 launch_ui.bat 界面点击【检查并注入补丁】，
+    echo    即可自动完成针对 PyTorch 2.11 算子兼容与调度器异常的自愈修复。
+)
 
 :: 写入底模放置说明
 > "models\diffusion_models\放置底模在此.txt" (

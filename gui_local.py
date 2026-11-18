@@ -2,6 +2,7 @@ import os
 import sys
 import threading
 import subprocess
+import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -19,7 +20,7 @@ class ModernLocalTrainerGUI:
         self.root.title("OpenMOSS MOSS-Image 本地 LoRA 训练引擎控制台")
         
         # 窗口大小与屏幕居中适配 (适配各类笔记本与显示器)
-        win_w, win_h = 1120, 800
+        win_w, win_h = 1140, 820
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         pos_x = max(0, (screen_w - win_w) // 2)
@@ -58,6 +59,7 @@ class ModernLocalTrainerGUI:
         self.var_text_encoder_path = tk.StringVar(value="")
         self.var_vae_path = tk.StringVar(value="")
         self.var_models_status = tk.StringVar(value="点击【🔍 自动扫描】或手动点选文件")
+        self.var_trainer_status = tk.StringVar(value="检查中...")
 
         self.var_repeats = tk.IntVar(value=10)
         self.var_epochs = tk.IntVar(value=6)
@@ -77,6 +79,7 @@ class ModernLocalTrainerGUI:
         self.update_dataset_stats()
         self.recalculate_math()
         self.update_output_preview()
+        self.check_trainer_status()
 
         # 启动时执行一次静默自动底模探测并预填
         self.auto_scan_models(silent=True)
@@ -114,8 +117,8 @@ class ModernLocalTrainerGUI:
         main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
         # 左侧控制面板 (带平滑滚动条，确保小屏幕不被挤压)
-        left_outer = tk.Frame(main_paned, bg=self.card_bg, width=580)
-        main_paned.add(left_outer, minsize=520)
+        left_outer = tk.Frame(main_paned, bg=self.card_bg, width=590)
+        main_paned.add(left_outer, minsize=530)
 
         # 右侧实时监控与日志控制台
         right_container = tk.Frame(main_paned, bg=self.card_bg)
@@ -205,12 +208,11 @@ class ModernLocalTrainerGUI:
         lbl_preview = tk.Label(name_card, textvariable=self.var_output_preview, bg=self.card_bg, fg=self.accent_green, font=(self.font_family, 8))
         lbl_preview.grid(row=3, column=0, columnspan=2, sticky=tk.W)
 
-        # 3. 训练底模与组件权重设置卡片 (新增高亮功能：支持自选单文件 + 目录直达)
+        # 3. 训练底模与组件权重设置卡片
         model_card = tk.LabelFrame(parent, text=" 📦 训练底模与组件权重设置 (支持自选或自动探测) ", bg=self.card_bg, fg=self.accent_blue,
                                    font=(self.font_family, 9, "bold"), padx=10, pady=6)
         model_card.pack(fill=tk.X, pady=(0, 6))
 
-        # 顶端自动扫描按钮与状态展示
         scan_bar = tk.Frame(model_card, bg=self.card_bg)
         scan_bar.grid(row=0, column=0, columnspan=4, sticky=tk.EW, pady=(0, 4))
         btn_scan = tk.Button(scan_bar, text="🔍 自动扫描识别本地模型", bg="#313244", fg=self.accent_blue,
@@ -220,44 +222,73 @@ class ModernLocalTrainerGUI:
         lbl_mstat = tk.Label(scan_bar, textvariable=self.var_models_status, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8))
         lbl_mstat.pack(side=tk.LEFT, padx=8)
 
-        # (1) DiT 底模单文件选择 + 直达目录
+        # (1) DiT 底模
         self.create_file_row_with_folder(
             model_card, "DiT 底模文件:", self.var_transformer_path,
             browse_title="选择 MOSS-Image 底模文件 (moss_image_heal_bf16.safetensors 等)",
-            folder_path="models/diffusion_models", folder_tooltip="📂 打开底模放置目录",
+            folder_path="models/diffusion_models",
             row_idx=1
         )
 
-        # (2) 文本编码器单文件选择 + 直达目录
+        # (2) 文本编码器
         self.create_file_row_with_folder(
             model_card, "文本编码器文件:", self.var_text_encoder_path,
             browse_title="选择 Qwen3.5-9B 文本编码器 (qwen3.5_9b_bf16.safetensors 等)",
-            folder_path="models/text_encoders", folder_tooltip="📂 打开编码器放置目录",
+            folder_path="models/text_encoders",
             row_idx=2
         )
 
-        # (3) VAE 单文件选择 + 直达目录
+        # (3) VAE
         self.create_file_row_with_folder(
             model_card, "图像 VAE 文件:", self.var_vae_path,
             browse_title="选择 FLUX.2 VAE 文件 (flux2-vae_small.safetensors)",
-            folder_path="models/vae", folder_tooltip="📂 打开 VAE 放置目录",
+            folder_path="models/vae",
             row_idx=3
         )
 
-        # 4. 数据集与产出目录卡片 (带打开目录按钮)
+        # 4. 训练器框架管理卡片 (新增功能：一键直达放置目录、一键自动克隆、检查打补丁、网页直达)
+        trainer_card = tk.LabelFrame(parent, text=" 🛠️ 训练器框架管理 (KohakuMossTrainer) ", bg=self.card_bg, fg=self.accent_blue,
+                                     font=(self.font_family, 9, "bold"), padx=10, pady=6)
+        trainer_card.pack(fill=tk.X, pady=(0, 6))
+
+        t_status_bar = tk.Frame(trainer_card, bg=self.card_bg)
+        t_status_bar.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(t_status_bar, text="框架状态:", bg=self.card_bg, fg=self.text_main, width=10, anchor="w").pack(side=tk.LEFT)
+        lbl_tstat = tk.Label(t_status_bar, textvariable=self.var_trainer_status, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8, "bold"))
+        lbl_tstat.pack(side=tk.LEFT)
+
+        t_btn_bar = tk.Frame(trainer_card, bg=self.card_bg)
+        t_btn_bar.pack(fill=tk.X, pady=2)
+
+        btn_open_trainer = tk.Button(t_btn_bar, text="📂 打开训练器放置目录", bg="#313244", fg=self.accent_green, relief=tk.FLAT,
+                                     font=(self.font_family, 8, "bold"), cursor="hand2", command=self.open_trainer_folder)
+        btn_open_trainer.pack(side=tk.LEFT, padx=(0, 4))
+
+        btn_clone_trainer = tk.Button(t_btn_bar, text="⬇️ 一键自动克隆/下载", bg="#313244", fg=self.accent_blue, relief=tk.FLAT,
+                                      font=(self.font_family, 8), cursor="hand2", command=self.download_or_clone_trainer)
+        btn_clone_trainer.pack(side=tk.LEFT, padx=4)
+
+        btn_patch_trainer = tk.Button(t_btn_bar, text="🩹 检查并注入补丁", bg="#313244", fg=self.accent_yellow, relief=tk.FLAT,
+                                      font=(self.font_family, 8), cursor="hand2", command=self.patch_trainer_manually)
+        btn_patch_trainer.pack(side=tk.LEFT, padx=4)
+
+        btn_web_trainer = tk.Button(t_btn_bar, text="🌐 访问官方 GitHub", bg="#45475a", fg=self.text_main, relief=tk.FLAT,
+                                    font=(self.font_family, 8), cursor="hand2", command=self.open_trainer_github)
+        btn_web_trainer.pack(side=tk.LEFT, padx=4)
+
+        tk.Label(trainer_card, text="说明: 首次训练会自动克隆；若离线手动放置，请点击【📂 打开训练器放置目录】，将源码解压入内后点击【🩹 注入补丁】即可。",
+                 bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8), wraplength=520, justify=tk.LEFT).pack(fill=tk.X, pady=(2, 0))
+
+        # 5. 数据集与产出目录卡片
         path_card = tk.LabelFrame(parent, text=" 📂 数据集与产出目录 ", bg=self.card_bg, fg=self.accent_blue,
                                   font=(self.font_family, 9, "bold"), padx=10, pady=6)
         path_card.pack(fill=tk.X, pady=(0, 6))
 
-        # 训练图片目录
         self.create_dir_row_with_open(path_card, "训练图片目录:", self.var_data_dir, self.browse_data_dir, 0)
         stat_lbl = tk.Label(path_card, textvariable=self.var_dataset_stat, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8))
         stat_lbl.grid(row=1, column=1, sticky=tk.W, pady=(0, 2))
 
-        # 结果存放根目录
         self.create_dir_row_with_open(path_card, "结果存放根目录:", self.var_output_dir, self.browse_output_dir, 2)
-
-        # ComfyUI 模型库路径
         self.create_dir_row_with_open(path_card, "ComfyUI模型库:", self.var_comfy_models, self.browse_comfy_dir, 3)
 
         chk_comfy = tk.Checkbutton(path_card, text="训练完成后自动同步复制权重至 ComfyUI models/loras 专属子目录",
@@ -265,7 +296,7 @@ class ModernLocalTrainerGUI:
                                    selectcolor=self.input_bg, activebackground=self.card_bg, font=(self.font_family, 8))
         chk_comfy.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(3, 1))
 
-        # 5. 超参数配置卡片
+        # 6. 超参数配置卡片
         hp_card = tk.LabelFrame(parent, text=" ⚙️ 核心训练超参数 ", bg=self.card_bg, fg=self.accent_blue,
                                 font=(self.font_family, 9, "bold"), padx=10, pady=6)
         hp_card.pack(fill=tk.X, pady=(0, 6))
@@ -321,8 +352,7 @@ class ModernLocalTrainerGUI:
         cb_txt_dev.pack(side=tk.LEFT, padx=(0, 6))
         tk.Label(dev_f, text="(8GB 显卡请锁定 CPU 避免 OOM)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
 
-    def create_file_row_with_folder(self, parent, label_text, var, browse_title, folder_path, folder_tooltip, row_idx):
-        """创建带文件选择按钮与对应放置目录直达按钮的行。"""
+    def create_file_row_with_folder(self, parent, label_text, var, browse_title, folder_path, row_idx):
         tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=14, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=2)
         ent = tk.Entry(parent, textvariable=var, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
         ent.grid(row=row_idx, column=1, sticky=tk.EW, padx=4, pady=2)
@@ -346,7 +376,6 @@ class ModernLocalTrainerGUI:
         btn_open_dir.grid(row=row_idx, column=3, padx=2, pady=2)
 
     def create_dir_row_with_open(self, parent, label_text, var, browse_cmd, row_idx):
-        """创建带文件夹选择与直接打开文件夹按钮的行。"""
         tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=14, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=2)
         ent = tk.Entry(parent, textvariable=var, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
         ent.grid(row=row_idx, column=1, sticky=tk.EW, padx=4, pady=2)
@@ -359,6 +388,79 @@ class ModernLocalTrainerGUI:
         btn_open_dir = tk.Button(parent, text="📂 打开目录", bg="#313244", fg=self.accent_green, relief=tk.FLAT, font=(self.font_family, 8),
                                  cursor="hand2", command=lambda: self.open_in_explorer(var.get()))
         btn_open_dir.grid(row=row_idx, column=3, padx=2, pady=2)
+
+    # 训练器管理方法
+    def check_trainer_status(self):
+        trainer_dir = Path("./KohakuMossTrainer").resolve()
+        pyproject = trainer_dir / "pyproject.toml"
+        src_dir = trainer_dir / "src" / "kohakumoss"
+        if pyproject.exists() and src_dir.exists():
+            self.var_trainer_status.set("✅ 已就绪 (包含完整训练架构)")
+        elif trainer_dir.exists():
+            self.var_trainer_status.set("⚠️ 目录已创建，但尚未发现 pyproject.toml 文件")
+        else:
+            self.var_trainer_status.set("❌ 尚未就绪 (请点击下载或放置)")
+
+    def open_trainer_folder(self):
+        trainer_dir = Path("./KohakuMossTrainer").resolve()
+        if not trainer_dir.exists():
+            trainer_dir.mkdir(parents=True, exist_ok=True)
+            readme = trainer_dir / "训练器放置说明.txt"
+            readme.write_text(
+                "[KohakuMossTrainer 训练器放置说明]\n\n"
+                "请将从 GitHub 下载并解压的训练器源码文件全部放入本目录。\n"
+                "放置后，请确保直接打开本目录时能看到以下核心文件:\n"
+                " - pyproject.toml\n"
+                " - src/ (包含 kohakumoss 子目录)\n"
+                " - configs/\n"
+                " - scripts/\n\n"
+                "官方仓库地址: https://github.com/KohakuBlueleaf/KohakuMossTrainer\n"
+                "放置完成后，返回 GUI 界面点击【🩹 检查并注入补丁】即可就绪！\n",
+                encoding="utf-8"
+            )
+        self.open_in_explorer(str(trainer_dir))
+
+    def open_trainer_github(self):
+        webbrowser.open("https://github.com/KohakuBlueleaf/KohakuMossTrainer")
+
+    def patch_trainer_manually(self):
+        trainer_dir = Path("./KohakuMossTrainer").resolve()
+        if not (trainer_dir / "pyproject.toml").exists():
+            messagebox.showwarning("未发现训练器", "未在 KohakuMossTrainer 目录下找到 pyproject.toml！\n请先下载并放置源码文件后再注入补丁。")
+            return
+        try:
+            import train_local
+            train_local.apply_compatibility_patches(trainer_dir)
+            self.check_trainer_status()
+            messagebox.showinfo("补丁就绪", "自愈兼容补丁注入成功！\n已放宽 PyTorch 限制并完成接口适配。")
+        except Exception as e:
+            messagebox.showerror("补丁失败", f"注入补丁异常:\n{e}")
+
+    def download_or_clone_trainer(self):
+        trainer_dir = Path("./KohakuMossTrainer").resolve()
+        if (trainer_dir / "pyproject.toml").exists():
+            if not messagebox.askyesno("已存在", "检测到 KohakuMossTrainer 已经存在，是否强制重新克隆？"):
+                return
+
+        def worker():
+            self.log(f"\n{'='*75}\n>>> 正在从官方源拉取 KohakuMossTrainer 训练器...\n{'='*75}\n")
+            try:
+                cmd = ["git", "clone", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(trainer_dir)]
+                p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+                self.log(p.stdout + "\n")
+                if p.returncode == 0:
+                    import train_local
+                    train_local.apply_compatibility_patches(trainer_dir)
+                    self.root.after(0, self.check_trainer_status)
+                    self.log("[成功] 训练器框架克隆完成并已打入全套自愈补丁！\n")
+                    self.root.after(0, lambda: messagebox.showinfo("成功", "训练器框架下载并补丁成功，已完全就绪！"))
+                else:
+                    self.log("[失败] Git 克隆失败，请检查网络或点击【📂 打开训练器放置目录】手动下载放置 ZIP。\n")
+                    self.root.after(0, lambda: messagebox.showerror("克隆失败", "Git 克隆失败，建议使用浏览器下载 ZIP 手动解压放入。"))
+            except Exception as e:
+                self.log(f"[异常] {e}\n")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def auto_scan_models(self, silent=False):
         """自动从 ComfyUI 模型库或项目 ./models 探测并预填模型路径。"""
@@ -382,7 +484,7 @@ class ModernLocalTrainerGUI:
                 all_found = False
 
             if all_found:
-                self.var_models_status.set("✅ 底模/文本编码器/VAE 全部自动就绪！")
+                self.var_models_status.set("✅ 全部自动就绪！")
                 if not silent:
                     messagebox.showinfo("扫描成功", "已成功自动检索并匹配到全部三大核心模型权重！\n路径已自动填入输入框。")
             else:
@@ -420,12 +522,10 @@ class ModernLocalTrainerGUI:
                               font=(self.font_family, 8), command=self.clear_console)
         btn_clear.pack(side=tk.RIGHT)
 
-        # 终端文本框 (黑底绿字 Terminal 风格)
         self.console = tk.Text(card, bg="#11111b", fg="#a6e3a1", insertbackground="#a6e3a1",
                                font=("Consolas", 9), wrap=tk.WORD)
         self.console.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        # 底部大按钮操作区
         btn_bar = tk.Frame(card, bg=self.card_bg)
         btn_bar.pack(fill=tk.X)
 
@@ -529,6 +629,11 @@ class ModernLocalTrainerGUI:
         if self.is_training:
             return
 
+        # 检查训练器框架就绪状态
+        trainer_dir = Path("./KohakuMossTrainer").resolve()
+        if not (trainer_dir / "pyproject.toml").exists():
+            messagebox.showwarning("训练器未就绪", "检测到 KohakuMossTrainer 训练器尚未就绪！\n系统将在启动时自动尝试从 GitHub 克隆。若您网络无法访问 GitHub，请先点击【📂 打开训练器放置目录】手动解压源码。")
+
         # 检查数据集
         dpath = Path(self.var_data_dir.get())
         if not dpath.exists():
@@ -557,7 +662,6 @@ class ModernLocalTrainerGUI:
             "--vae_device", self.var_vae_device.get()
         ]
 
-        # 自选单模型文件透传
         if self.var_transformer_path.get().strip():
             cmd.extend(["--transformer_path", self.var_transformer_path.get().strip()])
         if self.var_text_encoder_path.get().strip():
@@ -573,7 +677,6 @@ class ModernLocalTrainerGUI:
         self.btn_start.config(state=tk.DISABLED, bg="#45475a")
         self.btn_stop.config(state=tk.NORMAL)
 
-        # 启动后台守护线程读取输出
         threading.Thread(target=self.run_subprocess_worker, args=(cmd,), daemon=True).start()
 
     def run_subprocess_worker(self, cmd):

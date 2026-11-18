@@ -20,13 +20,13 @@ class ModernLocalTrainerGUI:
         self.root.title("OpenMOSS MOSS-Image 本地 LoRA 训练引擎控制台")
         
         # 窗口大小与屏幕居中适配 (适配各类笔记本与显示器)
-        win_w, win_h = 1140, 820
+        win_w, win_h = 1240, 850
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         pos_x = max(0, (screen_w - win_w) // 2)
         pos_y = max(0, (screen_h - win_h) // 2)
         self.root.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
-        self.root.minsize(1000, 700)
+        self.root.minsize(1050, 720)
 
         # 调色盘与字体定义 (现代深色主题)
         self.bg_dark = "#181825"
@@ -81,6 +81,13 @@ class ModernLocalTrainerGUI:
         self.update_output_preview()
         self.check_trainer_status()
 
+        # 动态分配初始左右分栏位置，确保左侧控制区充足不被挤压
+        self.root.update_idletasks()
+        try:
+            self.main_paned.sash_place(0, 640, 0)
+        except Exception:
+            pass
+
         # 启动时执行一次静默自动底模探测并预填
         self.auto_scan_models(silent=True)
 
@@ -112,17 +119,17 @@ class ModernLocalTrainerGUI:
                            bg=self.card_bg, fg=self.accent_green, font=(self.font_family, 9))
         gpu_lbl.pack(side=tk.RIGHT, padx=14, pady=10)
 
-        # 2. 主体左右分栏
-        main_paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg=self.bg_dark, sashwidth=4)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        # 2. 主体左右分栏 (带清晰可拖拽分割条)
+        self.main_paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg=self.bg_dark, sashwidth=6, sashrelief=tk.RAISED)
+        self.main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
         # 左侧控制面板 (带平滑滚动条，确保小屏幕不被挤压)
-        left_outer = tk.Frame(main_paned, bg=self.card_bg, width=590)
-        main_paned.add(left_outer, minsize=530)
+        left_outer = tk.Frame(self.main_paned, bg=self.card_bg)
+        self.main_paned.add(left_outer, minsize=480)
 
         # 右侧实时监控与日志控制台
-        right_container = tk.Frame(main_paned, bg=self.card_bg)
-        main_paned.add(right_container, minsize=440)
+        right_container = tk.Frame(self.main_paned, bg=self.card_bg)
+        self.main_paned.add(right_container, minsize=380)
 
         self.build_left_scrollable(left_outer)
         self.build_right_panel(right_container)
@@ -154,20 +161,28 @@ class ModernLocalTrainerGUI:
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         scrollable_frame = tk.Frame(canvas, bg=self.card_bg)
 
+        # 核心关键：记录 window 实例并在 canvas 大小变动时动态同步绑定框架宽度
+        self.canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        def on_canvas_configure(event):
+            # 将可滚动框架的宽度强行锁定为 Canvas 的可见宽度，彻底杜绝内容横向超宽被遮挡
+            canvas.itemconfig(self.canvas_window, width=event.width)
+
+        canvas.bind("<Configure>", on_canvas_configure)
+
         scrollable_frame.bind(
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
 
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         canvas.bind_all("<MouseWheel>", on_mousewheel)
 
-        canvas.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
-        scrollbar.pack(side="right", fill="y", pady=6)
+        canvas.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
+        scrollbar.pack(side="right", fill="y", pady=4)
 
         self.build_left_controls(scrollable_frame)
 
@@ -205,8 +220,9 @@ class ModernLocalTrainerGUI:
         tk.Label(name_card, text="说明: 若填写触发词，系统自动前置注入每张图片标注；留空则直接使用原标注。",
                  bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(1, 2))
 
-        lbl_preview = tk.Label(name_card, textvariable=self.var_output_preview, bg=self.card_bg, fg=self.accent_green, font=(self.font_family, 8))
-        lbl_preview.grid(row=3, column=0, columnspan=2, sticky=tk.W)
+        lbl_preview = tk.Label(name_card, textvariable=self.var_output_preview, bg=self.card_bg, fg=self.accent_green,
+                               font=(self.font_family, 8), wraplength=480, justify=tk.LEFT)
+        lbl_preview.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
 
         # 3. 训练底模与组件权重设置卡片
         model_card = tk.LabelFrame(parent, text=" 📦 训练底模与组件权重设置 (支持自选或自动探测) ", bg=self.card_bg, fg=self.accent_blue,
@@ -214,7 +230,7 @@ class ModernLocalTrainerGUI:
         model_card.pack(fill=tk.X, pady=(0, 6))
 
         scan_bar = tk.Frame(model_card, bg=self.card_bg)
-        scan_bar.grid(row=0, column=0, columnspan=4, sticky=tk.EW, pady=(0, 4))
+        scan_bar.pack(fill=tk.X, pady=(0, 4))
         btn_scan = tk.Button(scan_bar, text="🔍 自动扫描识别本地模型", bg="#313244", fg=self.accent_blue,
                              activebackground=self.accent_blue, font=(self.font_family, 8, "bold"),
                              relief=tk.FLAT, padx=8, pady=2, cursor="hand2", command=lambda: self.auto_scan_models(silent=False))
@@ -223,78 +239,85 @@ class ModernLocalTrainerGUI:
         lbl_mstat.pack(side=tk.LEFT, padx=8)
 
         # (1) DiT 底模
-        self.create_file_row_with_folder(
-            model_card, "DiT 底模文件:", self.var_transformer_path,
+        self.create_file_picker_block(
+            model_card, "DiT 底模文件 (Diffusion Model):", self.var_transformer_path,
             browse_title="选择 MOSS-Image 底模文件 (moss_image_heal_bf16.safetensors 等)",
-            folder_path="models/diffusion_models",
-            row_idx=1
+            folder_path="models/diffusion_models"
         )
 
         # (2) 文本编码器
-        self.create_file_row_with_folder(
-            model_card, "文本编码器文件:", self.var_text_encoder_path,
+        self.create_file_picker_block(
+            model_card, "文本编码器文件 (Text Encoder):", self.var_text_encoder_path,
             browse_title="选择 Qwen3.5-9B 文本编码器 (qwen3.5_9b_bf16.safetensors 等)",
-            folder_path="models/text_encoders",
-            row_idx=2
+            folder_path="models/text_encoders"
         )
 
         # (3) VAE
-        self.create_file_row_with_folder(
-            model_card, "图像 VAE 文件:", self.var_vae_path,
+        self.create_file_picker_block(
+            model_card, "图像 VAE 文件 (Autoencoder):", self.var_vae_path,
             browse_title="选择 FLUX.2 VAE 文件 (flux2-vae_small.safetensors)",
-            folder_path="models/vae",
-            row_idx=3
+            folder_path="models/vae"
         )
 
-        # 4. 训练器框架管理卡片 (新增功能：一键直达放置目录、一键自动克隆、检查打补丁、网页直达)
+        # 4. 训练器框架管理卡片
         trainer_card = tk.LabelFrame(parent, text=" 🛠️ 训练器框架管理 (KohakuMossTrainer) ", bg=self.card_bg, fg=self.accent_blue,
                                      font=(self.font_family, 9, "bold"), padx=10, pady=6)
         trainer_card.pack(fill=tk.X, pady=(0, 6))
 
         t_status_bar = tk.Frame(trainer_card, bg=self.card_bg)
         t_status_bar.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(t_status_bar, text="框架状态:", bg=self.card_bg, fg=self.text_main, width=10, anchor="w").pack(side=tk.LEFT)
+        tk.Label(t_status_bar, text="框架状态:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 8, "bold")).pack(side=tk.LEFT)
         lbl_tstat = tk.Label(t_status_bar, textvariable=self.var_trainer_status, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8, "bold"))
-        lbl_tstat.pack(side=tk.LEFT)
+        lbl_tstat.pack(side=tk.LEFT, padx=6)
 
-        t_btn_bar = tk.Frame(trainer_card, bg=self.card_bg)
-        t_btn_bar.pack(fill=tk.X, pady=2)
-
-        btn_open_trainer = tk.Button(t_btn_bar, text="📂 打开训练器放置目录", bg="#313244", fg=self.accent_green, relief=tk.FLAT,
+        t_row1 = tk.Frame(trainer_card, bg=self.card_bg)
+        t_row1.pack(fill=tk.X, pady=2)
+        btn_open_trainer = tk.Button(t_row1, text="📂 打开训练器放置目录", bg="#313244", fg=self.accent_green, relief=tk.FLAT,
                                      font=(self.font_family, 8, "bold"), cursor="hand2", command=self.open_trainer_folder)
-        btn_open_trainer.pack(side=tk.LEFT, padx=(0, 4))
+        btn_open_trainer.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
-        btn_clone_trainer = tk.Button(t_btn_bar, text="⬇️ 一键自动克隆/下载", bg="#313244", fg=self.accent_blue, relief=tk.FLAT,
-                                      font=(self.font_family, 8), cursor="hand2", command=self.download_or_clone_trainer)
-        btn_clone_trainer.pack(side=tk.LEFT, padx=4)
+        btn_clone_trainer = tk.Button(t_row1, text="⬇️ 一键自动克隆/下载", bg=self.accent_blue, fg="#11111b", relief=tk.FLAT,
+                                      font=(self.font_family, 8, "bold"), cursor="hand2", command=self.download_or_clone_trainer)
+        btn_clone_trainer.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        btn_patch_trainer = tk.Button(t_btn_bar, text="🩹 检查并注入补丁", bg="#313244", fg=self.accent_yellow, relief=tk.FLAT,
+        t_row2 = tk.Frame(trainer_card, bg=self.card_bg)
+        t_row2.pack(fill=tk.X, pady=2)
+        btn_patch_trainer = tk.Button(t_row2, text="🩹 检查并注入补丁", bg="#313244", fg=self.accent_yellow, relief=tk.FLAT,
                                       font=(self.font_family, 8), cursor="hand2", command=self.patch_trainer_manually)
-        btn_patch_trainer.pack(side=tk.LEFT, padx=4)
+        btn_patch_trainer.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
-        btn_web_trainer = tk.Button(t_btn_bar, text="🌐 访问官方 GitHub", bg="#45475a", fg=self.text_main, relief=tk.FLAT,
+        btn_web_trainer = tk.Button(t_row2, text="🌐 访问官方 GitHub", bg="#45475a", fg=self.text_main, relief=tk.FLAT,
                                     font=(self.font_family, 8), cursor="hand2", command=self.open_trainer_github)
-        btn_web_trainer.pack(side=tk.LEFT, padx=4)
+        btn_web_trainer.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        tk.Label(trainer_card, text="说明: 首次训练会自动克隆；若离线手动放置，请点击【📂 打开训练器放置目录】，将源码解压入内后点击【🩹 注入补丁】即可。",
-                 bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8), wraplength=520, justify=tk.LEFT).pack(fill=tk.X, pady=(2, 0))
+        tk.Label(trainer_card, text="说明: 推荐点击【⬇️ 一键自动克隆/下载】全自动安装；若网络受限，可点击【📂 打开训练器放置目录】手动解压源码入内，并点击【🩹 检查并注入补丁】自愈修复。",
+                 bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8), wraplength=480, justify=tk.LEFT).pack(fill=tk.X, pady=(2, 0))
 
         # 5. 数据集与产出目录卡片
         path_card = tk.LabelFrame(parent, text=" 📂 数据集与产出目录 ", bg=self.card_bg, fg=self.accent_blue,
                                   font=(self.font_family, 9, "bold"), padx=10, pady=6)
         path_card.pack(fill=tk.X, pady=(0, 6))
 
-        self.create_dir_row_with_open(path_card, "训练图片目录:", self.var_data_dir, self.browse_data_dir, 0)
-        stat_lbl = tk.Label(path_card, textvariable=self.var_dataset_stat, bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8))
-        stat_lbl.grid(row=1, column=1, sticky=tk.W, pady=(0, 2))
+        self.create_dir_picker_block(
+            path_card, "训练图片目录 (成对 jpg/png + txt):", self.var_data_dir,
+            browse_cmd=self.browse_data_dir, stat_var=self.var_dataset_stat
+        )
 
-        self.create_dir_row_with_open(path_card, "结果存放根目录:", self.var_output_dir, self.browse_output_dir, 2)
-        self.create_dir_row_with_open(path_card, "ComfyUI模型库:", self.var_comfy_models, self.browse_comfy_dir, 3)
+        self.create_dir_picker_block(
+            path_card, "结果存放根目录 (LoRA 归档位置):", self.var_output_dir,
+            browse_cmd=self.browse_output_dir
+        )
+
+        self.create_dir_picker_block(
+            path_card, "ComfyUI 模型库目录 (自动复用无需下载):", self.var_comfy_models,
+            browse_cmd=self.browse_comfy_dir
+        )
 
         chk_comfy = tk.Checkbutton(path_card, text="训练完成后自动同步复制权重至 ComfyUI models/loras 专属子目录",
                                    variable=self.var_copy_comfy, bg=self.card_bg, fg=self.text_main,
-                                   selectcolor=self.input_bg, activebackground=self.card_bg, font=(self.font_family, 8))
-        chk_comfy.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(3, 1))
+                                   selectcolor=self.input_bg, activebackground=self.card_bg,
+                                   font=(self.font_family, 8), wraplength=480, justify=tk.LEFT)
+        chk_comfy.pack(fill=tk.X, pady=(4, 2))
 
         # 6. 超参数配置卡片
         hp_card = tk.LabelFrame(parent, text=" ⚙️ 核心训练超参数 ", bg=self.card_bg, fg=self.accent_blue,
@@ -352,42 +375,84 @@ class ModernLocalTrainerGUI:
         cb_txt_dev.pack(side=tk.LEFT, padx=(0, 6))
         tk.Label(dev_f, text="(8GB 显卡请锁定 CPU 避免 OOM)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
 
-    def create_file_row_with_folder(self, parent, label_text, var, browse_title, folder_path, row_idx):
-        tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=14, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=2)
-        ent = tk.Entry(parent, textvariable=var, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
-        ent.grid(row=row_idx, column=1, sticky=tk.EW, padx=4, pady=2)
-        parent.columnconfigure(1, weight=1)
+    def create_file_picker_block(self, parent, label_text, var, browse_title, folder_path, filetypes=None):
+        """
+        优雅防遮挡的两行式文件选择组件：
+        第1行：标签名 + 【📁 点此自选文件...】醒目大按钮 + 【📂 打开放置目录】
+        第2行：全宽单行输入框 (展示当前选定文件的绝对路径)
+        """
+        if filetypes is None:
+            filetypes = [("Safetensors模型", "*.safetensors"), ("所有模型", "*.safetensors *.pt *.bin"), ("所有文件", "*.*")]
+            
+        block = tk.Frame(parent, bg=self.card_bg)
+        block.pack(fill=tk.X, pady=3)
+
+        top_bar = tk.Frame(block, bg=self.card_bg)
+        top_bar.pack(fill=tk.X, pady=(0, 2))
+
+        tk.Label(top_bar, text=label_text, bg=self.card_bg, fg=self.text_main,
+                 font=(self.font_family, 8, "bold"), anchor="w").pack(side=tk.LEFT)
 
         def browse_file():
             selected = filedialog.askopenfilename(
                 title=browse_title,
-                filetypes=[("Safetensors模型", "*.safetensors"), ("所有模型", "*.safetensors *.pt *.bin"), ("所有文件", "*.*")]
+                filetypes=filetypes
             )
             if selected:
                 var.set(selected)
                 self.var_models_status.set("已手动自选模型权重")
+                self.update_output_preview()
 
-        btn_browse = tk.Button(parent, text="选择文件...", bg="#45475a", fg=self.text_main, relief=tk.FLAT, font=(self.font_family, 8),
-                               cursor="hand2", command=browse_file)
-        btn_browse.grid(row=row_idx, column=2, padx=2, pady=2)
+        # 醒目的青蓝强调色大按钮，方便用户一眼识别并点击自选
+        btn_browse = tk.Button(top_bar, text="📁 点此自选文件...", bg=self.accent_blue, fg="#11111b",
+                               relief=tk.FLAT, font=(self.font_family, 8, "bold"), cursor="hand2", padx=8, pady=1,
+                               command=browse_file)
+        btn_browse.pack(side=tk.RIGHT, padx=(4, 0))
 
-        btn_open_dir = tk.Button(parent, text="📂 打开放置目录", bg="#313244", fg=self.accent_green, relief=tk.FLAT, font=(self.font_family, 8),
-                                 cursor="hand2", command=lambda: self.open_in_explorer(folder_path))
-        btn_open_dir.grid(row=row_idx, column=3, padx=2, pady=2)
+        btn_open = tk.Button(top_bar, text="📂 打开放置目录", bg="#313244", fg=self.accent_green,
+                             relief=tk.FLAT, font=(self.font_family, 8), cursor="hand2", padx=6, pady=1,
+                             command=lambda: self.open_in_explorer(folder_path))
+        btn_open.pack(side=tk.RIGHT)
 
-    def create_dir_row_with_open(self, parent, label_text, var, browse_cmd, row_idx):
-        tk.Label(parent, text=label_text, bg=self.card_bg, fg=self.text_main, width=14, anchor="w").grid(row=row_idx, column=0, sticky=tk.W, pady=2)
-        ent = tk.Entry(parent, textvariable=var, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main)
-        ent.grid(row=row_idx, column=1, sticky=tk.EW, padx=4, pady=2)
-        parent.columnconfigure(1, weight=1)
+        ent = tk.Entry(block, textvariable=var, bg=self.input_bg, fg=self.text_main,
+                       insertbackground=self.text_main, relief=tk.SOLID, bd=1, font=("Consolas", 8))
+        ent.pack(fill=tk.X, pady=(1, 2))
 
-        btn_browse = tk.Button(parent, text="浏览...", bg="#45475a", fg=self.text_main, relief=tk.FLAT, font=(self.font_family, 8),
-                               cursor="hand2", command=browse_cmd)
-        btn_browse.grid(row=row_idx, column=2, padx=2, pady=2)
+    def create_dir_picker_block(self, parent, label_text, var, browse_cmd, open_target_cmd=None, stat_var=None):
+        """
+        优雅防遮挡的两行式目录选择组件：
+        第1行：标签名 + 【📁 点此自选文件夹...】醒目大按钮 + 【📂 打开目录】
+        第2行：全宽单行输入框 (展示选定目录绝对路径)
+        可选第3行：状态指示标签
+        """
+        block = tk.Frame(parent, bg=self.card_bg)
+        block.pack(fill=tk.X, pady=3)
 
-        btn_open_dir = tk.Button(parent, text="📂 打开目录", bg="#313244", fg=self.accent_green, relief=tk.FLAT, font=(self.font_family, 8),
-                                 cursor="hand2", command=lambda: self.open_in_explorer(var.get()))
-        btn_open_dir.grid(row=row_idx, column=3, padx=2, pady=2)
+        top_bar = tk.Frame(block, bg=self.card_bg)
+        top_bar.pack(fill=tk.X, pady=(0, 2))
+
+        tk.Label(top_bar, text=label_text, bg=self.card_bg, fg=self.text_main,
+                 font=(self.font_family, 8, "bold"), anchor="w").pack(side=tk.LEFT)
+
+        btn_browse = tk.Button(top_bar, text="📁 点此自选文件夹...", bg=self.accent_blue, fg="#11111b",
+                               relief=tk.FLAT, font=(self.font_family, 8, "bold"), cursor="hand2", padx=8, pady=1,
+                               command=browse_cmd)
+        btn_browse.pack(side=tk.RIGHT, padx=(4, 0))
+
+        target = open_target_cmd if open_target_cmd else lambda: self.open_in_explorer(var.get())
+        btn_open = tk.Button(top_bar, text="📂 打开此目录", bg="#313244", fg=self.accent_green,
+                             relief=tk.FLAT, font=(self.font_family, 8), cursor="hand2", padx=6, pady=1,
+                             command=target)
+        btn_open.pack(side=tk.RIGHT)
+
+        ent = tk.Entry(block, textvariable=var, bg=self.input_bg, fg=self.text_main,
+                       insertbackground=self.text_main, relief=tk.SOLID, bd=1, font=("Consolas", 8))
+        ent.pack(fill=tk.X, pady=(1, 2))
+
+        if stat_var:
+            lbl_stat = tk.Label(block, textvariable=stat_var, bg=self.card_bg, fg=self.accent_yellow,
+                                font=(self.font_family, 8), anchor="w")
+            lbl_stat.pack(fill=tk.X, pady=(0, 2))
 
     # 训练器管理方法
     def check_trainer_status(self):

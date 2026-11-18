@@ -83,6 +83,8 @@ class ModernLocalTrainerGUI:
         self.var_alpha = tk.DoubleVar(value=32.0)
         self.var_lr = tk.StringVar(value="1e-4")
         self.var_precision = tk.StringVar(value="bf16")
+        self.var_vram_preset = tk.StringVar(value=local_cfg.get("vram_preset", "auto"))
+        self.var_resolution = tk.StringVar(value=str(local_cfg.get("resolution", "1024")))
         self.var_text_device = tk.StringVar(value="cpu")
         self.var_vae_device = tk.StringVar(value="cuda")
 
@@ -128,7 +130,9 @@ class ModernLocalTrainerGUI:
                 "comfy_models_dir": self.var_comfy_models.get(),
                 "output_dir": self.var_output_dir.get(),
                 "lora_name": self.var_lora_name.get(),
-                "trigger_word": self.var_trigger_word.get()
+                "trigger_word": self.var_trigger_word.get(),
+                "vram_preset": self.var_vram_preset.get(),
+                "resolution": self.var_resolution.get()
             }
             self.config_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
@@ -408,12 +412,24 @@ class ModernLocalTrainerGUI:
         cb_prec = ttk.Combobox(lr_f, textvariable=self.var_precision, values=["bf16", "fp16"], width=7, state="readonly")
         cb_prec.pack(side=tk.LEFT, padx=(4, 0))
 
+        preset_f = tk.Frame(hp_card, bg=self.card_bg)
+        preset_f.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        tk.Label(preset_f, text="显存优化档位:", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        cb_vram = ttk.Combobox(preset_f, textvariable=self.var_vram_preset, values=["auto", "6g", "8g", "12g", "16g"], width=7, state="readonly")
+        cb_vram.pack(side=tk.LEFT, padx=(0, 14))
+        cb_vram.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+
+        tk.Label(preset_f, text="训练分辨率:", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
+        cb_res = ttk.Combobox(preset_f, textvariable=self.var_resolution, values=["1024", "768", "512"], width=7, state="readonly")
+        cb_res.pack(side=tk.LEFT, padx=(4, 0))
+        cb_res.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+
         dev_f = tk.Frame(hp_card, bg=self.card_bg)
-        dev_f.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(2, 4))
+        dev_f.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(2, 4))
         tk.Label(dev_f, text="文本提取设备:", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
         cb_txt_dev = ttk.Combobox(dev_f, textvariable=self.var_text_device, values=["cpu", "cuda"], width=7, state="readonly")
         cb_txt_dev.pack(side=tk.LEFT, padx=(0, 6))
-        tk.Label(dev_f, text="(8GB 显卡请锁定 CPU 避免 OOM)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        tk.Label(dev_f, text="(8GB 显卡请锁定 CPU 避免 OOM；显存档位 auto 智能推荐)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
 
     def create_file_picker_block(self, parent, label_text, var, browse_title, folder_path, filetypes=None):
         """
@@ -817,6 +833,8 @@ class ModernLocalTrainerGUI:
             "--alpha", str(self.var_alpha.get()),
             "--lr", str(self.var_lr.get()),
             "--precision", self.var_precision.get(),
+            "--vram_preset", self.var_vram_preset.get(),
+            "--resolution", str(self.var_resolution.get()),
             "--text_device", self.var_text_device.get(),
             "--vae_device", self.var_vae_device.get()
         ]

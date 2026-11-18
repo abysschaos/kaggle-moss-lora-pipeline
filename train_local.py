@@ -362,6 +362,10 @@ def main():
                         help="Learning rate (default: 1e-4)")
     parser.add_argument("--precision", type=str, default="bf16", choices=["bf16", "fp16"],
                         help="Training precision (bf16 recommended for RTX 40/30 series)")
+    parser.add_argument("--vram_preset", type=str, default="auto", choices=["auto", "6g", "8g", "12g", "16g"],
+                        help="VRAM optimization preset (auto, 6g, 8g, 12g, 16g)")
+    parser.add_argument("--resolution", type=int, default=1024,
+                        help="Target image resolution area for training (e.g. 1024, 768, 512)")
     parser.add_argument("--text_device", type=str, default="cpu", choices=["cpu", "cuda"],
                         help="Device for offline text encoder embedding extraction (cpu recommended for 8GB cards to prevent OOM)")
     parser.add_argument("--vae_device", type=str, default="cuda", choices=["cpu", "cuda"],
@@ -506,21 +510,46 @@ def main():
 
     is_int8_transformer = "int8" in transformer_filename.lower()
     
-    if vram_gb <= 10.0:
-        # 针对 8G 消费级显卡（如 RTX 3070 / 4060 等），应用官方极限 4G 压制配方：两层流式环形缓冲 + 激活与梯度全面卸载 + CPU 优化器
+    # 确定目标显存优化档位 (VRAM Preset)
+    selected_preset = args.vram_preset.lower()
+    if selected_preset == "auto":
+        if vram_gb <= 10.0:
+            effective_preset = "6g"
+        elif vram_gb <= 14.0:
+            effective_preset = "12g"
+        else:
+            effective_preset = "16g"
+        auto_note = f"(Auto-detected {vram_gb:.1f} GB VRAM -> selected '{effective_preset}')"
+    else:
+        effective_preset = selected_preset
+        auto_note = f"(Manually specified: '{effective_preset}')"
+
+    if effective_preset == "6g":
+        # 针对 6G/8G 消费级显卡（如 RTX 3070 / 4060 等），应用官方极限 4.4G 压制配方：两层流式环形缓冲 + 激活与梯度全面卸载 + CPU 优化器
         recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_6g.py")'
         max_tokens_val = 4352
         memory_profile_str = 'MEMORY_PROFILE = "ckpt-ring2-actoff-optcpu-gradoff"'
-        print(f" [VRAM Auto-Tune] Detected {vram_gb:.1f} GB VRAM (<=10GB). Applied vram_6g.py (extreme ~3.5G-4G VRAM profile).")
-    elif vram_gb <= 14.0:
+        print(f" [VRAM Preset] Applied 6G Profile (extreme ~4.4GB VRAM): {auto_note}")
+    elif effective_preset == "8g":
+        # 针对 8G 显卡标准配置，minimal profile (两层流式环形缓冲 + 激活梯度卸载 + host AdamW)
+        recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_8g.py")'
+        max_tokens_val = 4352
+        memory_profile_str = 'MEMORY_PROFILE = "minimal"'
+        print(f" [VRAM Preset] Applied 8G Profile (~5.5GB VRAM): {auto_note}")
+    elif effective_preset == "12g":
+        # 针对 12G 显卡进阶配置，recipes_lora_12g_stream.py
         recipe_import = 'use_config("../moss/recipes/recipes_lora_12g_stream.py")'
         max_tokens_val = 8192
         memory_profile_str = 'MEMORY_PROFILE = "low"'
-        print(f" [VRAM Auto-Tune] Detected {vram_gb:.1f} GB VRAM (<=14GB). Applied recipes_lora_12g_stream.py.")
+        print(f" [VRAM Preset] Applied 12G Profile (~8.5GB VRAM): {auto_note}")
     else:
+        # 针对 16G/24G 显卡满血极速配置
         recipe_import = 'use_config("../moss/recipes/recipes_lora_16g_fp16.py")'
         max_tokens_val = 16384
         memory_profile_str = ""
+        print(f" [VRAM Preset] Applied 16G Profile (full speed): {auto_note}")
+
+    print(f" [Resolution] Target Area: {args.resolution}x{args.resolution} ({args.resolution * args.resolution} px)")
 
     base_prec_str = 'BASE_PRECISION = "int8"' if is_int8_transformer else ""
 
@@ -538,7 +567,7 @@ DATASETS = [
     }}
 ]
 RESOLUTION_MODE = "resize"
-TARGET_AREA = 1024 * 1024
+TARGET_AREA = {args.resolution} * {args.resolution}
 UPSCALE = "never"
 ASPECT_RANGE = (0.33, 3.0)
 BATCHING = "tokens"

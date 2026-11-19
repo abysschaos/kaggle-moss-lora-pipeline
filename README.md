@@ -31,11 +31,11 @@
 
 在消费级显卡（如 8GB VRAM 的 RTX 4060 / 4070 Laptop）或免费云端容器（Tesla T4 16GB）上微调 50 亿参数的 MOSS-Image 单流 DiT 与 9B Qwen3.5 文本编码器，容易遭遇联合加载显存溢出（>22 GB）、PyTorch 动态库脱节、Windows Triton 中文路径解码失败以及半精度残差尖峰溢出。本项目在不修改原生权重格式的前提下，将环境治理、三阶解耦调度、多子集配比与视觉化监控打包为开箱即用的双轨工程系统。
 
-- **全谱系底模与显存弹性档位**：本地与云端双轨同步支持 `MOSS-Image-Base`、`MOSS-Image-heal` 与 `MOSS-Image-SFT` 三大变体自动探测，提供 `auto / 6g / 8g / 12g / 16g` 五档显存配置与 `1024 / 768 / 512` 动态分桶分辨率；对非 Heal 底模的 FP16 训练自动注入 `FP16_FIX="online"` 与 `FP16_FIX_KWARGS={"c": 1/16}` 防溢出系数。
-- **三阶时序解耦与零重复消费下载**：支持全盘宽域扫描并零拷贝复用现有 ComfyUI 模型库，按需路由 Qwen3.5-9B 至主机内存执行 CPU 离线文本特征提取（显存占用 0 GiB），随后由 GPU 提取 FLUX.2 VAE 潜向量并释放，最终在仅载入 5B DiT 与轻量适配器的状态下完成高精度微调。
-- **原生零黑框 Windows 桌面控制台与实时监控看板**：内建开源可审计 C# 启动器 [MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs)，1 秒无第三方依赖编译为约 80KB 的 `MOSS_LoRA_Trainer.exe`；配备深色宽屏界面、纯原生 `tk.Canvas` 实时 Loss / EMA 折线图、4 枚 KPI 卡片与独立任务栏图标分组。
-- **全场景断点续炼与中途暂停存盘**：支持 `fresh / resume / init_from` 三大训练模式、读取 `safetensors` 头部自动对齐已有架构、训练中途随时点击【暂停并存盘】安全退出并保留权重，以及每 10 秒后台增量同步导出产物到专属目录与 ComfyUI `models/loras/`。
-- **多子集配比与高阶适配器引擎**：支持单任务混合多个独立人物、画风或概念子目录，按子集独立注入触发词与 `Repeat` 权重，并提供【一键配平 Repeat】自动按图数反比对齐单轮曝光；双轨原生开放 `LoRA / LoHa / LoKr`、`DoRA`（自动配对 `DORA_DETACH=True`）、`LoRA+` 与 6 档 Transformer 注入层预设。
+- **全谱系底模与显存弹性档位**：本地与云端双轨同步支持 `MOSS-Image-Base`、`MOSS-Image-heal` 与 `MOSS-Image-SFT` 三大变体自动探测，提供 `auto / 6g / 8g / 12g / 16g` 五档精准校准显存配置（`MAX_TOKENS = 4352 / 6144 / 8192`）与 `1024 / 896 / 768 / 512` 动态分桶分辨率；支持 `--base_precision`（含 RTX 40 系+ `fp8_compute` + `FP8_DGRAD="16bit"` 守卫）与非 Heal 底模 `FP16_FIX="online"` 防溢出保护。
+- **三阶时序解耦与零重复消费下载**：支持全盘宽域扫描并零拷贝复用现有 ComfyUI 模型库，按需路由 Qwen3.5-9B 至主机内存执行 CPU 离线文本特征提取（当主机内存 ≥22GB 或 GPU ≥15GB 时智能优先选用全精度 BF16 文本编码器），随后由 GPU 提取 FLUX.2 VAE 潜向量并释放，最终在仅载入 5B DiT 与轻量适配器的状态下完成高精度微调。
+- **原生零黑框 Windows 桌面控制台与实时监控看板**：内建开源可审计 C# 启动器 [MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs)，1 秒无第三方依赖编译为约 80KB 的 `MOSS_LoRA_Trainer.exe`；配备深色宽屏界面、纯原生 `tk.Canvas` 实时 Loss / EMA 折线图、4 枚 KPI 卡片与独立任务栏图标分组，并内置基于真实 Token 打包吞吐与时间步重心 `Mu` 的动态推荐步数引擎。
+- **全场景断点续炼与中途暂停存盘**：支持 `fresh / resume / init_from` 三大训练模式、双轨同步解析 `safetensors` 头部自动对齐已有架构、训练中途随时点击【暂停并存盘】安全退出并保留权重，以及每 10 秒后台增量同步导出产物到专属目录与 ComfyUI `models/loras/`。
+- **多子集配比与高阶适配器引擎**：支持单任务混合多个独立人物、画风或概念子目录，按子集独立注入触发词与 `Repeat` 权重，并提供【一键配平 Repeat】自动按图数反比对齐单轮曝光；双轨原生开放 `LoRA / LoHa / LoKr`、`DoRA`（自动配对 `DORA_DETACH=True`）、`LoRA+`、6 档 Transformer 注入层预设、`--grad_acc` 梯度累积、`--timestep_mu` 噪声重心调节与默认 `OVERLONG="drop_tokens"` 防长文本丢图保护。
 
 ---
 
@@ -47,8 +47,8 @@ flowchart LR
     U2["Kaggle / Colab 云端<br/>(Notebook / train_moss.py)"] --> P1
     P1 --> P2["底层引擎与自愈补丁<br/>(KohakuMossTrainer + PAUSE 钩子 + objective 幂等修补)"]
     P2 --> S1["阶段 1: Qwen3.5-9B 文本离线提取<br/>(CPU 0 GiB 或 CUDA 并发)"]
-    S1 --> S2["阶段 2: FLUX.2 VAE 潜空间提取<br/>(动态分桶 1024/768/512)"]
-    S2 --> S3["阶段 3: 5B DiT Flow Matching 微调<br/>(LoRA/DoRA/LoHa/LoKr + LoRA+)"]
+    S1 --> S2["阶段 2: FLUX.2 VAE 潜空间提取<br/>(动态分桶 1024/896/768/512)"]
+    S2 --> S3["阶段 3: 5B DiT Flow Matching 微调<br/>(LoRA/DoRA/LoRA+ + GradAcc/Mu)"]
     S3 --> O1["ComfyUI 原生即插权重<br/>(<lora_name>-comfy.safetensors)"]
     S3 --> O2["LyCORIS 全量架构权重<br/>(<lora_name>-lycoris.safetensors + training_summary.json)"]
 ```
@@ -61,7 +61,7 @@ flowchart LR
 | :--- | :--- | :--- |
 | **目标硬件** | Tesla T4 / P100 (16GB) / Colab L4 / A100 | RTX 4070 / 4060 / 3060 / 2060 (6GB ~ 16GB VRAM) |
 | **计算精度** | `auto` 智能嗅探（T4 自动 FP16 + 防溢出，L4/A100 用 BF16） | 原生硬件级 BF16（Turing 显卡自动平滑回退 FP16） |
-| **显存档位与分辨率** | 支持 `auto / 6g / 8g / 12g / 16g` 与 `1024 / 768 / 512` | GUI / CLI 自由切换显存档位与目标分辨率 |
+| **显存档位与分辨率** | 支持 `auto / 6g / 8g / 12g / 16g` 与 `1024 / 896 / 768 / 512` | GUI / CLI 自由切换显存档位、`896` 甜点分辨率与底模计算精度 |
 | **底模变体支持** | `heal` / `base` / `sft` 全谱系，支持 `int8` 与全精度自动拉取 | 自动探测并直连现有本地 `Base` / `Heal` / `SFT` 文件 |
 | **单步实测参考速度** | ~42 秒 / step (1024) 或 ~24 秒 / step (768, T4) | ~7 - 9 秒 / step (RTX 40 系列, 提速约 4.5 倍) |
 | **模型资产依赖** | 从 HuggingFace 按所选变体与量化规格高速拉取 | 优先零拷贝复用本机 ComfyUI 模型库，无需重复下载 |
@@ -76,7 +76,7 @@ flowchart LR
 ### 方式一：Windows 本地极速上手（3 步零黑框启动）
 
 #### 1. 获取项目代码与发行工具
-- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.2.2)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
+- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.3.0)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
 - **Git 命令行克隆**：
   ```bash
   git clone https://github.com/abysschaos/kaggle-moss-lora-pipeline.git
@@ -117,7 +117,7 @@ flowchart LR
 # 查看当前版本
 python train_local.py --version
 
-# 常规单图集 + DoRA + 8GB 显存档位训练
+# 常规单人角色 + DoRA + 梯度累积 + 精细细节 Mu=0.35 + 896 甜点分辨率训练
 python train_local.py `
     --data_dir "./dataset/my_char" `
     --lora_name "my_char_dora_v1" `
@@ -126,13 +126,18 @@ python train_local.py `
     --epochs 4 `
     --steps 400 `
     --rank 32 `
-    --alpha 16.0 `
+    --alpha 32.0 `
     --algo lora `
     --dora `
-    --target_preset attn-mlp+text-refiner `
+    --target_preset attn-mlp `
     --loraplus_ratio 2.0 `
-    --vram_preset 8g `
-    --resolution 1024 `
+    --grad_acc 2 `
+    --timestep_mu 0.35 `
+    --vram_preset 16g `
+    --resolution 896 `
+    --base_precision auto `
+    --tune off `
+    --overlong drop_tokens `
     --precision bf16 `
     --text_device cpu `
     --copy_to_comfy_loras
@@ -163,7 +168,7 @@ python train_local.py `
     --copy_to_comfy_loras
 ```
 
-> 本地 31 个 CLI 开关与云端 27 个 CLI / 环境变量参数全表，请参阅 [docs/parameter_configuration_reference.md](docs/parameter_configuration_reference.md)。
+> 本地 36 个 CLI 开关与云端 32 个 CLI / 环境变量参数全表，请参阅 [docs/parameter_configuration_reference.md](docs/parameter_configuration_reference.md)。
 
 ### 3. 断点续炼与已有 LoRA 继续微调
 
@@ -185,6 +190,8 @@ python train_local.py `
 | `VRAM_PRESET` | `auto` | `train_moss.py` | 云端显存档位：`auto` / `6g` / `8g` / `12g` / `16g` |
 | `ALGO` / `USE_DORA` | `lora` / `false` | `train_moss.py` | 控制低秩算法（`lora`/`loha`/`lokr`）与 DoRA 开关 |
 | `TARGET_PRESET` / `LORAPLUS_RATIO` | `attn-mlp` / `1.0` | `train_moss.py` | Transformer 注入层预设与 LoRA+ 上投影学习率倍率 |
+| `GRAD_ACC` / `TIMESTEP_MU` | `1` / `-1.09` | `train_moss.py` | 梯度累积步数与 Logit-Normal 噪声采样重心（`-1.09` 画风 / `0.35` 角色） |
+| `BASE_PRECISION` / `TUNE` / `OVERLONG` | `auto` / `off` / `drop_tokens` | `train_moss.py` | 底模计算精度（含 `sm89+` 守卫）、Triton 调优与超长截断保护 |
 | `SUBSETS_JSON` | 空 | `train_moss.py` | 多子集配比 JSON 数组或文件路径 |
 
 ---
@@ -210,7 +217,7 @@ python train_local.py `
 
 ```text
 kaggle_moss_lora_pipeline/
-├── VERSION                                    # 单一版本信源 (1.2.2)
+├── VERSION                                    # 单一版本信源 (1.3.0)
 ├── LICENSE                                    # Apache License 2.0 开源协议
 ├── CHANGELOG.md                               # Keep a Changelog 1.1.0 演进记录
 ├── README.md                                  # 项目主文档与全双轨操作指南
@@ -253,9 +260,9 @@ kaggle_moss_lora_pipeline/
     ├── local_installation_guide.md            # Windows 本地安装、底模下载与零拷贝复用指南
     ├── local_deployment_guide.md              # 消费级显卡 8GB 显存解耦与 BF16 原理白皮书
     ├── kaggle_deployment_guide.md             # Kaggle 纯网页端与 CLI 自动化操作手册
-    ├── parameter_configuration_reference.md   # 本地 31 项与云端 27 项参数速查与 JSON 范例
-    ├── hyperparameter_tuning_guide.md         # 画风/人物/多子集/DoRA/LoHa/LoKr 超参数调优指南
-    ├── dit_flow_matching_guide.md             # 5B DiT 连续流匹配与 Token Packing 数学模型
+    ├── parameter_configuration_reference.md   # 本地 36 项与云端 32 项参数速查与 JSON 范例
+    ├── hyperparameter_tuning_guide.md         # 画风/人物/多子集/DoRA/LoRA+ 与 Mu 时间步调优指南
+    ├── dit_flow_matching_guide.md             # 5B DiT 连续流匹配、Logit-Normal Mu 与 Token Packing 模型
     ├── comfyui_inference_guide.md             # ComfyUI 原生节点配置与 SLG 推理规范
     ├── troubleshooting_matrix.md              # 25 个迭代沉淀的排错矩阵与底层根因实录
     └── github_release_workflow_template.yml   # GitHub Actions 自动编译与 Release 工作流参考模板
@@ -270,7 +277,7 @@ kaggle_moss_lora_pipeline/
 3. [Kaggle 云端部署与自定义训练完全手册](docs/kaggle_deployment_guide.md)：纯网页三步挂载、全参数内联脚本与 CLI 无头投递拉取流程。
 4. [全量参数调节位置与 CLI / 环境变量速查手册](docs/parameter_configuration_reference.md)：精准对照 `train_local.py` 与 `train_moss.py` 全量开关、多子集 JSON 格式与默认配置文件生成位置。
 5. [超参数调优与高阶适配器实战指南](docs/hyperparameter_tuning_guide.md)：涵盖画风 vs 人物差异、多子集 Repeat 均衡、DoRA / LoHa / LoKr / LoRA+ 与生物特征剪枝（Token Pruning）。
-6. [5B DiT 与 Flow Matching 训练工程理论](docs/dit_flow_matching_guide.md)：连续流速度场微调、`MAX_TOKENS=16384` Token Packing 步数公式与底模 `heal` 平滑依据。
+6. [5B DiT 与 Flow Matching 训练工程理论](docs/dit_flow_matching_guide.md)：连续流速度场微调、`4352 / 6144 / 8192` Token Packing 真实吞吐公式、`TIMESTEP_MU` 分布与 `int8` vs `fp8_compute` 量化机制。
 7. [ComfyUI 官方原生推理规范与避坑指南](docs/comfyui_inference_guide.md)：CFG 3.0~3.5、Shift 5.0、SLG 跳层 22 与 `lora_unet_` 键名映射解析。
 8. [全流程排障实录与错误矩阵](docs/troubleshooting_matrix.md)：涵盖 TorchVision C++ 算子脱节、PyTorch 2.11 `empty_host_cache` 兼容、Flow Matching 假性收敛等 17 项真实故障诊断与修复方案。
 9. [完整版本变更日志](CHANGELOG.md)：严格遵循 Keep a Changelog 1.1.0 规范记录各版本演进与 Git 对比链接。
@@ -280,8 +287,8 @@ kaggle_moss_lora_pipeline/
 ## 常见问题与排错指引
 
 - **Windows 报错 `UnicodeDecodeError` 或 Triton 缓存失败**：确保项目根目录、数据集路径与输出路径均不含中文与空格；引擎默认已自动强制绑定 `C:/tmp/moss_pipeline` 作为安全临时与 Triton 缓存根目录。
-- **训练初期 Loss 迅速下降但出图几乎看不出 LoRA 效果**：MOSS-Image (5B DiT) 具备极强原生先验，且引擎采用 Token Packing（1 步 ≈ 4 图），需保证单图等效遍历与目标 Alpha（建议画风 `Alpha = Rank`，人物 `Alpha = 0.5 * Rank ~ Rank`，步数参照公式对齐）。
-- **显存只有 6GB 或 8GB 却加载全精度底模 OOM**：确认 GUI 或 CLI 设为 `--vram_preset 6g`（或 `auto`）与 `--text_device cpu`，优先使用 `int8` 量化 DiT 与 `768` 分辨率。
+- **训练初期 Loss 迅速下降但出图几乎看不出 LoRA 效果**：MOSS-Image (5B DiT) 具备极强原生先验，且引擎按显存档位动态 Token Packing（1024 下约 1 图/包，896 下 `16g` 约 2 图/包，768 下约 2~3 图/包）；角色五官等微细特征建议适当提升 `Alpha = Rank`、设 `TIMESTEP_MU = 0.35` 并保证足够优化步数。
+- **显存只有 6GB 或 8GB 却加载全精度底模 OOM**：确认 GUI 或 CLI 设为 `--vram_preset 6g`（或 `auto`）、`--base_precision auto` 与 `--text_device cpu`，优先使用 `int8` 量化 DiT 与 `896` 或 `768` 分辨率。
 - **手动放置 `KohakuMossTrainer` 无法识别**：请确认源码直接位于根目录 `KohakuMossTrainer/` 下，即 `KohakuMossTrainer/pyproject.toml` 位于第一层，切忌保留 ZIP 解压出来的双层 `KohakuMossTrainer-main/` 套娃目录；点击 GUI 中的【🩹 检查并注入补丁】即可自动完成自愈修复。
 
 ---

@@ -56,11 +56,24 @@ parser.add_argument("--subsets_json", type=str, default=os.environ.get("SUBSETS_
                     help="Optional JSON file path or JSON array string for multi-subset training")
 parser.add_argument("--lr", type=str, default=os.environ.get("LR", "1e-4"),
                     help="Learning rate (default: 1e-4)")
+parser.add_argument("--grad_acc", type=int, default=int(os.environ.get("GRAD_ACC", "1")),
+                    help="Gradient accumulation steps (default: 1; 2~4 stabilizes complex outfits on <=12GB)")
+parser.add_argument("--timestep_mu", type=float, default=float(os.environ.get("TIMESTEP_MU", "-1.09")),
+                    help="MossTimestep truncated logit-normal mean mu (-1.09=89%% high-noise style, 0.0~0.35=low-noise detail)")
+parser.add_argument("--base_precision", type=str, default=os.environ.get("BASE_PRECISION", "auto"),
+                    choices=["auto", "int8", "fp8", "fp8_compute", "compute"],
+                    help="Frozen backbone storage/compute precision: auto, int8, fp8, fp8_compute, compute")
+parser.add_argument("--tune", type=str, default=os.environ.get("TUNE", "off"),
+                    choices=["off", "table"],
+                    help="Triton kernel autotuner mode: off (default) or table")
+parser.add_argument("--overlong", type=str, default=os.environ.get("OVERLONG", "drop_tokens"),
+                    choices=["drop_tokens", "drop"],
+                    help="Overlong sample handling when tokens exceed MAX_TOKENS (default: drop_tokens)")
 parser.add_argument("--vram_preset", type=str, default=os.environ.get("VRAM_PRESET", "auto"),
                     choices=["auto", "6g", "8g", "12g", "16g"],
                     help="VRAM optimization preset: auto, 6g, 8g, 12g, 16g (default: auto)")
 parser.add_argument("--resolution", type=int, default=int(os.environ.get("RESOLUTION", "1024")),
-                    help="Target training image resolution area, e.g. 1024, 768, 512 (default: 1024)")
+                    help="Target training image resolution area, e.g. 1024, 896, 768, 512 (default: 1024)")
 parser.add_argument("--variant", type=str, default=os.environ.get("MODEL_VARIANT", os.environ.get("VARIANT", "heal")),
                     choices=["heal", "base", "sft"],
                     help="Backbone model variant: heal (MOSS-Image-heal), base (MOSS-Image-Base), sft (MOSS-Image-SFT)")
@@ -96,12 +109,14 @@ print(f">>> OpenMOSS MOSS-Image Cloud LoRA Training Engine v{APP_VERSION} <<<")
 print(f">>> Target LoRA: '{args.lora_name}' | Trigger Word: '{args.trigger_word if args.trigger_word else '(None)'}' <<<")
 print(f">>> Hyperparameters: Repeats={args.repeats}, Epochs={args.epochs}, Steps={args.steps} <<<")
 print(f">>> Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, Preset={args.target_preset}, LoRA+={args.loraplus_ratio} <<<")
-print(f">>> Dimensions: Rank={args.rank}, Alpha={args.alpha}, LR={args.lr} <<<")
+print(f">>> Dimensions: Rank={args.rank}, Alpha={args.alpha}, LR={args.lr}, GradAcc={max(1, int(args.grad_acc))} <<<")
+print(f">>> Dynamics: TimestepMu={args.timestep_mu}, BasePrec={args.base_precision}, Tune={args.tune}, Overlong={args.overlong} <<<")
 print(f">>> Cloud Options: Variant={args.variant}, VRAM={args.vram_preset}, Res={args.resolution}, Quant={args.base_quant}, Prec={args.precision} <<<")
 print("=" * 75)
 
 # 1. 验证 GPU 与宿主机 PyTorch / TorchVision 原生驱动
 vram_gb = 16.0
+sm_major, sm_minor = 0, 0
 bf16_supported = False
 try:
     import torch
@@ -112,9 +127,11 @@ try:
     print(f"CUDA Available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
-        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        props = torch.cuda.get_device_properties(0)
+        vram_gb = props.total_memory / (1024**3)
+        sm_major, sm_minor = int(props.major), int(props.minor)
         bf16_supported = torch.cuda.is_bf16_supported()
-        print(f"GPU Device: {gpu_name}")
+        print(f"GPU Device: {gpu_name} (sm{sm_major}{sm_minor})")
         print(f"Total VRAM: {vram_gb:.2f} GB | Native BF16 Supported: {bf16_supported}")
         boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0]], device="cuda")
         scores = torch.tensor([0.9], device="cuda")
@@ -152,15 +169,15 @@ elif effective_preset == "8g":
     memory_profile_str = 'MEMORY_PROFILE = "minimal"'
     print(f" [VRAM Preset] Applied 8G Profile (~5.5GB VRAM): {vram_note}")
 elif effective_preset == "12g":
-    recipe_import = 'use_config("../moss/recipes/recipes_lora_12g_stream.py")'
+    recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_12g.py")'
+    max_tokens_val = 6144
+    memory_profile_str = 'MEMORY_PROFILE = "ckpt-ring4-actoff-optstream-gradoff"'
+    print(f" [VRAM Preset] Applied 12G Profile (~8.5GB VRAM, MAX_TOKENS=6144): {vram_note}")
+else:
+    recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_16g.py")'
     max_tokens_val = 8192
     memory_profile_str = 'MEMORY_PROFILE = "low"'
-    print(f" [VRAM Preset] Applied 12G Profile (~8.5GB VRAM): {vram_note}")
-else:
-    recipe_import = 'use_config("../moss/recipes/recipes_lora_16g_fp16.py")'
-    max_tokens_val = 16384
-    memory_profile_str = ""
-    print(f" [VRAM Preset] Applied 16G Profile (full speed): {vram_note}")
+    print(f" [VRAM Preset] Applied 16G Profile (MAX_TOKENS=8192, MEMORY_PROFILE=low): {vram_note}")
 
 if args.precision == "auto":
     effective_precision = "bf16" if bf16_supported else "fp16"
@@ -543,9 +560,39 @@ else:  # sft
         hf_filename = "diffusion_models/moss_image_sft_bf16.safetensors"
     fp16_fix_val = "online" if effective_precision == "fp16" else "none"
 
+def _resolve_base_precision_cfg(req_base_prec: str, is_int8_file: bool, sm_major: int, sm_minor: int) -> tuple:
+    req = (req_base_prec or "auto").lower()
+    sm_ok_fp8 = (sm_major > 8) or (sm_major == 8 and sm_minor >= 9)
+    if is_int8_file:
+        if req in ("fp8", "fp8_compute"):
+            print(f" [Base Precision Guard] Pre-quantized int8_convrot backbone cannot run as '{req}'. Falling back to 'int8'.")
+            return "int8", 'BASE_PRECISION = "int8"'
+        if req == "compute":
+            return "compute", 'BASE_PRECISION = "compute"'
+        return "int8", 'BASE_PRECISION = "int8"'
+    if req == "int8":
+        return "int8", 'BASE_PRECISION = "int8"'
+    if req == "fp8":
+        if sm_ok_fp8:
+            return "fp8", 'BASE_PRECISION = "fp8"'
+        print(f" [Base Precision Guard] GPU sm{sm_major}{sm_minor} < sm89 -> falling back to 'int8'.")
+        return "int8", 'BASE_PRECISION = "int8"'
+    if req == "fp8_compute":
+        if sm_ok_fp8:
+            return "fp8_compute", 'BASE_PRECISION = "fp8_compute"\nFP8_DGRAD = "16bit"'
+        print(f" [Base Precision Guard] GPU sm{sm_major}{sm_minor} < sm89 -> falling back to 'int8'.")
+        return "int8", 'BASE_PRECISION = "int8"'
+    if req == "compute":
+        return "compute", 'BASE_PRECISION = "compute"'
+    return "auto", ""
+
+
 transformer_filename = os.path.basename(hf_filename)
 is_int8_transformer = "int8" in transformer_filename.lower()
-base_prec_str = 'BASE_PRECISION = "int8"' if is_int8_transformer else ""
+effective_base_prec, base_prec_str = _resolve_base_precision_cfg(
+    args.base_precision, is_int8_transformer, sm_major, sm_minor
+)
+print(f" [Base Precision] Effective Backbone Mode: {effective_base_prec}")
 
 print(f"\n>>> Downloading Model Weights to /tmp/models (Variant: {selected_variant.upper()} -> Arch: {arch_variant.upper()})...")
 print(f"1/3 Downloading DiT Transformer ({repo_id} :: {hf_filename})...")
@@ -590,23 +637,65 @@ if not os.path.exists(trainer_runs):
 
 
 def _inspect_safetensors(sf_path: str) -> dict:
-    info = {"rank": None, "alpha": None, "step": None}
+    info = {
+        "rank": None,
+        "alpha": None,
+        "step": None,
+        "algo": "lora",
+        "dora": False,
+        "preset": None,
+    }
     try:
         import struct
         with open(sf_path, "rb") as f:
             h_size = struct.unpack("<Q", f.read(8))[0]
             hdr = json.loads(f.read(h_size).decode("utf-8"))
         meta = hdr.get("__metadata__", {}) or {}
+        tensor_keys = [k for k in hdr.keys() if k != "__metadata__"]
+
         if "ss_network_dim" in meta:
-            info["rank"] = int(float(meta["ss_network_dim"]))
+            try:
+                info["rank"] = int(float(meta["ss_network_dim"]))
+            except Exception:
+                pass
         if "ss_network_alpha" in meta:
-            info["alpha"] = float(meta["ss_network_alpha"])
+            try:
+                info["alpha"] = float(meta["ss_network_alpha"])
+            except Exception:
+                pass
         if "kohakumoss_step" in meta:
-            info["step"] = int(meta["kohakumoss_step"])
+            try:
+                info["step"] = int(meta["kohakumoss_step"])
+            except Exception:
+                pass
+        if "kohakumoss_spec" in meta:
+            try:
+                spec = json.loads(meta["kohakumoss_spec"])
+                if info["rank"] is None and "dim" in spec:
+                    info["rank"] = int(spec["dim"])
+                if info["alpha"] is None and "alpha" in spec:
+                    info["alpha"] = float(spec["alpha"])
+                if spec.get("algo"):
+                    info["algo"] = str(spec["algo"]).lower()
+                if "dora" in spec:
+                    info["dora"] = bool(spec["dora"])
+                if spec.get("preset") and isinstance(spec["preset"], str):
+                    info["preset"] = spec["preset"]
+            except Exception:
+                pass
+
+        if any(k.endswith(".dora_scale") for k in tensor_keys):
+            info["dora"] = True
+        if info["algo"] == "lora":
+            if any(".hada_w1_" in k for k in tensor_keys):
+                info["algo"] = "loha"
+            elif any(".lokr_w" in k for k in tensor_keys):
+                info["algo"] = "lokr"
+
         if info["rank"] is None:
-            for k, v in hdr.items():
-                if k != "__metadata__" and k.endswith(".lora_down.weight"):
-                    shp = v.get("shape", [])
+            for k in tensor_keys:
+                if k.endswith(".lora_down.weight") or k.endswith(".hada_w1_b") or k.endswith(".lokr_w2_b"):
+                    shp = hdr[k].get("shape", [])
                     if len(shp) >= 2:
                         info["rank"] = int(shp[0])
                         break
@@ -662,6 +751,15 @@ if train_mode == "resume":
             args.rank = l_info["rank"]
             if l_info.get("alpha"):
                 args.alpha = l_info["alpha"]
+        if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
+            print(f" [Resume Auto-Align] Aligned Algo {args.algo} -> {l_info['algo']}")
+            args.algo = l_info["algo"]
+        if bool(l_info.get("dora", False)) != bool(args.dora):
+            print(f" [Resume Auto-Align] Aligned DoRA {args.dora} -> {bool(l_info.get('dora', False))}")
+            args.dora = bool(l_info.get("dora", False))
+        if l_info.get("preset") and l_info["preset"] != args.target_preset:
+            print(f" [Resume Auto-Align] Aligned Target Preset {args.target_preset} -> {l_info['preset']}")
+            args.target_preset = l_info["preset"]
         resume_cfg_str = f'RESUME = "{Path(chosen_ckpt).as_posix()}"'
         if args.steps <= resumed_step:
             effective_steps = resumed_step + args.steps
@@ -706,6 +804,15 @@ if train_mode == "init_from":
         args.rank = l_info["rank"]
         if l_info.get("alpha"):
             args.alpha = l_info["alpha"]
+    if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
+        print(f" [Init-From Auto-Align] Aligned Algo {args.algo} -> {l_info['algo']}")
+        args.algo = l_info["algo"]
+    if bool(l_info.get("dora", False)) != bool(args.dora):
+        print(f" [Init-From Auto-Align] Aligned DoRA {args.dora} -> {bool(l_info.get('dora', False))}")
+        args.dora = bool(l_info.get("dora", False))
+    if l_info.get("preset") and l_info["preset"] != args.target_preset:
+        print(f" [Init-From Auto-Align] Aligned Target Preset {args.target_preset} -> {l_info['preset']}")
+        args.target_preset = l_info["preset"]
     init_from_cfg_str = f'INIT_FROM = "{stage_init_dir}"'
     print(f" [Init-From] Continuing training from existing LoRA: {chosen_sf} (Rank={args.rank}, Alpha={args.alpha}, Steps={effective_steps})")
 
@@ -732,7 +839,7 @@ UPSCALE = "never"
 ASPECT_RANGE = (0.33, 3.0)
 BATCHING = "tokens"
 MAX_TOKENS = {max_tokens_val}
-OVERLONG = "drop"
+OVERLONG = "{args.overlong}"
 CAPTION = {{
     "template": "nl",
 }}
@@ -746,7 +853,9 @@ IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
 VAE_ENCODE = {{"compile": "off"}}
 """
 
-warmup_steps = min(30, max(1, int(effective_steps * 0.05))) if effective_steps > 5 else 0
+warmup_steps = min(100, max(5, int(effective_steps * 0.05))) if effective_steps > 10 else 0
+grad_acc_val = max(1, int(args.grad_acc))
+timestep_mu_val = float(args.timestep_mu)
 save_every_val = max(0, int(args.save_every))
 fp16_fix_kwargs_str = 'FP16_FIX_KWARGS = {"c": 1 / 16}' if fp16_fix_val == "online" else "FP16_FIX_KWARGS = {}"
 
@@ -774,7 +883,7 @@ TRANSFORMER = "{transformer_filename}"
 {init_from_cfg_str}
 SAMPLE_EVERY = 0
 VALIDATE_EVERY = 0
-TUNE = "off"
+TUNE = "{args.tune}"
 FP16_FIX = "{fp16_fix_val}"
 {fp16_fix_kwargs_str}
 PRECISION = "{effective_precision}"
@@ -787,7 +896,16 @@ LORAPLUS_RATIO = {loraplus_val}
 DIM = {args.rank}
 ALPHA = {args.alpha}
 STEPS = {effective_steps}
+GRAD_ACC = {grad_acc_val}
 LR = {args.lr}
+TIMESTEP = "moss"
+TIMESTEP_KWARGS = {{
+    "mu": {timestep_mu_val},
+    "s": 0.95,
+    "shift": 1.0,
+    "cutoff": 0.95,
+    "uniform_mix": 0.01,
+}}
 SAVE_EVERY = {save_every_val}
 SAVE_MINUTES = 25
 KEEP_LAST = 5
@@ -911,6 +1029,11 @@ summary_data = {
     "vram_preset": effective_preset,
     "resolution": args.resolution,
     "precision": effective_precision,
+    "base_precision": effective_base_prec,
+    "grad_acc": grad_acc_val,
+    "timestep_mu": timestep_mu_val,
+    "tune": args.tune,
+    "overlong": args.overlong,
     "fp16_fix": fp16_fix_val,
     "text_device": effective_text_device,
     "vae_device": args.vae_device,

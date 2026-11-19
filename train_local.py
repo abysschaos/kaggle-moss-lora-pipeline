@@ -144,7 +144,73 @@ def find_broad_comfy_paths():
 
     return found_models, found_pythons
 
-def probe_local_models(comfy_models_dir: str = None) -> dict:
+def _get_host_ram_gb() -> float:
+    """探测主机物理内存容量 (GB)，用于智能决定 CPU 离线文本特征提取是否优先选用 BF16 权重。"""
+    try:
+        import ctypes
+
+        class _MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        mem = _MEMORYSTATUSEX()
+        mem.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem)):
+            return mem.ullTotalPhys / (1024 ** 3)
+    except Exception:
+        pass
+    return 16.0
+
+
+def _resolve_base_precision_cfg(req_base_prec: str, is_int8_file: bool, sm_major: int, sm_minor: int) -> tuple:
+    """校验并生成 BASE_PRECISION 与配套 FP8_DGRAD 配置字符串。"""
+    req = (req_base_prec or "auto").lower()
+    sm_ok_fp8 = (sm_major > 8) or (sm_major == 8 and sm_minor >= 9)
+    if is_int8_file:
+        if req in ("fp8", "fp8_compute"):
+            print(
+                f" [Base Precision Guard] Pre-quantized int8_convrot backbone cannot run as '{req}'. "
+                "Automatically falling back to 'int8'."
+            )
+            return "int8", 'BASE_PRECISION = "int8"'
+        if req == "compute":
+            return "compute", 'BASE_PRECISION = "compute"'
+        return "int8", 'BASE_PRECISION = "int8"'
+
+    # 16-bit (bf16 / fp16) 底模分支
+    if req == "int8":
+        return "int8", 'BASE_PRECISION = "int8"'
+    if req == "fp8":
+        if sm_ok_fp8:
+            return "fp8", 'BASE_PRECISION = "fp8"'
+        print(
+            f" [Base Precision Guard] GPU compute capability sm{sm_major}{sm_minor} < sm89 (Ada/Blackwell). "
+            "FP8 requires RTX 40/50 series -> falling back to 'int8'."
+        )
+        return "int8", 'BASE_PRECISION = "int8"'
+    if req == "fp8_compute":
+        if sm_ok_fp8:
+            return "fp8_compute", 'BASE_PRECISION = "fp8_compute"\nFP8_DGRAD = "16bit"'
+        print(
+            f" [Base Precision Guard] GPU compute capability sm{sm_major}{sm_minor} < sm89 (Ada/Blackwell). "
+            "fp8_compute requires RTX 40/50 series -> falling back to 'int8'."
+        )
+        return "int8", 'BASE_PRECISION = "int8"'
+    if req == "compute":
+        return "compute", 'BASE_PRECISION = "compute"'
+    return "auto", ""
+
+
+def probe_local_models(comfy_models_dir: str = None, prefer_bf16_te: bool = False) -> dict:
     """智能检索本地已有的 MOSS-Image 底模、文本编码器与 VAE，实现零下载秒级就绪。"""
     search_dirs = []
     if comfy_models_dir and os.path.exists(comfy_models_dir):
@@ -188,12 +254,19 @@ def probe_local_models(comfy_models_dir: str = None) -> dict:
         if found["transformer"]:
             break
 
-    # 2. 查找 Text Encoder (Qwen3.5-9B，优先匹配量化版 int8 避免 16GB 物理内存发生溢出换页)
-    text_candidates = [
-        "**/qwen3.5_9b_int8_convrot.safetensors",
-        "**/qwen3.5_9b_bf16.safetensors",
-        "**/qwen3.5_9b.safetensors"
-    ]
+    # 2. 查找 Text Encoder (Qwen3.5-9B，内存充裕或大显存时优先 BF16 提升离线特征精度，否则优先 int8 防换页)
+    if prefer_bf16_te:
+        text_candidates = [
+            "**/qwen3.5_9b_bf16.safetensors",
+            "**/qwen3.5_9b.safetensors",
+            "**/qwen3.5_9b_int8_convrot.safetensors"
+        ]
+    else:
+        text_candidates = [
+            "**/qwen3.5_9b_int8_convrot.safetensors",
+            "**/qwen3.5_9b_bf16.safetensors",
+            "**/qwen3.5_9b.safetensors"
+        ]
     for sdir in search_dirs:
         for pat in text_candidates:
             matches = list(sdir.glob(pat))
@@ -892,10 +965,21 @@ def main():
                         help="Learning rate (default: 1e-4)")
     parser.add_argument("--precision", type=str, default="bf16", choices=["bf16", "fp16"],
                         help="Training precision (bf16 recommended for RTX 40/30 series)")
+    parser.add_argument("--base_precision", type=str, default="auto",
+                        choices=["auto", "int8", "fp8", "fp8_compute", "compute"],
+                        help="Frozen backbone storage/compute precision (auto, int8, fp8, fp8_compute, compute)")
+    parser.add_argument("--grad_acc", type=int, default=1,
+                        help="Gradient accumulation steps (1=fast default; 2~4 stabilizes complex character details on 8GB)")
+    parser.add_argument("--timestep_mu", type=float, default=-1.09,
+                        help="MossTimestep truncated logit-normal mean mu (-1.09=89%% high-noise style focus, 0.0~0.35=more low-noise garment/face details)")
+    parser.add_argument("--tune", type=str, default="off", choices=["off", "table"],
+                        help="Triton/kernel autotuner mode: off (fast start) or table (benchmark & cache best kernels)")
+    parser.add_argument("--overlong", type=str, default="drop_tokens", choices=["drop_tokens", "drop"],
+                        help="Strategy when image+text tokens exceed MAX_TOKENS (default: drop_tokens to preserve long captions)")
     parser.add_argument("--vram_preset", type=str, default="auto", choices=["auto", "6g", "8g", "12g", "16g"],
                         help="VRAM optimization preset (auto, 6g, 8g, 12g, 16g)")
     parser.add_argument("--resolution", type=int, default=1024,
-                        help="Target image resolution area for training (e.g. 1024, 768, 512)")
+                        help="Target image resolution area for training (e.g. 1024, 896, 768, 512)")
     parser.add_argument("--variant", type=str, default="auto", choices=["auto", "base", "sft"],
                         help="Model architecture variant ('auto', 'base', 'sft'). Auto-detected from weights filename by default.")
     parser.add_argument("--train_mode", type=str, default="fresh", choices=["fresh", "resume", "init_from"],
@@ -927,18 +1011,24 @@ def main():
     print(f"Dedicated Output Directory:   {lora_dedicated_folder}")
     print(f"OS: Windows | Target Precision: {args.precision.upper()} | Text Device: {args.text_device.upper()}")
     print(f"Adapter Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, Preset={args.target_preset}")
-    print(f"Hyperparameters: Steps={args.steps}, Dim={args.rank}, Alpha={args.alpha}, LR={args.lr}")
+    print(f"Hyperparameters: Steps={args.steps}, GradAcc={max(1, int(args.grad_acc))}, Dim={args.rank}, Alpha={args.alpha}, LR={args.lr}")
+    print(f"Dynamics & Precision: TimestepMu={args.timestep_mu}, BasePrec={args.base_precision}, Tune={args.tune}, Overlong={args.overlong}")
 
     # 1. 硬件与 PyTorch 环境预检
+    total_vram = 16.0
+    sm_major, sm_minor = 0, 0
+    total_ram_gb = _get_host_ram_gb()
     try:
         import torch
         import torchvision
         print(f"PyTorch Version: {torch.__version__} | CUDA Available: {torch.cuda.is_available()}")
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
-            total_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            props = torch.cuda.get_device_properties(0)
+            total_vram = props.total_memory / (1024**3)
+            sm_major, sm_minor = int(props.major), int(props.minor)
             bf16_ok = torch.cuda.is_bf16_supported()
-            print(f"GPU: {gpu_name} | VRAM: {total_vram:.2f} GB | BF16 Supported: {bf16_ok}")
+            print(f"GPU: {gpu_name} (sm{sm_major}{sm_minor}) | VRAM: {total_vram:.2f} GB | Host RAM: {total_ram_gb:.1f} GB | BF16 Supported: {bf16_ok}")
             if args.precision == "bf16" and not bf16_ok:
                 print(">>> NOTICE: Current GPU does not support native BF16 (e.g. Turing/Pascal). Falling back to FP16 automatically!")
                 args.precision = "fp16"
@@ -952,6 +1042,10 @@ def main():
         print(f"Error checking PyTorch/CUDA environment: {e}")
         sys.exit(1)
 
+    prefer_bf16_te = (args.text_device == "cpu" and total_ram_gb >= 22.0) or (total_vram >= 15.0)
+    if prefer_bf16_te:
+        print(f" [TE Selection] Host RAM={total_ram_gb:.1f} GB / VRAM={total_vram:.1f} GB -> preferring BF16 Qwen3.5-9B if present.")
+
     # 2. 定位或自选模型权重 (支持用户点选单文件与自动探测混合模式)
     print_banner("Locating Base Models and Weights")
     weights_info = {"transformer": None, "text_encoder": None, "vae": None}
@@ -962,7 +1056,7 @@ def main():
         weights_info["transformer"] = Path(args.transformer_path).resolve()
         print(f" [User Specified] Transformer:  {weights_info['transformer']}")
     else:
-        auto_detected = probe_local_models(args.comfy_models_dir)
+        auto_detected = probe_local_models(args.comfy_models_dir, prefer_bf16_te=prefer_bf16_te)
         weights_info["transformer"] = auto_detected["transformer"]
         print(f" [Auto Probed]    Transformer:  {weights_info['transformer']}")
 
@@ -972,7 +1066,7 @@ def main():
         print(f" [User Specified] Text Encoder: {weights_info['text_encoder']}")
     else:
         if not auto_detected:
-            auto_detected = probe_local_models(args.comfy_models_dir)
+            auto_detected = probe_local_models(args.comfy_models_dir, prefer_bf16_te=prefer_bf16_te)
         weights_info["text_encoder"] = auto_detected["text_encoder"]
         print(f" [Auto Probed]    Text Encoder: {weights_info['text_encoder']}")
 
@@ -982,7 +1076,7 @@ def main():
         print(f" [User Specified] VAE:          {weights_info['vae']}")
     else:
         if not auto_detected:
-            auto_detected = probe_local_models(args.comfy_models_dir)
+            auto_detected = probe_local_models(args.comfy_models_dir, prefer_bf16_te=prefer_bf16_te)
         weights_info["vae"] = auto_detected["vae"]
         print(f" [Auto Probed]    VAE:          {weights_info['vae']}")
 
@@ -1088,17 +1182,17 @@ def main():
         memory_profile_str = 'MEMORY_PROFILE = "minimal"'
         print(f" [VRAM Preset] Applied 8G Profile (~5.5GB VRAM): {auto_note}")
     elif effective_preset == "12g":
-        # 针对 12G 显卡进阶配置，recipes_lora_12g_stream.py
-        recipe_import = 'use_config("../moss/recipes/recipes_lora_12g_stream.py")'
+        # 针对 12G 显卡进阶配置，严格对齐上游 vram_12g.py（保留 gradoff 防 OOM）
+        recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_12g.py")'
+        max_tokens_val = 6144
+        memory_profile_str = 'MEMORY_PROFILE = "ckpt-ring4-actoff-optstream-gradoff"'
+        print(f" [VRAM Preset] Applied 12G Profile (~8.5GB VRAM, MAX_TOKENS=6144): {auto_note}")
+    else:
+        # 针对 16G/24G 显卡标准高吞吐配置，对齐上游 vram_16g.py（解耦 fp16 配方避免 BF16 混用）
+        recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_16g.py")'
         max_tokens_val = 8192
         memory_profile_str = 'MEMORY_PROFILE = "low"'
-        print(f" [VRAM Preset] Applied 12G Profile (~8.5GB VRAM): {auto_note}")
-    else:
-        # 针对 16G/24G 显卡满血极速配置
-        recipe_import = 'use_config("../moss/recipes/recipes_lora_16g_fp16.py")'
-        max_tokens_val = 16384
-        memory_profile_str = ""
-        print(f" [VRAM Preset] Applied 16G Profile (full speed): {auto_note}")
+        print(f" [VRAM Preset] Applied 16G Profile (MAX_TOKENS=8192, MEMORY_PROFILE=low): {auto_note}")
 
     print(f" [Resolution] Target Area: {args.resolution}x{args.resolution} ({args.resolution * args.resolution} px)")
 
@@ -1112,7 +1206,10 @@ def main():
         variant_note = "(Manually specified)"
     print(f" [Model Variant] Architecture: {model_variant.upper()} {variant_note}")
 
-    base_prec_str = 'BASE_PRECISION = "int8"' if is_int8_transformer else ""
+    effective_base_prec, base_prec_str = _resolve_base_precision_cfg(
+        args.base_precision, is_int8_transformer, sm_major, sm_minor
+    )
+    print(f" [Base Precision] Effective Backbone Mode: {effective_base_prec}")
 
     # 5.5 处理训练模式: 全新训练 (fresh) / 断点续炼 (resume) / 基于已有 LoRA 继续训练 (init_from)
     train_mode = args.train_mode.lower()
@@ -1221,7 +1318,7 @@ UPSCALE = "never"
 ASPECT_RANGE = (0.33, 3.0)
 BATCHING = "tokens"
 MAX_TOKENS = {max_tokens_val}
-OVERLONG = "drop"
+OVERLONG = "{args.overlong}"
 CAPTION = {{
     "template": "nl",
 }}
@@ -1235,7 +1332,9 @@ IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
 VAE_ENCODE = {{"compile": "off"}}
 """
 
-    warmup_steps = min(30, max(1, int(effective_steps * 0.05))) if effective_steps > 5 else 0
+    warmup_steps = min(100, max(5, int(effective_steps * 0.05))) if effective_steps > 10 else 0
+    grad_acc_val = max(1, int(args.grad_acc))
+    timestep_mu_val = float(args.timestep_mu)
     save_every_val = max(0, int(args.save_every))
     is_healed_backbone = "heal" in transformer_filename.lower()
     fp16_fix_val = "online" if (args.precision == "fp16" and not is_healed_backbone) else "none"
@@ -1274,7 +1373,7 @@ TRANSFORMER = "{transformer_filename}"
 {init_from_cfg_str}
 SAMPLE_EVERY = 0
 VALIDATE_EVERY = 0
-TUNE = "off"
+TUNE = "{args.tune}"
 FP16_FIX = "{fp16_fix_val}"
 {fp16_fix_kwargs_str}
 PRECISION = "{args.precision}"
@@ -1287,7 +1386,16 @@ LORAPLUS_RATIO = {loraplus_val}
 DIM = {args.rank}
 ALPHA = {args.alpha}
 STEPS = {effective_steps}
+GRAD_ACC = {grad_acc_val}
 LR = {args.lr}
+TIMESTEP = "moss"
+TIMESTEP_KWARGS = {{
+    "mu": {timestep_mu_val},
+    "s": 0.95,
+    "shift": 1.0,
+    "cutoff": 0.95,
+    "uniform_mix": 0.01,
+}}
 SAVE_EVERY = {save_every_val}
 SAVE_MINUTES = 20
 KEEP_LAST = 5
@@ -1419,6 +1527,11 @@ SCHEDULE = {{
         "loraplus_ratio": loraplus_val,
         "learning_rate": args.lr,
         "precision": args.precision,
+        "base_precision": effective_base_prec,
+        "grad_acc": grad_acc_val,
+        "timestep_mu": timestep_mu_val,
+        "tune": args.tune,
+        "overlong": args.overlong,
         "vram_preset": effective_preset,
         "resolution": args.resolution,
         "model_variant": model_variant,

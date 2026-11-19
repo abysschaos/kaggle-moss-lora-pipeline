@@ -78,22 +78,27 @@ EPOCHS = 4                          # 训练轮数 (人物推荐 3~5，画风推
 STEPS = 400                         # 核心步数 (公式: 图片数 * REPEATS * EPOCHS // 4)
 
 RANK = 32                           # LoRA 矩阵秩 (单概念推荐 32，多人物/多画风推荐 48~64)
-ALPHA = 16.0                        # 缩放系数 (人物推荐 16.0，画风推荐 32.0)
+ALPHA = 32.0                        # 缩放系数 (建议与 Rank 对齐 = 32.0 避免 5B 先验稀释)
 LR = "1e-4"                         # 学习率 (Base/Heal 推荐 1e-4，SFT 画风推荐 1.2e-4~1.5e-4)
+GRAD_ACC = 1                        # 梯度累积步数 (单画风=1 极速；角色/多子集混合=2)
+TIMESTEP_MU = -1.09                 # 时间步采样重心 (-1.09=画风高噪；-0.60=多画风；0.0=动作；0.35=人物细节)
 
 # --- 进阶适配器架构与多子集配比控制 ---
 ALGO = "lora"                       # 算法: "lora" | "loha"(高容量哈达玛) | "lokr"(紧凑克罗内克)
-USE_DORA = False                    # 是否启用 DoRA 权重分解 (多人物/多画风/细节还原建议 True)
+USE_DORA = False                    # 是否启用 DoRA 权重分解 (人物/多画风/细节还原建议 True)
 TARGET_PRESET = "attn-mlp"          # 注入层: "attn" | "attn-mlp" | "attn-mlp+modulation" | "attn-mlp+text-refiner" | "full-block" | "all"
-LORAPLUS_RATIO = 1.0                # LoRA+ 上投影学习率倍率 (1.0=关闭，多概念建议 2.0~4.0)
+LORAPLUS_RATIO = 1.0                # LoRA+ 上投影学习率倍率 (1.0=关闭，人物/多概念建议 2.0~4.0)
 SUBSETS_JSON = ""                   # 留空 "" 为单图集；填写 JSON 数组可开启多子集配比
 
 # --- 云端显存优化、分辨率与底模变体控制 ---
 MODEL_VARIANT = "heal"              # 底模分支: "heal"(推荐防溢出) | "base"(官方原版) | "sft"(官方SFT对齐版)
-VRAM_PRESET = "auto"                # 显存档位: "auto" | "6g"(极限4.4G) | "8g"(均衡5.5G) | "12g"(流式8.5G) | "16g"(满血)
-RESOLUTION = 1024                   # 目标分辨率: 1024(标准高清) | 768(T4加速约44%) | 512(快速测试)
-BASE_QUANT = "auto"                 # 底模量化: "auto" | "int8"(下载体积减半且省显存) | "full"
+VRAM_PRESET = "auto"                # 显存档位: "auto" | "6g"(4352) | "8g"(4352) | "12g"(6144) | "16g"(8192)
+RESOLUTION = 1024                   # 目标分辨率: 1024(标准高清) | 896(黄金甜点) | 768(T4加速) | 512(快速测试)
+BASE_QUANT = "auto"                 # 底模权重来源: "auto" | "int8"(下载体积减半且省显存) | "full"
+BASE_PRECISION = "auto"             # 底模计算精度: "auto" | "int8" | "fp8" | "fp8_compute"(L4/A100 sm89+) | "compute"
 PRECISION = "auto"                  # 计算精度: "auto"(T4自动FP16，L4/A100自动BF16) | "fp16" | "bf16"
+TUNE = "off"                        # Triton 调优: "off" | "table"
+OVERLONG = "drop_tokens"            # 超长图文策略: "drop_tokens"(保留全图仅截断超限文本) | "drop"
 TEXT_DEVICE = "auto"                # 文本编码器设备: "auto" | "cuda" | "cpu"
 
 # --- 续炼与存档间隔控制 ---
@@ -123,11 +128,16 @@ cmd = [
     "--target_preset", str(TARGET_PRESET),
     "--loraplus_ratio", str(LORAPLUS_RATIO),
     "--lr", str(LR),
+    "--grad_acc", str(GRAD_ACC),
+    "--timestep_mu", str(TIMESTEP_MU),
     "--variant", str(MODEL_VARIANT),
     "--vram_preset", str(VRAM_PRESET),
     "--resolution", str(RESOLUTION),
     "--base_quant", str(BASE_QUANT),
+    "--base_precision", str(BASE_PRECISION),
     "--precision", str(PRECISION),
+    "--tune", str(TUNE),
+    "--overlong", str(OVERLONG),
     "--text_device", str(TEXT_DEVICE),
     "--train_mode", str(TRAIN_MODE),
     "--save_every", str(SAVE_EVERY),
@@ -203,12 +213,12 @@ subprocess.run(cmd, check=True)
 
 | 场景目标 | Repeats / Epochs / Steps | Rank / Alpha | 推荐适配器配置 | 触发词与多子集建议 |
 | :--- | :--- | :--- | :--- | :--- |
-| **二次元 / 艺术画风** | `10` / `6` / `600` | `32` / `32.0` | `lora` + `attn-mlp`（可选 `+dora` 与 `+modulation`） | 填风格词，如 `in the style of my_style` |
-| **特定动漫 / 游戏人物** | `6` / `4` / `400` | `32` / `16.0` | `lora` + `dora` + `attn-mlp+text-refiner` | 必须填独特专有词，如 `makima_char` |
-| **多人物 / 多画风融合** | 按各子集图数反比配平 / `6~8` / `700~1000` | `48~64` / `48.0~64.0` | `lora`（或 `loha`）+ `dora` + `loraplus_ratio=2.0` | 启用 `SUBSETS_JSON` 为每角色/每画风绑定独立子目录与触发词 |
-| **特定动作 / 服饰概念** | `8` / `5` / `500` | `32` / `24.0~32.0` | `lora` + `attn-mlp+text-refiner` | 填具体动作/物体名词，确保主体人物环境分散 |
+| **二次元 / 艺术画风** | `10` / `6` / `600` | `32` / `32.0` | `lora` + `attn-mlp` + `GradAcc=1` + `Mu=-1.09` | 填风格词，如 `in the style of my_style` |
+| **特定动漫 / 游戏人物** | `6` / `4` / `360~400` | `32` / `32.0` | `lora` + `dora` + `loraplus=2.0` + `GradAcc=2` + `Mu=0.35` | 必须填独特专有词，如 `makima_char` |
+| **多人物 / 多画风融合** | 按各子集图数反比配平 / `4~5` | `48` / `48.0` | `lora` + `dora` + `loraplus=2.0` + `GradAcc=2` + (`Mu=0.35`人物/`-0.60`画风) | 启用 `SUBSETS_JSON` 为每角色/每画风绑定独立子目录与触发词 |
+| **特定动作 / 服饰概念** | `8` / `4` / `400~500` | `32` / `32.0` | `lora` + `dora` + `attn-mlp+text-refiner` + `GradAcc=2` + `Mu=0.0` | 填具体动作/物体名词，确保主体人物环境分散 |
 
-> **步数对齐小公式**：
-> 当您拥有 $N$ 张图片时，建议核心步数设为：
-> $$\text{Steps} = \frac{N \times \text{Repeats} \times \text{Epochs}}{4}$$
-> 确保模型既不欠拟合（学得太浅），也不过拟合（画面崩坏溢出）。
+> **动态步数对齐公式**：
+> 当您拥有 $N$ 张图片，有效 Token 打包与梯度累积等效批大小为 $B_{\text{eff}} = \lfloor \frac{\text{MAX\_TOKENS}}{(\text{res}/16)^2+160} \rfloor \times \text{GRAD\_ACC}$ 时，GUI 会按时间步重心划分推荐除数（画风 $\mu \le -0.3$ 时基础除数 `4`，人物/概念 $\mu > -0.3$ 时基础除数 `2`）：
+> $$\text{Steps} = \frac{N \times \text{Repeats} \times \text{Epochs}}{\max(\text{基础除数},\ B_{\text{eff}})}$$
+> 在保持 `GradAcc=1, Mu=-1.09` 的标准画风训练下即自动沿用 $\div 4$ 极速节奏。

@@ -35,7 +35,7 @@
 在主优化训练阶段：
 - GPU 显存内仅载入 5B DiT 主干与外挂的轻量级 LoRA 权重矩阵（Rank 32, Alpha 32.0）；
 - 数据加载管道直接从本地磁盘流式读取预先提取的 Text Embeddings 与 Image Latents；
-- 实测 5B DiT 在单步最大 Token 容量（`MAX_TOKENS = 16384`）下的反向传播显存峰值稳定在 **3.5 GiB**；
+- 实测 5B DiT 在单步安全打包预算（`6g/8g: MAX_TOKENS = 4352`、`12g: 6144`、`16g: 8192`，配合默认 `OVERLONG = "drop_tokens"` 防长文本静默丢图）下的反向传播显存峰值稳定在 **3.5 ~ 8.5 GiB**；
 - 在 8.0 GiB 的物理显存总额下，系统保留了多达 **4.5 GiB 的安全裕度**，从根本上终结了爆显存隐患。
 
 ---
@@ -55,7 +55,7 @@
 传统的云端训练脚本在每次初始化时都需要从 HuggingFace 重新拉取上百 GB 的底模与分词器，消耗巨额网络带宽与等待时间。
 
 `train_local.py` 内置了**智能资产探测器（Smart Model Discovery）**：
-- 能够全自动跨盘符遍历本地现有的 ComfyUI 模型库路径（例如 `D:\ComfyUI\models\` 或 `E:\AI\ComfyUI-aki\ComfyUI\models\`）；
+- `train_local.py` 内置**内存感知文本编码器自动择优**与**零拷贝模型探测**：当系统可用/总内存 `>= 22 GB` 或 GPU 显存 `>= 15 GB` 时优先选用高精度 `qwen3.5_9b_bf16`；否则在 16GB 主机内存上优雅降级匹配 `qwen3.5_9b_int8_convrot`（仅需 ~5.0 GB RAM）确保不崩溃；
 - 自动识别并链接修复版底模 `moss_image_heal_bf16.safetensors`、文本编码器 `qwen3.5_9b_bf16.safetensors` 以及 `flux2-vae_small.safetensors`；
 - 通过文件级快速映射或硬链接在秒级内完成环境就绪，实现**全程零网络流量消耗**。
 
@@ -105,15 +105,21 @@ python train_local.py `
     --algo lora `
     --target_preset attn-mlp `
     --vram_preset auto `
-    --resolution 1024 `
+    --resolution 896 `
+    --grad_acc 1 `
+    --timestep_mu -1.09 `
+    --base_precision auto `
+    --tune off `
+    --overlong drop_tokens `
     --lr 1e-4 `
     --precision bf16 `
     --text_device cpu `
     --copy_to_comfy_loras
 ```
 
-- **`--vram_preset`**：支持 `auto / 6g / 8g / 12g / 16g`。低于 10GB 显存时自动启用极省显存组合（`ring2 + actoff + optcpu + gradoff`），配合 `int8` DiT 可将单卡门槛下探至 6GB VRAM。
-- **`--resolution`**：支持 `1024 / 768 / 512`。本地仅需快速验证构图收敛或显卡仅为 6GB 时，可将分辨率降为 `768` 显著提速并压降峰值激活显存。
+- **`--vram_preset`**：支持 `auto / 6g / 8g / 12g / 16g`（精确匹配 `vram_{6g,8g,12g,16g}.py` 与 `4352 / 6144 / 8192` 安全 Token 预算）。低于 10GB 显存时自动启用极省显存组合，配合 `int8` DiT 可将单卡门槛下探至 6GB VRAM。
+- **`--resolution`**：支持 `1024 / 896 / 768 / 512`。其中 **`896` 为 16GB 甜点分辨率**（`56×56 = 3136` 视觉 Token，可在 `8192` 预算下打包 2 图/步）；显卡为 6GB~8GB 或需快速验证构图时可选 `768` / `512`。
+- **`--base_precision` & `FP8_DGRAD` 守卫**：默认 `auto` 自动按显存与显卡架构择优；手动指定 `fp8_compute` 需 RTX 40 系+（`sm89+`）且非 `int8_convrot` 底模，系统自动配套注入 `FP8_DGRAD = "16bit"` 杜绝双份转置副本导致的显存零节省。
 
 ---
 

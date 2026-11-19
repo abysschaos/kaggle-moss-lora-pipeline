@@ -4,23 +4,27 @@
 
 在针对 50 亿参数（5B）单流 Diffusion Transformer（DiT）模型——**OpenMOSS MOSS-Image** 进行 LoRA 训练时，必须理解训练引擎底层的样本曝光与步数传导机制。
 
-### 1.1 Token 打包批处理机制 (Token Packing)
-传统的卷积神经网络（UNet）通常采用固定的图像张数批次（如 `batch_size = 1`）。而本项目依托的 KohakuMossTrainer 采用基于连续流序列长度的自适应 Token 打包机制：
+### 1.1 真实 Token 打包批处理机制 (Token Packing) 与 `MAX_TOKENS` 档位
+传统的卷积神经网络（UNet）通常采用固定的图像张数批次（如 `batch_size = 1`）。而本项目依托的 KohakuMossTrainer 采用基于连续流序列长度的自适应 Token 打包机制，并按显存档位校准 `MAX_TOKENS`：
 ```python
 BATCHING = "tokens"
-MAX_TOKENS = 16384
+OVERLONG = "drop_tokens"  # 仅截断超限文本尾部，绝不静默丢图
+# 6g/8g -> MAX_TOKENS = 4352 | 12g -> MAX_TOKENS = 6144 | 16g -> MAX_TOKENS = 8192
 ```
-在 DiT 架构中，一张 1024×1024 分辨率的图像经过 FLUX.2 VAE 潜空间降采样并拼接入 Qwen3.5-9B 的高维文本嵌入后，单图大约占用 4096 个 Token。当 `MAX_TOKENS = 16384` 时，优化器的单步（Step）梯度更新实际一次性打包了约 **4 张完整的 1024 图文样本**。
+在 DiT 架构中，图像潜空间视觉 Token 数约等于 `(resolution / 16)²`（例如 `1024` 为 `4096`，`896` 为 `3136`，`768` 为 `2304`），加上自然语言文本（约 `120~200` Token）即构成单样本序列长度：
+- **`1024` 分辨率**：单图约 `4256` Token，因此在 `4352 / 6144 / 8192` 下通常每包 **1 张/步**（高分辨率细节拉满）。
+- **`896` 黄金甜点分辨率**：单图仅约 `3296` Token，在 `16g (8192)` 档位下可稳定打包 **2 张/步**，兼顾精细度与双倍吞吐！
+- **`768` 分辨率**：单图约 `2464` Token，在 `12g (6144)` 下打包 **2 张/步**，在 `16g (8192)` 下打包 **3 张/步**。
 
-### 1.2 核心联动公式
-$$\text{总图文曝光次数 (Total Iterations)} = \text{原始图片数 (Images)} \times \text{单图重复次数 (Repeats)} \times \text{训练轮数 (Epochs)}$$
-$$\text{核心优化步数 (Steps)} \approx \frac{\text{总图文曝光次数}}{\text{单步 Token 打包容量 (约 4)}}$$
+### 1.2 动态步数联动公式（兼容 `GradAcc` 与 `TIMESTEP_MU`）
+$$\text{总图文曝光次数 (Total Exposures)} = \text{原始图片数 (Images)} \times \text{单图重复 (Repeats)} \times \text{训练轮数 (Epochs)}$$
+$$\text{等效 Batch (Effective Batch)} = \lfloor \frac{\text{MAX\_TOKENS}}{(\text{res}/16)^2 + 160} \rfloor \times \text{GRAD\_ACC}$$
+$$\text{GUI 推荐核心步数 (Steps)} = \frac{\text{总图文曝光次数}}{\max(\text{基础除数},\ \text{Effective Batch})},\quad \text{其中基础除数} = \begin{cases} 4, & \mu \le -0.3 \text{（画风偏高噪）} \\ 2, & \mu > -0.3 \text{（人物/概念精细对齐）} \end{cases}$$
 
-#### 实例推演
-- **场景**：现有 40 张图像；
-- **设置**：设置 `Repeats = 10`（在文件夹命名为 `10_my_style`），设置 `Epochs = 6`；
-- **总曝光量**：$40 \times 10 \times 6 = 2400$ 次单图遍历；
-- **优化器步数**：$2400 \div 4 = \mathbf{600 \text{ 步}}$。
+#### 实例推演（以默认画风工作流为例）
+- **场景**：现有 40 张画风图像，`MAX_TOKENS=8192`（或 `16384`），`GradAcc=1`，`TIMESTEP_MU=-1.09`；
+- **设置**：`Repeats = 10`，`Epochs = 6`，总曝光 $= 40 \times 10 \times 6 = 2400$ 次；
+- **优化器步数**：因为 $\mu = -1.09 \le -0.3$，GUI 以除数 `4` 对齐为 **$2400 \div 4 = 600$ 步**，完整保留“约 1.3 小时 600 步画风极速收敛”的黄金节奏；当您开启 `GradAcc=4` 或切换 `768`/`512` 大打包、或切换 `Mu=0.35` 炼制角色时，GUI 会自动按新吞吐与重心动态重新计算推荐步数。
 
 在调整参数时，必须保持 Repeats、Epochs 与 Steps 三者在数值上的逻辑闭环。若手动指定了 `--steps`，优化器会在达到该步数时强制截断训练。
 
@@ -102,7 +106,20 @@ $$\text{核心优化步数 (Steps)} \approx \frac{\text{总图文曝光次数}}{
 | **DoRA 权重分解 (`--dora`)** | 勾选【启用 DoRA】 | 将权重的方向向量与幅值标量分离优化。极度适合**复杂画风细节与多人物面部五官高保真还原**。训练引擎已默认注入 `DORA_DETACH=True` 控制显存与数值稳定，在 6G~8G `int8` 底模上亦可借助引擎旁路安全运行。 |
 | **适配器算法 (`--algo`)** | `lora` / `loha` / `lokr` | `lora` 通用最稳；`loha`（Hadamard 乘积）具备更强的非线性表征容量，适合**跨风格大融合**；`lokr`（Kronecker 乘积）体积最小、压缩比极高，适合轻量分发。 |
 | **目标注入层 (`--target_preset`)** | 6 档注入预设 | `attn-mlp` 通用均衡；**多人物/复杂动作推荐 `attn-mlp+text-refiner`**（微调文本细化器加强语义绑定）；**画风迁移推荐 `attn-mlp+modulation`**（控制自适应层归一化时间调制特征，全局色调笔触收敛更强）；**重度风格重写可选 `full-block`**。 |
-| **LoRA+ (`--loraplus_ratio`)** | `1.0` / `2.0 ~ 4.0` | 按 ICML 论文设定放大 B（上投影）矩阵学习率倍率。多人物或多画风联合收敛缓慢时设为 `2.0 ~ 4.0` 可明显加快早期特征成形；若已出现过拟合风险则保持 `1.0`。 |
+| **LoRA+ (`--loraplus_ratio`)** | `1.0` / `2.0 ~ 4.0` | 按 ICML 论文设定放大 B（上投影）矩阵学习率倍率。单角色/多人物/多画风设为 `2.0 ~ 4.0` 可明显加快早期特征成形；简单单画风保持 `1.0` 避免过冲。 |
+| **梯度累积 (`--grad_acc`)** | `1` / `2 ~ 4` | 累计 `N` 个微批次后执行一次参数更新。**零额外显存开销**（仅线性按倍率延长单步优化周期）。画风默认 `1` 极速收敛；人物五官及多子集混合设为 `2` 可平滑单图随机姿态/噪声梯度方差。 |
+| **时间步采样重心 (`--timestep_mu`)** | `-1.09` / `-0.60` / `0.0` / `0.35` | 调控 `MossTimestep` 的 Logit-Normal 偏移均值（底层高分辨率 shift=5）。`-1.09` 为默认极致高噪焦点（约 89% 采样在 $\sigma>0.5$，最适合全局色彩构图画风）；`-0.60` 兼顾多画风笔触与线条；`0.0` 对称覆盖动态概念；`0.35` 显著拉高 $\sigma<0.5$ 低噪区间比重，精细雕刻瞳孔、发丝与服饰纹理。不增加任何单步显存与时长。 |
+| **底模计算精度 (`--base_precision`)** | `auto` / `int8` / `fp8` / `fp8_compute` / `compute` | `int8` 底模加载 + `bf16` 训练占用极低显存（~5.4 GB 权重）且可跑满 RTX 30/40 全系；而 `bf16` 底模 + `fp8_compute` 需 Ada（RTX 40 系）/ L4 / A100 显卡（`sm89+`）并强制搭配 `FP8_DGRAD="16bit"`（否则反向保存两份转置副本将吃满 10.24 GB 毫无省显存效果），且**禁止对 `int8_convrot` 底模强开 `fp8`**。 |
+
+### 5.1 五大内置预设模板核心参数矩阵（v1.3.0）
+
+| 预设模板 | Repeats / Epochs | Rank / Alpha | 算法与注入层 | LoRA+ | GradAcc | Timestep Mu | 学习率 (LR) |
+| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: |
+| **🎨 艺术画风 (`style`)** | `10` / `6` | `32` / `32.0` | `lora` + `attn-mlp` | `1.0` | **`1`** | **`-1.09`** | `1e-4` |
+| **👤 单人角色 (`character`)** | `6` / `4` | `32` / `32.0` | `lora` + `DoRA` + `attn-mlp` | `2.0` | **`2`** | **`0.35`** | `8e-5` |
+| **👥 多人物配比 (`multi_char`)** | 按图数反比配平 / `4` | `48` / `48.0` | `lora` + `DoRA` + `attn-mlp+text-refiner` | `2.0` | **`2`** | **`0.35`** | `8e-5` |
+| **🎭 多画风配比 (`multi_style`)** | 按图数反比配平 / `5` | `48` / `48.0` | `lora` + `DoRA` + `attn-mlp+modulation` | `2.0` | **`2`** | **`-0.60`** | `1e-4` |
+| **💡 概念与动作 (`concept`)** | `8` / `4` | `32` / `32.0` | `lora` + `DoRA` + `attn-mlp+text-refiner` | `2.0` | **`2`** | **`0.0`** | `1e-4` |
 
 ---
 
@@ -110,7 +127,7 @@ $$\text{核心优化步数 (Steps)} \approx \frac{\text{总图文曝光次数}}{
 
 在本地 Windows 环境下，直接通过 [train_local.py](../train_local.py) 传入针对性超参数（推荐优先使用规范参数 `--lora_name` 与 `--trigger_word`）。
 
-### 6.1 人物角色训练模板 (以 30 张图为例 + DoRA)
+### 6.1 人物角色训练模板 (以 30 张图为例 + DoRA + 精细细节 Mu=0.35)
 ```powershell
 python train_local.py `
     --data_dir "./dataset/my_character" `
@@ -118,20 +135,24 @@ python train_local.py `
     --lora_name "my_character" `
     --trigger_word "my_character_char" `
     --repeats 6 `
-    --epochs 3 `
-    --steps 270 `
+    --epochs 4 `
+    --steps 360 `
     --rank 32 `
-    --alpha 16.0 `
+    --alpha 32.0 `
     --algo lora `
     --dora `
-    --target_preset attn-mlp+text-refiner `
+    --target_preset attn-mlp `
+    --loraplus_ratio 2.0 `
+    --grad_acc 2 `
+    --timestep_mu 0.35 `
+    --resolution 896 `
     --lr 8e-5 `
     --precision bf16 `
     --text_device cpu `
     --copy_to_comfy_loras
 ```
 
-### 6.2 艺术画风训练模板 (以 50 张图为例 + Modulation)
+### 6.2 艺术画风训练模板 (以 40~50 张图为例 + 极速 Mu=-1.09)
 ```powershell
 python train_local.py `
     --data_dir "./dataset/my_art_style" `
@@ -140,11 +161,13 @@ python train_local.py `
     --trigger_word "in the style of my_style" `
     --repeats 10 `
     --epochs 6 `
-    --steps 750 `
-    --rank 64 `
-    --alpha 64.0 `
+    --steps 600 `
+    --rank 32 `
+    --alpha 32.0 `
     --algo lora `
     --target_preset attn-mlp+modulation `
+    --grad_acc 1 `
+    --timestep_mu -1.09 `
     --lr 1e-4 `
     --precision bf16 `
     --text_device cpu `

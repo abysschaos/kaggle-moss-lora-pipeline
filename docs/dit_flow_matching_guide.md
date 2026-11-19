@@ -8,18 +8,21 @@ OpenMOSS MOSS-Image 采用了基于 50 亿参数（5B）的单流扩散变换器
 
 ---
 
-## 2. 步数（Steps）与轮次（Epoch）的数学映射
-在传统训练器中，通常默认以单张图像微步推进（`batch_size = 1`），步数直接等于样本遍历次数。而在 KohakuMossTrainer 框架中，启用了面向大语言模型的 Token 打包机制（`BATCHING = "tokens"`, `MAX_TOKENS = 16384`）：
+## 2. 步数（Steps）、时间步采样与 Token Packing 数学映射
+在传统训练器中，通常默认以单张图像微步推进（`batch_size = 1`），步数直接等于样本遍历次数。而在 KohakuMossTrainer 框架中，启用了面向连续序列长度的 Token 打包机制（`BATCHING = "tokens"`、`OVERLONG = "drop_tokens"`，并按 `6g/8g -> 4352`、`12g -> 6144`、`16g -> 8192` 校准显存预算）：
 
-$$\text{单步吞吐量} \approx 4 \text{ 张 } 1024 \times 1024 \text{ 高分辨率图文特征}$$
+- 在 `1024×1024`（`64×64 = 4096` 视觉 Token）下单包可稳装 **1 张** 图像（加文本约 `4256` Token），保留全部高清纹理；
+- 在 `896×896`（`56×56 = 3136` 视觉 Token）与 `16g (8192)` 档位下可稳装 **2 张/包**，实现吞吐翻倍；
+- 再结合 `--grad_acc` 梯度累积，实际有效批大小为 $B_{\text{eff}} = \text{包内图数} \times \text{GRAD\_ACC}$。
 
-换算公式如下：
-$$\text{总训练步数 (Steps)} = \frac{\text{图集总数} \times \text{图片循环次数 (Repeats)} \times \text{最大轮次 (Epoch)}}{\text{单步批次大小 (Batch Size)}}$$
+此外，MOSS-Image 的 Flow Matching 训练采用 `MossTimestep` 对称/偏置采样分布（由 `--timestep_mu` 调控，底层带 `shift=5` 分辨率偏移）：
+- **$\mu = -1.09$（默认画风配方）**：约 **89%** 梯度更新落在高噪构图与色域笔触阶段（$\sigma > 0.5$），这也是画风任务仅用 600 步即显著超越传统局部低噪配方的理论根因；
+- **$\mu = 0.0$ / $0.35$（动作概念与单人角色配方）**：显著拉升中低噪精细雕刻权重，确保面部五官、服饰纽扣与轮廓边缘收敛充分。
 
-以 40 张画风图集为例：
-* **100 步（浅层测试）**：$100 \times 4 = 400$ 次遍历 $\approx 10$ 个 Epoch（容易陷入严重欠拟合，画风难以凸显）。
-* **320 步（标准收敛）**：$320 \times 4 = 1280$ 次遍历 $\approx 32$ 个 Epoch（适合中轻度画风迁移）。
-* **600 步（黄金深度收敛）**：$600 \times 4 = 2400$ 次遍历 $\approx 60$ 个 Epoch（在 Tesla T4 上耗时约 7 小时，彻底击穿底模先验，画风浓郁纯正）。
+GUI 推荐步数公式会结合有效吞吐与时间步重心动态调整：
+$$\text{推荐训练步数 (Steps)} = \frac{\text{图集总数} \times \text{Repeats} \times \text{Epochs}}{\max(\text{基础除数},\ B_{\text{eff}})},\quad \text{基础除数} = \begin{cases} 4, & \mu \le -0.3 \\ 2, & \mu > -0.3 \end{cases}$$
+
+以 40 张画风图集为例（默认 `Mu=-1.09, GradAcc=1`）：$40 \times 10 \times 6 \div 4 = \mathbf{600 \text{ 步}}$，完整保留约 1.3 小时极速深度收敛节奏；若以 `int8_convrot + bf16` 对比 `bf16 + fp8_compute`（`sm89+` 专属且必须配对 `FP8_DGRAD="16bit"`），前者显存占用约 5.4 GB 且兼容全系 RTX 显卡，后者需 RTX 40 系+ Tensor Core 才可获得计算增益。
 
 ---
 

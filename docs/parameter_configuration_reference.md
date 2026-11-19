@@ -21,8 +21,10 @@
 | 参数名称 | 物理含义 | 推荐范围 | 本地 CLI | 云端 CLI & 环境变量 |
 | :--- | :--- | :--- | :--- | :--- |
 | **单图重复次数** | 单图在每轮中被采样的次数（写入 `<repeats>_<name>` 目录前缀） | 人物 `2~6`，画风 `8~15` | `--repeats`（默认 `10`） | `--repeats` / `REPEATS`（默认 `10`） |
-| **训练轮数** | 结合图数与 Repeats 换算公式推算推荐总步数 | 人物 `3~5`，画风 `5~8` | `--epochs`（默认 `6`） | `--epochs` / `EPOCHS`（默认 `6`） |
+| **训练轮数** | 结合图数、Repeats 与动态等效 Batch 推算推荐总步数 | 人物 `3~5`，画风 `5~8` | `--epochs`（默认 `6`） | `--epochs` / `EPOCHS`（默认 `6`） |
 | **总优化步数** | 优化器反向传播更新步数（同时决定 Cosine 退火周期与 5% Warmup） | `200 ~ 800` | `--steps`（默认 `600`） | `--steps` / `STEPS`（默认 `600`） |
+| **梯度累积 (`GRAD_ACC`)** | 微批次累计 N 步再执行一次权重更新，降低单人物/多子集混合梯度方差 | 画风 `1`，人物/多子集 `2~4` | `--grad_acc`（默认 `1`） | `--grad_acc` / `GRAD_ACC`（默认 `1`） |
+| **时间步重心 (`TIMESTEP_MU`)** | 控制 Logit-Normal Flow Matching 采样重心（`TIMESTEP="moss"`） | `-1.09` 画风 / `-0.60` 多画风 / `0.0` 动作 / `0.35` 角色细节 | `--timestep_mu`（默认 `-1.09`） | `--timestep_mu` / `TIMESTEP_MU`（默认 `-1.09`） |
 | **基础学习率** | 优化器学习速率（配合 Cosine 衰减至 `min_value=0.1`） | `8e-5 ~ 1.2e-4` | `--lr`（默认 `1e-4`） | `--lr` / `LR`（默认 `"1e-4"`） |
 
 ### 1.3 低秩适配器架构与高阶微调
@@ -42,9 +44,12 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **底模变体 (`VARIANT`)** | 切换适配 Base / Heal / SFT 架构差异与 FP16 防溢出策略 | 本地 `auto`/`base`/`sft`；云端 `heal`/`base`/`sft` | `--variant`（默认 `"auto"`） | `--variant` / `MODEL_VARIANT`（默认 `"heal"`） |
 | **云端底模量化** | 控制从 HuggingFace 拉取 `int8` 量化版或全精度底模 | `auto` / `int8` / `full` | 本地按文件名自动识别 | `--base_quant` / `BASE_QUANT`（默认 `"auto"`） |
-| **显存优化档位** | 映射至引擎流式缓冲、激活检查点与卸载配方 | `auto` / `6g` / `8g` / `12g` / `16g` | `--vram_preset`（默认 `"auto"`） | `--vram_preset` / `VRAM_PRESET`（默认 `"auto"`） |
-| **训练目标分辨率** | 动态分桶像素面积基准 (`TARGET_AREA = resolution^2`) | `1024` / `768` / `512` | `--resolution`（默认 `1024`） | `--resolution` / `RESOLUTION`（默认 `1024`） |
+| **底模计算精度 (`BASE_PRECISION`)** | 传递至引擎的量化/精度内核策略；`fp8_compute` 需 `sm89+` 且非 `int8_convrot` 底模，引擎自动配对 `FP8_DGRAD="16bit"` | `auto` / `int8` / `fp8` / `fp8_compute` / `compute` | `--base_precision`（默认 `"auto"`） | `--base_precision` / `BASE_PRECISION`（默认 `"auto"`） |
+| **显存优化档位** | 映射至引擎流式缓冲、激活检查点与实测安全 `MAX_TOKENS`（`6g/8g:4352`、`12g:6144`、`16g:8192`） | `auto` / `6g` / `8g` / `12g` / `16g` | `--vram_preset`（默认 `"auto"`） | `--vram_preset` / `VRAM_PRESET`（默认 `"auto"`） |
+| **训练目标分辨率** | 动态分桶像素面积基准 (`TARGET_AREA = resolution^2`)；`896` 对应 `3136` 视觉 Token，可在 `8192` 下打包 2 图/步 | `1024` / `896` / `768` / `512` | `--resolution`（默认 `1024`） | `--resolution` / `RESOLUTION`（默认 `1024`） |
 | **计算精度** | 主训练张量精度（无原生 BF16 显卡自动回退 FP16，非 Heal 自动开启 `FP16_FIX="online"` 与 `FP16_FIX_KWARGS={"c": 1/16}`） | 本地 `bf16`/`fp16`；云端增设 `auto` | `--precision`（默认 `"bf16"`） | `--precision` / `PRECISION`（默认 `"auto"`） |
+| **Triton 内核调优 (`TUNE`)** | 控制 Triton 矩阵乘法内核自动调优缓存模式（`table` 首次慢但长训更快） | `off` / `table` | `--tune`（默认 `"off"`） | `--tune` / `TUNE`（默认 `"off"`） |
+| **超长样本策略 (`OVERLONG`)** | 当单图视觉 + `.txt` 总 Token 超出 `MAX_TOKENS` 时的处理策略 | `drop_tokens`（仅截断超限文本保留图像）/ `drop` | `--overlong`（默认 `"drop_tokens"`） | `--overlong` / `OVERLONG`（默认 `"drop_tokens"`） |
 | **文本提取设备** | Qwen3.5-9B 离线文本特征提取宿主设备 | 本地 `cpu`/`cuda`；云端 `auto`/`cuda`/`cpu` | `--text_device`（默认 `"cpu"`） | `--text_device` / `TEXT_DEVICE`（默认 `"auto"`） |
 | **VAE 提取设备** | FLUX.2 VAE 潜空间压缩设备 | `cuda` / `cpu` | `--vae_device`（默认 `"cuda"`） | `--vae_device` / `VAE_DEVICE`（默认 `"cuda"`） |
 
@@ -78,13 +83,18 @@ python train_local.py `
     --epochs 4 `
     --steps 400 `
     --rank 32 `
-    --alpha 16.0 `
+    --alpha 32.0 `
     --algo lora `
     --dora `
-    --target_preset attn-mlp+text-refiner `
+    --target_preset attn-mlp `
     --loraplus_ratio 2.0 `
-    --vram_preset 8g `
-    --resolution 1024 `
+    --grad_acc 2 `
+    --timestep_mu 0.35 `
+    --vram_preset 16g `
+    --resolution 896 `
+    --base_precision auto `
+    --tune off `
+    --overlong drop_tokens `
     --precision bf16 `
     --text_device cpu `
     --copy_to_comfy_loras
@@ -130,7 +140,8 @@ python train_local.py `
    - 启用 `--dora` 时自动注入 `DORA_DETACH = True`；
    - 选择 `--algo loha` 或 `lokr` 时自动注入上游标准安全 `ALGO_KWARGS`；
    - 显式锁定 `SAVE_FUSED_QKV = False` 与 `SAVE_FORMAT = "both"` 保障原生导出与 ComfyUI 兼容性；
-   - 使用 `SCHEDULE = {"mode": "cosine", "warmup": max(5, min(30, int(effective_steps * 0.05))), "end": -1, "min_value": 0.1}` 动态适配总步数；
+   - 使用 `SCHEDULE = {"mode": "cosine", "warmup": max(5, min(100, int(effective_steps * 0.05))), "end": -1, "min_value": 0.1}` 动态适配总步数；
+   - 显式写入 `OVERLONG = "drop_tokens"`（默认保留图像并截断超限长文本）、`GRAD_ACC`、`TIMESTEP = "moss"` + `TIMESTEP_KWARGS = {"mu": ...}`、`BASE_PRECISION` 与可选 `FP8_DGRAD = "16bit"`。
    - 本地运行时通过 `KOHAKUMOSS_PAUSE_FILE` 环境变量与注入到 `drivers/native.py` 的钩子实现随时安全暂停存盘。
 
 4. **全量环境变量参考**：所有云端与本地路径环境变量的完整清单与默认值模板，请直接查阅根目录 [.env.example](../.env.example)。

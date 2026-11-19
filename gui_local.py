@@ -147,8 +147,13 @@ class ModernLocalTrainerGUI:
         self.var_precision = tk.StringVar(value="bf16")
         self.var_vram_preset = tk.StringVar(value=local_cfg.get("vram_preset", "auto"))
         self.var_resolution = tk.StringVar(value=str(local_cfg.get("resolution", "1024")))
+        self.var_grad_acc = tk.StringVar(value=str(local_cfg.get("grad_acc", "1")))
+        self.var_timestep_mu = tk.StringVar(value=str(local_cfg.get("timestep_mu", "-1.09")))
+        self.var_base_precision = tk.StringVar(value=local_cfg.get("base_precision", "auto"))
+        self.var_tune = tk.StringVar(value=local_cfg.get("tune", "off"))
         self.var_text_device = tk.StringVar(value="cpu")
         self.var_vae_device = tk.StringVar(value="cuda")
+        self.detected_vram_gb = 16.0
 
         # 多子集配比管理器状态（支持多人物 / 多画风 / 多概念独立触发词与独立 Repeat 配平）
         self.var_multi_subset = tk.BooleanVar(value=bool(local_cfg.get("multi_subset_enabled", False)))
@@ -280,6 +285,10 @@ class ModernLocalTrainerGUI:
                 "trigger_word": self.var_trigger_word.get(),
                 "vram_preset": self.var_vram_preset.get(),
                 "resolution": self.var_resolution.get(),
+                "grad_acc": self.var_grad_acc.get(),
+                "timestep_mu": self.var_timestep_mu.get(),
+                "base_precision": self.var_base_precision.get(),
+                "tune": self.var_tune.get(),
                 "train_mode": mode_code,
                 "resume_path": self.var_resume_path.get(),
                 "save_every": self.var_save_every.get(),
@@ -415,6 +424,7 @@ class ModernLocalTrainerGUI:
             if torch.cuda.is_available():
                 name = torch.cuda.get_device_name(0)
                 vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                self.detected_vram_gb = vram
                 bf16 = "支持 BF16" if torch.cuda.is_bf16_supported() else "仅 FP16"
                 return f"{name} ({vram:.1f} GB, {bf16})"
             return "仅 CPU (未检测到 CUDA)"
@@ -879,19 +889,58 @@ class ModernLocalTrainerGUI:
         tk.Label(preset_f, text="显存优化档位:", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
         cb_vram = ttk.Combobox(preset_f, textvariable=self.var_vram_preset, values=["auto", "6g", "8g", "12g", "16g"], width=7, state="readonly")
         cb_vram.pack(side=tk.LEFT, padx=(0, 14))
-        cb_vram.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        cb_vram.bind("<<ComboboxSelected>>", lambda e: (self.save_local_config(), self.recalculate_math()))
 
         tk.Label(preset_f, text="训练分辨率:", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
-        cb_res = ttk.Combobox(preset_f, textvariable=self.var_resolution, values=["1024", "768", "512"], width=7, state="readonly")
+        cb_res = ttk.Combobox(preset_f, textvariable=self.var_resolution, values=["1024", "896", "768", "512"], width=7, state="readonly")
         cb_res.pack(side=tk.LEFT, padx=(4, 0))
-        cb_res.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        cb_res.bind("<<ComboboxSelected>>", lambda e: (self.save_local_config(), self.recalculate_math()))
+
+        grad_f = tk.Frame(hp_card, bg=self.card_bg)
+        grad_f.grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        tk.Label(grad_f, text="梯度累积 (GradAcc):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        cb_grad_acc = ttk.Combobox(grad_f, textvariable=self.var_grad_acc, values=["1", "2", "4", "8"], width=6)
+        cb_grad_acc.pack(side=tk.LEFT, padx=(0, 14))
+        cb_grad_acc.bind("<<ComboboxSelected>>", lambda e: (self.save_local_config(), self.recalculate_math()))
+        cb_grad_acc.bind("<KeyRelease>", lambda e: self.recalculate_math())
+        cb_grad_acc.bind("<FocusOut>", lambda e: self.save_local_config())
+
+        tk.Label(grad_f, text="时间步重心 (Mu):", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
+        cb_mu = ttk.Combobox(grad_f, textvariable=self.var_timestep_mu, values=["-1.09", "-0.60", "0.0", "0.35"], width=7)
+        cb_mu.pack(side=tk.LEFT, padx=(4, 0))
+        cb_mu.bind("<<ComboboxSelected>>", lambda e: (self.save_local_config(), self.recalculate_math()))
+        cb_mu.bind("<KeyRelease>", lambda e: self.recalculate_math())
+        cb_mu.bind("<FocusOut>", lambda e: self.save_local_config())
+
+        quant_f = tk.Frame(hp_card, bg=self.card_bg)
+        quant_f.grid(row=10, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        tk.Label(quant_f, text="底模计算精度:", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        cb_base_prec = ttk.Combobox(
+            quant_f, textvariable=self.var_base_precision,
+            values=["auto", "int8", "fp8", "fp8_compute", "compute"], width=12, state="readonly"
+        )
+        cb_base_prec.pack(side=tk.LEFT, padx=(0, 10))
+        cb_base_prec.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+
+        tk.Label(quant_f, text="Triton 调优:", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
+        cb_tune = ttk.Combobox(quant_f, textvariable=self.var_tune, values=["off", "table"], width=6, state="readonly")
+        cb_tune.pack(side=tk.LEFT, padx=(4, 0))
+        cb_tune.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
 
         dev_f = tk.Frame(hp_card, bg=self.card_bg)
-        dev_f.grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=(2, 4))
+        dev_f.grid(row=11, column=0, columnspan=2, sticky=tk.EW, pady=(2, 2))
         tk.Label(dev_f, text="文本提取设备:", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
         cb_txt_dev = ttk.Combobox(dev_f, textvariable=self.var_text_device, values=["cpu", "cuda"], width=7, state="readonly")
         cb_txt_dev.pack(side=tk.LEFT, padx=(0, 6))
         tk.Label(dev_f, text="(8GB 显卡请锁定 CPU 避免 OOM；显存档位 auto 智能推荐)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
+
+        lbl_adv_hint = tk.Label(
+            hp_card,
+            text="说明: Mu=-1.09 侧重画风构图(默认)，0.0~0.35 强化五官细节；底模精度 auto 按硬件自动匹配，fp8_compute 需 RTX 40系+。",
+            bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8), wraplength=560, justify=tk.LEFT
+        )
+        lbl_adv_hint.grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
+        self._wrap_labels.append(lbl_adv_hint)
 
     def create_file_picker_block(self, parent, label_text, var, browse_title, folder_path, filetypes=None):
         """
@@ -1941,13 +1990,44 @@ class ModernLocalTrainerGUI:
         else:
             self.var_dataset_stat.set("⚠️ 目录不存在，请检查路径")
 
-    def recalculate_math(self):
-        try:
-            ep = self.var_epochs.get()
-        except tk.TclError:
-            self.var_calc_stat.set("换算：请输入有效的正整数训练轮数")
-            return
+    def _estimate_effective_batch(self) -> tuple:
+        """估算 Token 打包吞吐、梯度累积等效 Batch 与 Mu 感知步数除数。"""
+        preset = self.var_vram_preset.get().lower()
+        if preset == "auto":
+            vram_gb = float(getattr(self, "detected_vram_gb", 16.0))
+            if vram_gb <= 10.0:
+                eff_preset = "8g"
+            elif vram_gb <= 14.0:
+                eff_preset = "12g"
+            else:
+                eff_preset = "16g"
+        else:
+            eff_preset = preset
 
+        max_tokens = {"6g": 4352, "8g": 4352, "12g": 6144, "16g": 8192}.get(eff_preset, 8192)
+        try:
+            res = int(self.var_resolution.get())
+        except Exception:
+            res = 1024
+        try:
+            grad_acc = max(1, int(float(self.var_grad_acc.get().strip())))
+        except Exception:
+            grad_acc = 1
+        try:
+            mu = float(self.var_timestep_mu.get().strip())
+        except Exception:
+            mu = -1.09
+
+        est_tokens_per_img = (res // 16) ** 2 + 160
+        imgs_per_pack = max(1, max_tokens // est_tokens_per_img)
+        eff_batch = imgs_per_pack * grad_acc
+        divisor = max(4, eff_batch) if mu <= -0.3 else max(2, eff_batch)
+        return eff_batch, imgs_per_pack, grad_acc, mu, divisor
+
+    def _compute_exposure_summary(self):
+        """汇总当前单集/多子集总曝光及基于真实吞吐与 Mu 的推荐步数。"""
+        ep = self.var_epochs.get()
+        eff_batch, imgs_per_pack, grad_acc, mu, divisor = self._estimate_effective_batch()
         if self.var_multi_subset.get():
             total_imgs = 0
             epoch_exp = 0
@@ -1957,56 +2037,56 @@ class ModernLocalTrainerGUI:
                 total_imgs += c
                 epoch_exp += c * r
             total_exposures = epoch_exp * ep
-            recommended_steps = max(1, total_exposures // 4)
-            self.var_calc_stat.set(
-                f"多子集换算：{len(self.subsets)}子集 ({total_imgs}图, 单轮{epoch_exp}曝光) × {ep}轮 = {total_exposures}总曝光 (推荐约 {recommended_steps} 步)"
-            )
-            return
+            rec = max(1, total_exposures // divisor)
+            return True, total_imgs, epoch_exp, ep, total_exposures, rec, eff_batch, imgs_per_pack, grad_acc, mu, divisor
 
         dpath = Path(self.var_data_dir.get())
         img_count = 0
         if dpath.exists():
-            img_count = len([f for f in dpath.iterdir() if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]])
-        try:
-            rep = self.var_repeats.get()
-        except tk.TclError:
-            self.var_calc_stat.set("换算：请输入有效的正整数重复次数与轮数")
-            return
+            img_count = self._count_images_in_dir(str(dpath))
+        rep = self.var_repeats.get()
         total_exposures = img_count * rep * ep
-        recommended_steps = max(1, total_exposures // 4)
-        self.var_calc_stat.set(f"换算：{img_count}图 × {rep}重复 × {ep}轮 = {total_exposures}次曝光 (等效推荐约 {recommended_steps} 步)")
+        rec = max(1, total_exposures // divisor)
+        return False, img_count, rep, ep, total_exposures, rec, eff_batch, imgs_per_pack, grad_acc, mu, divisor
+
+    def recalculate_math(self):
+        try:
+            is_multi, count, factor, ep, total_exp, rec, eff_batch, pack, acc, mu, div = self._compute_exposure_summary()
+        except tk.TclError:
+            msg = "换算：请输入有效的正整数训练轮数" if self.var_multi_subset.get() else "换算：请输入有效的正整数重复次数与轮数"
+            self.var_calc_stat.set(msg)
+            return
+
+        tp_info = f"等效Batch={eff_batch}({pack}图/包×Acc{acc}), Mu={mu:.2f}, 除数/{div}"
+        if is_multi:
+            self.var_calc_stat.set(
+                f"多子集：{len(self.subsets)}子集 ({count}图, 单轮{factor}曝光) × {ep}轮 = {total_exp}曝光 [{tp_info}] → 推荐 {rec} 步"
+            )
+        else:
+            self.var_calc_stat.set(
+                f"换算：{count}图 × {factor}重复 × {ep}轮 = {total_exp}曝光 [{tp_info}] → 推荐 {rec} 步"
+            )
 
     def align_steps_by_formula(self):
         try:
-            ep = self.var_epochs.get()
-        except tk.TclError:
-            messagebox.showwarning("参数输入提示", "请先填写有效的正整数【训练轮数】。")
-            return
-
-        if self.var_multi_subset.get():
-            epoch_exp = sum(
-                self._count_images_in_dir(sub.get("path", "")) * max(1, int(sub.get("repeats", 1)))
-                for sub in self.subsets
-            )
-            if epoch_exp <= 0:
-                return
-            recommended = max(1, (epoch_exp * ep) // 4)
-            self.var_steps.set(recommended)
-            self.log(f"[提示] 步数已根据多子集汇总曝光公式对齐为: {recommended} 步\n")
-            return
-
-        dpath = Path(self.var_data_dir.get())
-        if not dpath.exists():
-            return
-        try:
-            rep = self.var_repeats.get()
+            is_multi, count, factor, ep, total_exp, rec, eff_batch, pack, acc, mu, div = self._compute_exposure_summary()
         except tk.TclError:
             messagebox.showwarning("参数输入提示", "请先填写有效的正整数【单图重复】和【训练轮数】。")
             return
-        img_count = len([f for f in dpath.iterdir() if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]])
-        recommended = max(1, (img_count * rep * ep) // 4)
-        self.var_steps.set(recommended)
-        self.log(f"[提示] 步数已根据换算公式对齐为: {recommended} 步\n")
+
+        if is_multi:
+            if factor <= 0:
+                return
+            self.var_steps.set(rec)
+            self.recalculate_math()
+            self.log(f"[提示] 步数已按动态吞吐公式(Batch={eff_batch}, Mu={mu:.2f}, /{div})对齐为: {rec} 步\n")
+            return
+
+        if not Path(self.var_data_dir.get()).exists():
+            return
+        self.var_steps.set(rec)
+        self.recalculate_math()
+        self.log(f"[提示] 步数已按动态吞吐公式(Batch={eff_batch}, Mu={mu:.2f}, /{div})对齐为: {rec} 步\n")
 
     # 预设模板应用
     def apply_style_preset(self):
@@ -2019,31 +2099,51 @@ class ModernLocalTrainerGUI:
         self.var_algo.set("lora")
         self.var_dora.set(False)
         self.var_target_preset.set("attn-mlp")
+        self.var_loraplus.set("1.0")
         self.var_lr.set("1e-4")
+        self.var_grad_acc.set("1")
+        self.var_timestep_mu.set("-1.09")
         self.var_lora_name.set("my_art_style")
         self.var_trigger_word.set("in the style of my_art_style")
         self.align_steps_by_formula()
+        self.recalculate_math()
         self.update_output_preview()
         self.save_local_config()
-        messagebox.showinfo("模板切换", "已成功加载【艺术画风模板】：\nLoRA名称: my_art_style | 算法: LoRA (attn-mlp)\nRepeats=10, Epochs=6, Rank=32, Alpha=32.0, LR=1e-4")
+        messagebox.showinfo(
+            "模板切换",
+            "已成功加载【艺术画风模板】(极速画风黄金配比)：\n"
+            "LoRA名称: my_art_style | 算法: LoRA (attn-mlp) | LoRA+=1.0\n"
+            "Repeats=10, Epochs=6, Rank=32, Alpha=32.0, LR=1e-4\n"
+            "GradAcc=1, Mu=-1.09 (高噪构图笔触聚焦，保持极限收敛速度)"
+        )
 
     def apply_character_preset(self):
         self.var_multi_subset.set(False)
         self._apply_subset_panel_visibility()
         self.var_repeats.set(6)
-        self.var_epochs.set(3)
+        self.var_epochs.set(4)
         self.var_rank.set(32)
-        self.var_alpha.set(16.0)
+        self.var_alpha.set(32.0)
         self.var_algo.set("lora")
-        self.var_dora.set(False)
+        self.var_dora.set(True)
         self.var_target_preset.set("attn-mlp")
+        self.var_loraplus.set("2.0")
         self.var_lr.set("8e-5")
+        self.var_grad_acc.set("2")
+        self.var_timestep_mu.set("0.35")
         self.var_lora_name.set("my_character")
         self.var_trigger_word.set("my_character_char")
         self.align_steps_by_formula()
+        self.recalculate_math()
         self.update_output_preview()
         self.save_local_config()
-        messagebox.showinfo("模板切换", "已成功加载【单人角色模板】：\nLoRA名称: my_character | 算法: LoRA (attn-mlp)\nRepeats=6, Epochs=3, Rank=32, Alpha=16.0, LR=8e-5")
+        messagebox.showinfo(
+            "模板切换",
+            "已成功加载【单人角色模板】(高精度五官服饰版)：\n"
+            "LoRA名称: my_character | 算法: LoRA + DoRA (attn-mlp) | LoRA+=2.0\n"
+            "Repeats=6, Epochs=4, Rank=32, Alpha=32.0, LR=8e-5\n"
+            "GradAcc=2, Mu=0.35 (强化中低噪面部结构与细节一致)"
+        )
 
     def apply_multi_char_preset(self):
         self.var_multi_subset.set(True)
@@ -2051,11 +2151,14 @@ class ModernLocalTrainerGUI:
         self.refresh_subset_tree()
         self.var_epochs.set(4)
         self.var_rank.set(48)
-        self.var_alpha.set(32.0)
+        self.var_alpha.set(48.0)
         self.var_algo.set("lora")
         self.var_dora.set(True)
         self.var_target_preset.set("attn-mlp+text-refiner")
+        self.var_loraplus.set("2.0")
         self.var_lr.set("8e-5")
+        self.var_grad_acc.set("2")
+        self.var_timestep_mu.set("0.35")
         self.var_lora_name.set("multi_char_pack")
         self.var_trigger_word.set("")
         self.recalculate_math()
@@ -2064,7 +2167,8 @@ class ModernLocalTrainerGUI:
         messagebox.showinfo(
             "多人物模板就绪",
             "已加载【多人物配比模板】并展开多子集面板！\n"
-            "• 架构配置：LoRA + DoRA (Rank=48, Alpha=32.0, attn-mlp+text-refiner)\n"
+            "• 架构配置：LoRA + DoRA (Rank=48, Alpha=48.0, attn-mlp+text-refiner, LoRA+=2.0)\n"
+            "• 进阶调度：GradAcc=2 (稳梯度防串角), Mu=0.35 (精细五官服饰对齐)\n"
             "• 使用提示：请在下方点击【➕ 添加子集】分别添加各角色文件夹并设置互不冲突的专属触发词，添加完后点【⚖️ 一键配平 Repeat】即可均衡曝光！"
         )
 
@@ -2078,7 +2182,10 @@ class ModernLocalTrainerGUI:
         self.var_algo.set("lora")
         self.var_dora.set(True)
         self.var_target_preset.set("attn-mlp+modulation")
+        self.var_loraplus.set("2.0")
         self.var_lr.set("1e-4")
+        self.var_grad_acc.set("2")
+        self.var_timestep_mu.set("-0.60")
         self.var_lora_name.set("multi_style_pack")
         self.var_trigger_word.set("")
         self.recalculate_math()
@@ -2087,11 +2194,14 @@ class ModernLocalTrainerGUI:
         messagebox.showinfo(
             "多画风模板就绪",
             "已加载【多画风配比模板】并展开多子集面板！\n"
-            "• 架构配置：LoRA + DoRA (Rank=48, Alpha=48.0, attn-mlp+modulation 强化全局影调与笔触)\n"
+            "• 架构配置：LoRA + DoRA (Rank=48, Alpha=48.0, attn-mlp+modulation, LoRA+=2.0)\n"
+            "• 进阶调度：GradAcc=2 (降方差防风格糊化), Mu=-0.60 (兼顾宏观笔触与线条锐度)\n"
             "• 使用提示：请分别添加不同画风子目录并绑定唯一风格前缀触发词，标注中务必剔除画风词以防串味！"
         )
 
     def apply_concept_preset(self):
+        self.var_multi_subset.set(False)
+        self._apply_subset_panel_visibility()
         self.var_repeats.set(8)
         self.var_epochs.set(4)
         self.var_rank.set(32)
@@ -2099,16 +2209,21 @@ class ModernLocalTrainerGUI:
         self.var_algo.set("lora")
         self.var_dora.set(True)
         self.var_target_preset.set("attn-mlp+text-refiner")
+        self.var_loraplus.set("2.0")
         self.var_lr.set("1e-4")
+        self.var_grad_acc.set("2")
+        self.var_timestep_mu.set("0.0")
         self.var_lora_name.set("my_concept")
         self.var_trigger_word.set("my_concept_v1")
         self.align_steps_by_formula()
+        self.recalculate_math()
         self.update_output_preview()
         self.save_local_config()
         messagebox.showinfo(
             "概念/动作模板就绪",
             "已加载【概念/动作/材质模板】：\n"
-            "• 架构配置：LoRA + DoRA (Rank=32, Alpha=32.0, attn-mlp+text-refiner 增强局部语义绑定)\n"
+            "• 架构配置：LoRA + DoRA (Rank=32, Alpha=32.0, attn-mlp+text-refiner, LoRA+=2.0)\n"
+            "• 进阶调度：GradAcc=2, Mu=0.0 (全时间段对称采样，兼顾动态肢体与局部材质)\n"
             "• 建议图集保持主体与背景高度随机，仅目标动作/镜头/材质保持一致。"
         )
 
@@ -2163,8 +2278,10 @@ class ModernLocalTrainerGUI:
             alpha_val = float(self.var_alpha.get())
             lr_val = float(self.var_lr.get().strip())
             save_every_val = int(self.var_save_every.get())
-            if repeats_val < 1 or epochs_val < 1 or steps_val < 1 or rank_val < 1 or lr_val <= 0:
-                raise ValueError("超参数必须为正数")
+            grad_acc_val = int(float(self.var_grad_acc.get().strip()))
+            timestep_mu_val = float(self.var_timestep_mu.get().strip())
+            if repeats_val < 1 or epochs_val < 1 or steps_val < 1 or rank_val < 1 or lr_val <= 0 or grad_acc_val < 1:
+                raise ValueError("超参数及梯度累积必须为正数")
         except Exception as e:
             messagebox.showerror("参数格式错误", f"请检查核心超参数是否填写了合法数字：\n{e}")
             return
@@ -2244,6 +2361,11 @@ class ModernLocalTrainerGUI:
             "--precision", self.var_precision.get(),
             "--vram_preset", self.var_vram_preset.get(),
             "--resolution", str(self.var_resolution.get()),
+            "--grad_acc", str(grad_acc_val),
+            "--timestep_mu", str(timestep_mu_val),
+            "--base_precision", self.var_base_precision.get(),
+            "--tune", self.var_tune.get(),
+            "--overlong", "drop_tokens",
             "--variant", "auto",
             "--train_mode", mode_code,
             "--save_every", str(self.var_save_every.get()),

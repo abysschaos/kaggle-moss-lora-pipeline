@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-20
+
+### Added
+- **5 大双轨核心超参数与量化精度控制 (`train_local.py` / `train_moss.py` / `gui_local.py` / `.env.example` / Kaggle Notebook)**：
+  - 新增 **`--grad_acc` / `GRAD_ACC`**（梯度累积步数，默认 `1`），在不改变默认极速画风训练吞吐的前提下，为人物五官与多子集混合训练提供低方差平滑梯度更新。
+  - 新增 **`--timestep_mu` / `TIMESTEP_MU`**（显式注入 `TIMESTEP = "moss"` 与 `TIMESTEP_KWARGS = {"mu": ...}`，默认 `-1.09` 保持约 89% 高噪画风笔触覆盖；`0.35` 可增强人物面部服饰细节，`-0.60` / `0.0` 适配多画风与动作概念）。
+  - 新增 **`--base_precision` / `BASE_PRECISION`**（`auto / int8 / fp8 / fp8_compute / compute`）：内置 `sm89+`（RTX 40 系 / L4 / A100）算力检查与 `int8_convrot` 底模防误配守卫，启用 `fp8_compute` 时强制注入 `FP8_DGRAD = "16bit"` 避免双份转置副本造成显存零节省。
+  - 新增 **`--tune` / `TUNE`**（`off / table`）与 **`--overlong` / `OVERLONG`**（`drop_tokens / drop`）。
+- **新增 `896` 黄金甜点分辨率与 GUI 动态步数计算引擎**：本地 GUI、CLI 与云端 Notebook 全线支持 `1024 / 896 / 768 / 512` 四档分辨率（`896` 对应 `56×56 = 3136` 视觉 Token，可在 `8192` Budget 下稳定打包 2 图/步）；GUI 新增 `_estimate_effective_batch()` 与 Mu 感知动态除数，实时估算等效 Batch 并推荐对齐步数。
+- **五大实战预设模板全面升级**：保留【🎨 艺术画风】(`GradAcc=1`, `Mu=-1.09`) 极速收敛优势不变；同步为【👤 单人角色】、`【👥 多人物配比】`、`【🎭 多画风配比】`与`【💡 概念/动作】`补全精准配比的 `Alpha`、`DoRA`、`LoRA+`、`TargetPreset`、`GradAcc` 与 `Timestep Mu`。
+
+### Changed
+- **修正 `12g` / `16g` 显存档位与文本编码器内存阈值**：将 `12g` 档位校准为 `vram_12g.py` + `MAX_TOKENS = 6144`（约 8.5GB 峰值），`16g` 档位校准为 `vram_16g.py` + `MAX_TOKENS = 8192`（避免 T4/16G OOM 溢出）；本地 `probe_local_models` 在系统内存 ≥22GB 或 GPU ≥15GB 时自动优先选用高精度 `qwen3.5_9b_bf16`。
+- **扩宽 Warmup 上限与同步云端续炼元信息解析**：将 `SCHEDULE["warmup"]` 上限由 `30` 步放宽至 `100` 步以适配长步数梯度累积任务；同步升级云端 `train_moss._inspect_safetensors` 解析历史权重的 `algo`、`dora` 与 `preset`。
+- **版本与启动器同步**：更新 [VERSION](VERSION) 至 `1.3.0`，同步 [launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) 程序集版本至 `1.3.0.0` 并更新全套技术文档。
+
+### Fixed
+- **默认切换 `OVERLONG = "drop_tokens"` 防长文本静默丢图**：修复原默认 `OVERLONG = "drop"` 在窄 `MAX_TOKENS` 档位下将超长高质量自然语言 `.txt` 样本整条丢弃的问题（仅截断超限尾部 Token，完整保留图片样本）；同时修复 `apply_concept_preset()` 未复位多子集开关的 UI 状态残留。
+
 ## [1.2.2] - 2026-11-20
 
 ### Added
@@ -64,7 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.1.0...v1.2.0

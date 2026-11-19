@@ -18,7 +18,7 @@ $$\text{核心优化步数 (Steps)} \approx \frac{\text{总图文曝光次数}}{
 
 #### 实例推演
 - **场景**：现有 40 张图像；
-- **设置**：设置 `Repeats = 10`（在文件夹命名为 `10_ness_style`），设置 `Epochs = 6`；
+- **设置**：设置 `Repeats = 10`（在文件夹命名为 `10_my_style`），设置 `Epochs = 6`；
 - **总曝光量**：$40 \times 10 \times 6 = 2400$ 次单图遍历；
 - **优化器步数**：$2400 \div 4 = \mathbf{600 \text{ 步}}$。
 
@@ -92,38 +92,59 @@ $$\text{核心优化步数 (Steps)} \approx \frac{\text{总图文曝光次数}}{
 
 ---
 
-## 5. 实战命令行调用模板
+## 5. 多子集配比与高阶适配器（DoRA / LoHa / LoKr / LoRA+）实战策略
 
-在本地 Windows 环境下，直接通过 [train_local.py](../train_local.py) 传入针对性超参数。
+除基础单图集 LoRA 外，本管线原生接入了 `KohakuMossTrainer` 全套高阶低秩结构与配比能力：
 
-### 5.1 人物角色训练模板 (以 30 张图为例)
+| 高阶特性 | CLI / GUI 开关 | 核心适用场景与调优建议 |
+| :--- | :--- | :--- |
+| **多子集配比 (`--subsets_json`)** | `SUBSETS_JSON` / GUI 多子集表格 | 同时炼制多位角色、多种艺术画风或互补概念时使用。强烈建议使用 GUI【⚖️ 一键配平 Repeat】按各子集图像数量反比设定 `repeats`，保证单轮中弱势少图子集的曝光占比与强势多图子集接近 1:1，并各自绑定独立触发词避免特征串味。 |
+| **DoRA 权重分解 (`--dora`)** | 勾选【启用 DoRA】 | 将权重的方向向量与幅值标量分离优化。极度适合**复杂画风细节与多人物面部五官高保真还原**。训练引擎已默认注入 `DORA_DETACH=True` 控制显存与数值稳定，在 6G~8G `int8` 底模上亦可借助引擎旁路安全运行。 |
+| **适配器算法 (`--algo`)** | `lora` / `loha` / `lokr` | `lora` 通用最稳；`loha`（Hadamard 乘积）具备更强的非线性表征容量，适合**跨风格大融合**；`lokr`（Kronecker 乘积）体积最小、压缩比极高，适合轻量分发。 |
+| **目标注入层 (`--target_preset`)** | 6 档注入预设 | `attn-mlp` 通用均衡；**多人物/复杂动作推荐 `attn-mlp+text-refiner`**（微调文本细化器加强语义绑定）；**画风迁移推荐 `attn-mlp+modulation`**（控制自适应层归一化时间调制特征，全局色调笔触收敛更强）；**重度风格重写可选 `full-block`**。 |
+| **LoRA+ (`--loraplus_ratio`)** | `1.0` / `2.0 ~ 4.0` | 按 ICML 论文设定放大 B（上投影）矩阵学习率倍率。多人物或多画风联合收敛缓慢时设为 `2.0 ~ 4.0` 可明显加快早期特征成形；若已出现过拟合风险则保持 `1.0`。 |
+
+---
+
+## 6. 实战命令行调用模板
+
+在本地 Windows 环境下，直接通过 [train_local.py](../train_local.py) 传入针对性超参数（推荐优先使用规范参数 `--lora_name` 与 `--trigger_word`）。
+
+### 6.1 人物角色训练模板 (以 30 张图为例 + DoRA)
 ```powershell
 python train_local.py `
     --data_dir "./dataset/my_character" `
-    --output_dir "./output/my_character_lora" `
-    --run_name "my_character" `
+    --output_dir "./output" `
+    --lora_name "my_character" `
+    --trigger_word "my_character_char" `
     --repeats 6 `
     --epochs 3 `
-    --steps 250 `
+    --steps 270 `
     --rank 32 `
     --alpha 16.0 `
+    --algo lora `
+    --dora `
+    --target_preset attn-mlp+text-refiner `
     --lr 8e-5 `
     --precision bf16 `
     --text_device cpu `
     --copy_to_comfy_loras
 ```
 
-### 5.2 艺术画风训练模板 (以 50 张图为例)
+### 6.2 艺术画风训练模板 (以 50 张图为例 + Modulation)
 ```powershell
 python train_local.py `
     --data_dir "./dataset/my_art_style" `
-    --output_dir "./output/my_style_lora" `
-    --run_name "my_style" `
+    --output_dir "./output" `
+    --lora_name "my_style" `
+    --trigger_word "in the style of my_style" `
     --repeats 10 `
     --epochs 6 `
     --steps 750 `
     --rank 64 `
     --alpha 64.0 `
+    --algo lora `
+    --target_preset attn-mlp+modulation `
     --lr 1e-4 `
     --precision bf16 `
     --text_device cpu `

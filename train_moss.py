@@ -10,8 +10,23 @@ import json
 import argparse
 from pathlib import Path
 
+def _load_app_version() -> str:
+    """读取项目根目录 VERSION 单一版本信源，缺失时安全回退默认版本号。"""
+    ver_file = Path(__file__).resolve().parent / "VERSION"
+    try:
+        ver = ver_file.read_text(encoding="utf-8").strip()
+        if ver:
+            return ver
+    except Exception:
+        pass
+    return "1.2.2"
+
+
+APP_VERSION = _load_app_version()
+
 # 0. 解析命令行与环境变量超参数 (全面对齐本地引擎，支持显存档位、分辨率、精度与 Base/Heal/SFT 变体)
 parser = argparse.ArgumentParser(description="OpenMOSS MOSS-Image Cloud LoRA Training Engine (Kaggle / Colab)")
+parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
 parser.add_argument("--lora_name", "--run_name", type=str, default=os.environ.get("LORA_NAME", "my_lora"), dest="lora_name",
                     help="Name of the trained LoRA (default: my_lora)")
 parser.add_argument("--trigger_word", type=str, default=os.environ.get("TRIGGER_WORD", ""),
@@ -77,7 +92,7 @@ parser.add_argument("--dataset_url", type=str, default=os.environ.get("DATASET_U
 args, _ = parser.parse_known_args()
 
 print("=" * 75)
-print(">>> OpenMOSS MOSS-Image Cloud LoRA Training Engine (Production v2) <<<")
+print(f">>> OpenMOSS MOSS-Image Cloud LoRA Training Engine v{APP_VERSION} <<<")
 print(f">>> Target LoRA: '{args.lora_name}' | Trigger Word: '{args.trigger_word if args.trigger_word else '(None)'}' <<<")
 print(f">>> Hyperparameters: Repeats={args.repeats}, Epochs={args.epochs}, Steps={args.steps} <<<")
 print(f">>> Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, Preset={args.target_preset}, LoRA+={args.loraplus_ratio} <<<")

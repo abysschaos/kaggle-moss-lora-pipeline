@@ -1,3 +1,10 @@
+# GitHub Actions 自动编译与 Release 发布工作流模板
+#
+# 使用说明：
+#   若需在 GitHub 推送 v*.*.* 标签时由云端自动编译 MOSS_LoRA_Trainer.exe、生成 SHA256SUMS.txt
+#   并自动发布 GitHub Release，可在 GitHub 仓库网页端点击 Add file -> Create new file，
+#   将本模板复制保存为 .github/workflows/release.yml，或使用具备 workflow 权限的 Token 推送。
+
 name: Release Native Launcher & Source
 
 on:
@@ -16,12 +23,21 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Build Native Windows Launcher (Zero-Dependency csc.exe)
+      - name: Verify Tag Matches VERSION
         shell: pwsh
         run: |
-          ./scripts/build_exe.ps1
-          if (-not (Test-Path "./MOSS_LoRA_Trainer.exe")) {
-            throw "MOSS_LoRA_Trainer.exe build failed."
+          $tagVer = "${{ github.ref_name }}".TrimStart('v')
+          $fileVer = (Get-Content "./VERSION" -Raw).Trim()
+          if ($tagVer -ne $fileVer) {
+            throw "Git tag ($tagVer) does not match VERSION ($fileVer)"
+          }
+
+      - name: Build Native Windows Launcher & SHA256SUMS
+        shell: pwsh
+        run: |
+          ./scripts/build_exe.ps1 -EmitChecksum
+          if (-not (Test-Path "./MOSS_LoRA_Trainer.exe") -or -not (Test-Path "./SHA256SUMS.txt")) {
+            throw "MOSS_LoRA_Trainer.exe or SHA256SUMS.txt build failed."
           }
 
       - name: Publish GitHub Release
@@ -31,3 +47,4 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             MOSS_LoRA_Trainer.exe
+            SHA256SUMS.txt

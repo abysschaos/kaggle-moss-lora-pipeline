@@ -77,9 +77,16 @@ REPEATS = 6                         # 单图重复次数 (人物推荐 4~6，画
 EPOCHS = 4                          # 训练轮数 (人物推荐 3~5，画风推荐 6~10)
 STEPS = 400                         # 核心步数 (公式: 图片数 * REPEATS * EPOCHS // 4)
 
-RANK = 32                           # LoRA 矩阵秩 (推荐 32)
+RANK = 32                           # LoRA 矩阵秩 (单概念推荐 32，多人物/多画风推荐 48~64)
 ALPHA = 16.0                        # 缩放系数 (人物推荐 16.0，画风推荐 32.0)
 LR = "1e-4"                         # 学习率 (Base/Heal 推荐 1e-4，SFT 画风推荐 1.2e-4~1.5e-4)
+
+# --- 进阶适配器架构与多子集配比控制 ---
+ALGO = "lora"                       # 算法: "lora" | "loha"(高容量哈达玛) | "lokr"(紧凑克罗内克)
+USE_DORA = False                    # 是否启用 DoRA 权重分解 (多人物/多画风/细节还原建议 True)
+TARGET_PRESET = "attn-mlp"          # 注入层: "attn" | "attn-mlp" | "attn-mlp+modulation" | "attn-mlp+text-refiner" | "full-block" | "all"
+LORAPLUS_RATIO = 1.0                # LoRA+ 上投影学习率倍率 (1.0=关闭，多概念建议 2.0~4.0)
+SUBSETS_JSON = ""                   # 留空 "" 为单图集；填写 JSON 数组可开启多子集配比
 
 # --- 云端显存优化、分辨率与底模变体控制 ---
 MODEL_VARIANT = "heal"              # 底模分支: "heal"(推荐防溢出) | "base"(官方原版) | "sft"(官方SFT对齐版)
@@ -88,6 +95,11 @@ RESOLUTION = 1024                   # 目标分辨率: 1024(标准高清) | 768(
 BASE_QUANT = "auto"                 # 底模量化: "auto" | "int8"(下载体积减半且省显存) | "full"
 PRECISION = "auto"                  # 计算精度: "auto"(T4自动FP16，L4/A100自动BF16) | "fp16" | "bf16"
 TEXT_DEVICE = "auto"                # 文本编码器设备: "auto" | "cuda" | "cpu"
+
+# --- 续炼与存档间隔控制 ---
+TRAIN_MODE = "fresh"                # "fresh" | "resume"(断点续炼) | "init_from"(基于已有LoRA微调)
+INIT_LORA_PATH = ""                 # 指定已有 .safetensors 权重路径 (续炼/二阶段微调时使用)
+SAVE_EVERY = 100                    # 每 N 步自动保存一次中间 checkpoint 权重
 # ==============================================================================
 
 # 1. 克隆训练工程
@@ -98,21 +110,35 @@ if not os.path.exists("kaggle-moss-lora-pipeline"):
 %cd kaggle-moss-lora-pipeline
 
 # 2. 调用云端训练引擎执行全自动训练
-!python train_moss.py \
-    --lora_name "{LORA_NAME}" \
-    --trigger_word "{TRIGGER_WORD}" \
-    --repeats {REPEATS} \
-    --epochs {EPOCHS} \
-    --steps {STEPS} \
-    --rank {RANK} \
-    --alpha {ALPHA} \
-    --lr "{LR}" \
-    --variant "{MODEL_VARIANT}" \
-    --vram_preset "{VRAM_PRESET}" \
-    --resolution {RESOLUTION} \
-    --base_quant "{BASE_QUANT}" \
-    --precision "{PRECISION}" \
-    --text_device "{TEXT_DEVICE}"
+cmd = [
+    sys.executable, "train_moss.py",
+    "--lora_name", str(LORA_NAME),
+    "--trigger_word", str(TRIGGER_WORD),
+    "--repeats", str(REPEATS),
+    "--epochs", str(EPOCHS),
+    "--steps", str(STEPS),
+    "--rank", str(RANK),
+    "--alpha", str(ALPHA),
+    "--algo", str(ALGO),
+    "--target_preset", str(TARGET_PRESET),
+    "--loraplus_ratio", str(LORAPLUS_RATIO),
+    "--lr", str(LR),
+    "--variant", str(MODEL_VARIANT),
+    "--vram_preset", str(VRAM_PRESET),
+    "--resolution", str(RESOLUTION),
+    "--base_quant", str(BASE_QUANT),
+    "--precision", str(PRECISION),
+    "--text_device", str(TEXT_DEVICE),
+    "--train_mode", str(TRAIN_MODE),
+    "--save_every", str(SAVE_EVERY),
+]
+if USE_DORA:
+    cmd.append("--dora")
+if SUBSETS_JSON.strip():
+    cmd.extend(["--subsets_json", SUBSETS_JSON.strip()])
+if INIT_LORA_PATH.strip():
+    cmd.extend(["--init_from", INIT_LORA_PATH.strip(), "--resume_from", INIT_LORA_PATH.strip()])
+subprocess.run(cmd, check=True)
 ```
 
 #### 系统在后台执行的自动化过程：
@@ -173,13 +199,14 @@ if not os.path.exists("kaggle-moss-lora-pipeline"):
 
 ---
 
-## 💡 云端调参建议速查表 (画风 vs 人物)
+## 💡 云端调参建议速查表 (单概念 vs 多子集配比)
 
-| 场景目标 | 推荐 Repeats | 推荐 Epochs | 推荐核心步数 (Steps) | 推荐 Rank | 推荐 Alpha | 推荐学习率 (LR) | 触发词建议 |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **二次元 / 艺术画风** | 10 | 6 | 600 | 32 | 32.0 | 1e-4 | 建议填风格词，如 `in the style of my_style` |
-| **特定动漫 / 游戏人物** | 6 | 4 | 400 | 32 | 16.0 | 8e-5 ~ 1e-4 | 必须填独特专有词，如 `makima_char` |
-| **现实摄影 / 景物微调** | 8 | 5 | 500 | 32 | 24.0 | 1e-4 | 填主题名词，如 `cyberpunk_cityscape` |
+| 场景目标 | Repeats / Epochs / Steps | Rank / Alpha | 推荐适配器配置 | 触发词与多子集建议 |
+| :--- | :--- | :--- | :--- | :--- |
+| **二次元 / 艺术画风** | `10` / `6` / `600` | `32` / `32.0` | `lora` + `attn-mlp`（可选 `+dora` 与 `+modulation`） | 填风格词，如 `in the style of my_style` |
+| **特定动漫 / 游戏人物** | `6` / `4` / `400` | `32` / `16.0` | `lora` + `dora` + `attn-mlp+text-refiner` | 必须填独特专有词，如 `makima_char` |
+| **多人物 / 多画风融合** | 按各子集图数反比配平 / `6~8` / `700~1000` | `48~64` / `48.0~64.0` | `lora`（或 `loha`）+ `dora` + `loraplus_ratio=2.0` | 启用 `SUBSETS_JSON` 为每角色/每画风绑定独立子目录与触发词 |
+| **特定动作 / 服饰概念** | `8` / `5` / `500` | `32` / `24.0~32.0` | `lora` + `attn-mlp+text-refiner` | 填具体动作/物体名词，确保主体人物环境分散 |
 
 > **步数对齐小公式**：
 > 当您拥有 $N$ 张图片时，建议核心步数设为：

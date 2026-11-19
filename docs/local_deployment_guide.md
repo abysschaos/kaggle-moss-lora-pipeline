@@ -93,7 +93,7 @@ pip install -r requirements-local.txt
 脚本将自动展示硬件概览（显卡型号、VRAM、BF16 硬件支持）、验证图集文件数量、自检模型文件，并在用户敲击回车后自动拉起全程自动化闭环。
 
 ### 6.3 命令行高级调参示例
-支持通过 `train_local.py` 传入自定义超参数：
+支持通过 `train_local.py` 传入自定义超参数（包括显存档位 `vram_preset`、目标分辨率 `resolution` 与高阶适配器配置）：
 ```powershell
 python train_local.py `
     --data_dir "./dataset" `
@@ -102,17 +102,24 @@ python train_local.py `
     --steps 600 `
     --rank 32 `
     --alpha 32.0 `
+    --algo lora `
+    --target_preset attn-mlp `
+    --vram_preset auto `
+    --resolution 1024 `
     --lr 1e-4 `
     --precision bf16 `
     --text_device cpu `
     --copy_to_comfy_loras
 ```
 
+- **`--vram_preset`**：支持 `auto / 6g / 8g / 12g / 16g`。低于 10GB 显存时自动启用极省显存组合（`ring2 + actoff + optcpu + gradoff`），配合 `int8` DiT 可将单卡门槛下探至 6GB VRAM。
+- **`--resolution`**：支持 `1024 / 768 / 512`。本地仅需快速验证构图收敛或显卡仅为 6GB 时，可将分辨率降为 `768` 显著提速并压降峰值激活显存。
+
 ---
 
 ## 7. 训练产出物与 ComfyUI 推理对齐
 
-训练完成后，权重将自动归档至 `./output/` 目录（并可直通 `ComfyUI/models/loras/`）：
-- `my_lora-comfy.safetensors`：专为 ComfyUI 官方原生 `Load LoRA` 节点对齐，保留标准 `lora_unet_` 前缀，实现 100% 满额挂载。
-- `ness_style-lycoris.safetensors`：保留完整 LyCORIS 架构标识，支持高级适配器加载器。
+训练完成后，权重将自动归档至 `./output/<lora_name>/` 目录（并可直通 `ComfyUI/models/loras/`）：
+- `my_lora-comfy.safetensors`：专为 ComfyUI 原生 `Load LoRA` 节点对齐，保留标准 `lora_unet_` 前缀，实现 100% 满额挂载（含 `SAVE_FUSED_QKV = False` 紧凑导出保障）。
+- `my_lora-lycoris.safetensors`：保留完整 LyCORIS 架构标识，支持 `LycorisLoader` 与 DoRA / LoHa / LoKr 高级适配器加载。
 - **推荐推理参数**：CFG 3.0 ~ 3.5，Shift 5.0，采样步数 >= 50 步，负向提示词留空。

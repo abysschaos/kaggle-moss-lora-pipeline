@@ -30,10 +30,26 @@ def _resolve_cli_python() -> str:
             return str(cli_py)
     return sys.executable
 
+
+def _load_app_version() -> str:
+    """读取项目根目录 VERSION 单一版本信源，缺失时安全回退默认版本号。"""
+    ver_file = Path(__file__).resolve().parent / "VERSION"
+    try:
+        ver = ver_file.read_text(encoding="utf-8").strip()
+        if ver:
+            return ver
+    except Exception:
+        pass
+    return "1.2.2"
+
+
+APP_VERSION = _load_app_version()
+
+
 class ModernLocalTrainerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("OpenMOSS MOSS-Image 本地 LoRA 训练引擎控制台")
+        self.root.title(f"OpenMOSS MOSS-Image 本地 LoRA 训练引擎控制台 v{APP_VERSION}")
 
         # 挂载自定义应用图标（与 MOSS_LoRA_Trainer.exe 保持任务栏/标题栏一致）
         try:

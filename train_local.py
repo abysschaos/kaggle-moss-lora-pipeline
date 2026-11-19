@@ -38,6 +38,21 @@ os.environ["TRITON_DUMP_DIR"] = f"{safe_temp_posix}/dump"
 os.environ["TRITON_OVERRIDE_DIR"] = f"{safe_temp_posix}/override"
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"{safe_temp_posix}/inductor"
 
+def _load_app_version() -> str:
+    """读取项目根目录 VERSION 单一版本信源，缺失时安全回退默认版本号。"""
+    ver_file = Path(__file__).resolve().parent / "VERSION"
+    try:
+        ver = ver_file.read_text(encoding="utf-8").strip()
+        if ver:
+            return ver
+    except Exception:
+        pass
+    return "1.2.2"
+
+
+APP_VERSION = _load_app_version()
+
+
 def print_banner(msg: str):
     width = 78
     print("=" * width)
@@ -833,6 +848,7 @@ def prepare_multi_subset_dataset(subsets: list, workspace_data_dir: Path) -> tup
 
 def main():
     parser = argparse.ArgumentParser(description="OpenMOSS MOSS-Image Local Training Engine for Windows Consumer GPUs")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
     parser.add_argument("--data_dir", type=str, default="./dataset",
                         help="Path to folder containing source images and .txt captions")
     parser.add_argument("--subsets_json", type=str, default="",
@@ -905,7 +921,7 @@ def main():
     lora_dedicated_folder = base_output_dir / args.lora_name
     lora_dedicated_folder.mkdir(parents=True, exist_ok=True)
 
-    print_banner(f"OpenMOSS MOSS-Image Local LoRA Training Pipeline: {args.lora_name}")
+    print_banner(f"OpenMOSS MOSS-Image Local LoRA Training Pipeline v{APP_VERSION}: {args.lora_name}")
     print(f"Target LoRA Name & Subfolder: {args.lora_name}")
     print(f"Custom Trigger Word:          {args.trigger_word if args.trigger_word else '(None, using original captions)'}")
     print(f"Dedicated Output Directory:   {lora_dedicated_folder}")

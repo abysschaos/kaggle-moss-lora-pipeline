@@ -10,8 +10,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("OpenMOSS MOSS-Image LoRA Trainer Launcher")]
 [assembly: AssemblyDescription("Zero-console native Windows launcher for OpenMOSS MOSS-Image LoRA Trainer")]
 [assembly: AssemblyProduct("OpenMOSS MOSS-Image LoRA Trainer")]
-[assembly: AssemblyVersion("1.2.1.0")]
-[assembly: AssemblyFileVersion("1.2.1.0")]
+[assembly: AssemblyVersion("1.2.2.0")]
+[assembly: AssemblyFileVersion("1.2.2.0")]
 
 static class MossTrainerLauncher
 {

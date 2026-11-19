@@ -118,8 +118,8 @@ if not exist "KohakuMossTrainer\" mkdir "KohakuMossTrainer"
     echo ================================================================================
     echo.
     echo 1. 自动化方案 (推荐):
-    echo    启动本项目图形界面 launch_ui.bat，在左侧【训练器框架管理】卡片中，
-    echo    点击【一键自动克隆/下载】按钮，系统将自动拉取并打入全套自愈补丁！
+    echo    双击 build_exe.bat 1 秒编译并启动 MOSS_LoRA_Trainer.exe（或直接双击 launch_ui.vbs），
+    echo    在左侧【训练器框架管理】卡片点击【一键自动克隆/下载】即可全自动拉取并打补丁！
     echo.
     echo 2. 手动离线解压方案 (防套娃重点):
     echo    官方源码仓库: https://github.com/KohakuBlueleaf/KohakuMossTrainer
@@ -132,8 +132,8 @@ if not exist "KohakuMossTrainer\" mkdir "KohakuMossTrainer"
     echo    严禁出现 KohakuMossTrainer\KohakuMossTrainer-main\... 这种双层嵌套套娃结构！
     echo.
     echo 3. 补丁注入:
-    echo    解压放置完成后，在 launch_ui.bat 界面点击【检查并注入补丁】，
-    echo    即可自动完成针对 PyTorch 2.11 算子兼容与调度器异常的自愈修复。
+    echo    解压放置完成后，在图形界面点击【检查并注入补丁】，
+    echo    即可自动完成针对 PyTorch 2.11 算子兼容、PAUSE 钩子与调度器异常的自愈修复。
 )
 
 :: 写入底模放置说明
@@ -183,8 +183,9 @@ echo ===========================================================================
 echo   恭喜！本地部署环境已全部就绪！
 echo ================================================================================
 echo 下一步操作指引:
-echo   1. 如果您本地已有 ComfyUI，无需重复下载底模，直接启动 GUI 选择路径即可；
+echo   1. 如果您本地已有 ComfyUI，无需重复下载底模，启动界面后直接选择模型路径即可；
 echo   2. 若为纯净全新设备，请按照 models/ 对应文件夹内的 txt 指引放置底模；
-echo   3. 双击运行根目录下的 launch_ui.bat 即可拉起图形化控制面板进行训练。
+echo   3. 推荐先双击 build_exe.bat 生成 MOSS_LoRA_Trainer.exe 并双击零黑框启动（可固定任务栏）；
+echo      也可直接双击免编译版 launch_ui.vbs（或兼容入口 launch_ui.bat）拉起图形控制台。
 echo.
 pause

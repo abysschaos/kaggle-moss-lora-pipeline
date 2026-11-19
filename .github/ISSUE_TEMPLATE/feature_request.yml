@@ -1,0 +1,33 @@
+name: 功能建议 (Feature Request)
+description: 提出新功能构想、新适配器支持、GUI 交互改进或文档补充建议
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 您希望解决什么痛点或使用场景？
+      placeholder: "例如：希望增加对某类训练模式、某种显存档位或某类导出格式的支持..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的实现方式或参考方案
+      description: 如上游 KohakuMossTrainer 或成熟开源项目已有对应能力，欢迎附上参考链接。
+      placeholder: "描述期望的 CLI 参数、GUI 控件或工作流..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target-track
+    attributes:
+      label: 目标适用范围
+      options:
+        - 本地与云端双轨同步
+        - 仅 Windows 本地 (GUI / CLI)
+        - 仅 Kaggle / Colab 云端
+        - 文档与工程工具链
+    validations:
+      required: false

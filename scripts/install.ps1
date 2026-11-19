@@ -66,7 +66,7 @@ if (-not (Test-Path $trainerNotice)) {
 [KohakuMossTrainer 训练器框架放置说明]
 官方源码: https://github.com/KohakuBlueleaf/KohakuMossTrainer
 
-1. 推荐自动化方案: 启动 launch_ui.bat，在【训练器框架管理】卡片点击【一键自动克隆/下载】。
+1. 推荐自动化方案: 启动 MOSS_LoRA_Trainer.exe（或 launch_ui.vbs），在【训练器框架管理】卡片点击【一键自动克隆/下载】。
 2. 手动离线解压: 解压后必须确保本目录 (KohakuMossTrainer\) 下直接包含 pyproject.toml、src/ 等，严禁双层嵌套套娃结构！
 3. 补丁注入: 放置后在 GUI 中点击【检查并注入补丁】即可。
 "@ | Out-File -FilePath $trainerNotice -Encoding utf8
@@ -77,4 +77,4 @@ Write-Host "`nVerifying PyTorch CUDA..." -ForegroundColor Yellow
 & $venvPython -c "import torch; print('PyTorch:', torch.__version__, '| CUDA Available:', torch.cuda.is_available(), '| Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
 
 Write-Host "`n[SUCCESS] Local environment installation finished!" -ForegroundColor Green
-Write-Host "Double click launch_ui.bat to start the training GUI panel." -ForegroundColor Cyan
+Write-Host "Recommended: run .\build_exe.bat once to compile MOSS_LoRA_Trainer.exe, or double-click launch_ui.vbs to start without console windows." -ForegroundColor Cyan

@@ -3,20 +3,24 @@
     一键透明编译 Windows 原生零黑框启动器 MOSS_LoRA_Trainer.exe（无需任何第三方编译器或 PyInstaller）。
 .DESCRIPTION
     使用 Windows 系统原生自带的 .NET Framework 4.x 编译器 (csc.exe)，
-    将明文源码 launcher/MossTrainerLauncher.cs 编译为约 10KB 的原生 GUI 可执行程序，
-    并自动嵌入 assets/moss_trainer.ico 图标。
+    将明文源码 launcher/MossTrainerLauncher.cs 编译为约 80KB 的原生 GUI 可执行程序（内含 16px~256px 多分辨率高清图标）。
 .PARAMETER CreateDesktopShortcut
     若指定此开关，编译完成后自动在桌面创建指向 MOSS_LoRA_Trainer.exe 的快捷方式。
+.PARAMETER EmitChecksum
+    若指定此开关，编译完成后在项目根目录生成标准 SHA256SUMS.txt 校验文件。
 #>
 param(
-    [switch]$CreateDesktopShortcut
+    [switch]$CreateDesktopShortcut,
+    [switch]$EmitChecksum
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $SourceFile  = Join-Path $ProjectRoot "launcher\MossTrainerLauncher.cs"
 $IconFile    = Join-Path $ProjectRoot "assets\moss_trainer.ico"
+$VersionFile = Join-Path $ProjectRoot "VERSION"
 $OutputExe   = Join-Path $ProjectRoot "MOSS_LoRA_Trainer.exe"
+$ChecksumFile = Join-Path $ProjectRoot "SHA256SUMS.txt"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "  OpenMOSS MOSS-Image 原生 Windows 启动器一键编译工具" -ForegroundColor Cyan
@@ -25,6 +29,21 @@ Write-Host "==========================================================" -Foregro
 if (-not (Test-Path $SourceFile)) {
     Write-Host "[错误] 未找到启动器源码: $SourceFile" -ForegroundColor Red
     exit 1
+}
+
+if (Test-Path $VersionFile) {
+    $ExpectedVer = (Get-Content $VersionFile -Raw -Encoding UTF8).Trim()
+    $CsContent = Get-Content $SourceFile -Raw -Encoding UTF8
+    $VerMatch = [regex]::Match($CsContent, 'AssemblyVersion\("([^"]+)"\)')
+    if ($VerMatch.Success) {
+        $CsVer = $VerMatch.Groups[1].Value
+        $ExpectedPrefix = "$ExpectedVer.0"
+        if ($CsVer -ne $ExpectedPrefix -and $CsVer -ne $ExpectedVer) {
+            Write-Host "[警告] VERSION ($ExpectedVer) 与 MossTrainerLauncher.cs AssemblyVersion ($CsVer) 不一致，请同步更新。" -ForegroundColor Yellow
+        } else {
+            Write-Host "[版本] 单一版本信源对齐验证通过: v$ExpectedVer ($CsVer)" -ForegroundColor DarkCyan
+        }
+    }
 }
 
 # 自动查找 Windows 原生自带 .NET Framework 4.x C# 编译器
@@ -76,9 +95,17 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutputExe)) {
 
 $FileInfo = Get-Item $OutputExe
 $SizeKB = [math]::Round($FileInfo.Length / 1024, 1)
+$Sha256 = (Get-FileHash -Path $OutputExe -Algorithm SHA256).Hash.ToLowerInvariant()
 Write-Host ""
 Write-Host "[成功] 已生成原生启动器: $OutputExe ($SizeKB KB)" -ForegroundColor Green
+Write-Host "       SHA-256: $Sha256" -ForegroundColor DarkGray
 Write-Host "       现在您可以直接双击 MOSS_LoRA_Trainer.exe 无黑框启动，或右键固定到任务栏。" -ForegroundColor Gray
+
+if ($EmitChecksum) {
+    $ChecksumLine = "$Sha256  MOSS_LoRA_Trainer.exe`n"
+    [System.IO.File]::WriteAllText($ChecksumFile, $ChecksumLine, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "[校验] 已生成标准校验和文件: $ChecksumFile" -ForegroundColor Green
+}
 
 if ($CreateDesktopShortcut) {
     try {

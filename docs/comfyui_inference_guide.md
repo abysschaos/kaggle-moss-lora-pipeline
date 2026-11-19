@@ -17,11 +17,11 @@ MOSS-Image-Base 属于未经分类器自由引导（CFG）蒸馏的原生 Base �
 ---
 
 ## 2. LoRA 节点挂载与选择
-将导出的 LoRA 文件放置于 `ComfyUI/models/loras/` 目录下。
+将导出的 LoRA 文件放置于 `ComfyUI/models/loras/` 目录下（本管线在导出 DoRA / LoHa / LoKr 与常规 LoRA 时均已显式锁定 `SAVE_FUSED_QKV = False`，避免 QKV 合并膨胀为全量差分张量）。
 
 * **使用标准 `Load LoRA` 节点**：
-  直接加载 `ness_style-comfy.safetensors`。ComfyUI 底层的 `comfy/lora.py` 会自动通过内置的 `lora_unet_` 桥接字典将 756 个张量 100% 满额映射并加载到底模中。
+  直接加载 `<lora_name>-comfy.safetensors`。ComfyUI 底层的 `comfy/lora.py` 会自动通过内置的 `lora_unet_` 桥接字典将权重张量满额映射并加载到底模中。
 * **使用 `LycorisLoader` 节点**：
-  推荐加载 `ness_style-lycoris.safetensors`（600 步满血收官版）。
+  对于 **LoHa / LoKr / DoRA** 或需要完整保留 LyCORIS 架构信息的权重，推荐加载 `<lora_name>-lycoris.safetensors`。
 * **LoRA 强度调节**：
-  在 LoRA 加载节点中，推荐将模型强度（Strength Model）设在 **0.6 ~ 0.8** 区间内，既能完整呈现标志性的画风与笔触，又能保留极佳的自然语言提示词泛化自由度。
+  在 LoRA 加载节点中，推荐将模型强度（Strength Model）设在 **0.6 ~ 0.8** 区间内（多人物或多画风混合融合 LoRA 可从 **0.7** 起步测试），既能完整呈现目标风格或角色特征，又能保留极佳的自然语言提示词泛化自由度。

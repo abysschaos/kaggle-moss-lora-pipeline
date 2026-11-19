@@ -10,8 +10,15 @@ $Host.UI.RawUI.WindowTitle = "OpenMOSS MOSS-Image Local LoRA Trainer"
 $projectRoot = (Get-Item $PSScriptRoot\..).FullName
 Set-Location $projectRoot
 
+$appVersion = "1.2.2"
+$versionFile = Join-Path $projectRoot "VERSION"
+if (Test-Path $versionFile) {
+    $rawVer = (Get-Content $versionFile -Raw -Encoding UTF8).Trim()
+    if ($rawVer) { $appVersion = $rawVer }
+}
+
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host ">>> OpenMOSS MOSS-Image Local LoRA Training Launcher (Windows 11) <<<" -ForegroundColor Green
+Write-Host ">>> OpenMOSS MOSS-Image Local LoRA Training Launcher v$appVersion (Windows CLI) <<<" -ForegroundColor Green
 Write-Host "================================================================================" -ForegroundColor Cyan
 
 # 1. 自动发现可用的高性能 PyTorch Python (venv -> COMFYUI_PYTHON -> detect_env.py -> 系统 python)
@@ -93,6 +100,7 @@ Write-Host " - Steps / Epochs: 600 Steps / 6 Epochs (Repeats=10)"
 Write-Host " - LoRA Dim/Alpha: Rank=32, Alpha=32.0 (Full 1.0 Strength)"
 Write-Host " - Learning Rate:  1e-4"
 Write-Host " - Output Path:    $outputDir\$defaultLoraName"
+Write-Host " - Tip:            Need Multi-Subset / DoRA / LoHa / LoKr / Live Loss Chart? Run MOSS_LoRA_Trainer.exe or pass CLI flags."
 
 $confirm = Read-Host "`nPress Enter to start training immediately (or type 'custom' to adjust arguments)"
 if ($confirm -eq "custom") {
@@ -128,7 +136,7 @@ if ($confirm -eq "custom") {
         --trigger_word "$defaultTriggerWord" `
         --train_mode "$defaultTrainMode" `
         --vram_preset "$defaultVramPreset" `
-        --resolution $customRes `
+        --resolution $defaultResolution `
         --steps $customSteps `
         --precision $customPrecision `
         --copy_to_comfy_loras

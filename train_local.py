@@ -233,19 +233,23 @@ def apply_compatibility_patches(trainer_dir: Path):
             print(f" Warning patching {py_file}: {e}")
     print(f" [OK] Patched empty_host_cache calls across {patched_count} source files.")
 
-    # 3. 修补 objective.py 调度器字典防护
+    # 3. 幂等修补 objective.py 调度器字典防护（防止重复运行产生冗余嵌套）
     obj_check_file = trainer_dir / "src" / "kohakumoss" / "training" / "checks" / "objective.py"
     if obj_check_file.exists():
         try:
             content = obj_check_file.read_text(encoding="utf-8")
-            patched = content.replace(
-                'raw_end = sub.get("end", -1)',
-                'raw_end = sub.get("end", -1) if isinstance(sub, dict) else -1'
-            ).replace(
-                'warmup = sub.get("warmup", 0)',
-                'warmup = sub.get("warmup", 0) if isinstance(sub, dict) else 0'
+            patched = re.sub(
+                r'raw_end = sub\.get\("end", -1\)(?:\s+if isinstance\(sub, dict\) else -1)*',
+                'raw_end = sub.get("end", -1) if isinstance(sub, dict) else -1',
+                content,
             )
-            obj_check_file.write_text(patched, encoding="utf-8")
+            patched = re.sub(
+                r'warmup = sub\.get\("warmup", 0\)(?:\s+if isinstance\(sub, dict\) else 0)*',
+                'warmup = sub.get("warmup", 0) if isinstance(sub, dict) else 0',
+                patched,
+            )
+            if patched != content:
+                obj_check_file.write_text(patched, encoding="utf-8")
             print(" [OK] Patched objective.py for schedule defensive checks.")
         except Exception as e:
             print(f" Warning patching objective.py: {e}")
@@ -661,7 +665,8 @@ def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, r
             if not caption_content.lower().startswith(trigger_clean.lower()):
                 caption_content = f"{trigger_clean}, {caption_content}" if caption_content else trigger_clean
 
-        dest_txt.write_text(caption_content, encoding="utf-8")
+        if not dest_txt.exists() or dest_txt.read_text(encoding="utf-8", errors="ignore") != caption_content:
+            dest_txt.write_text(caption_content, encoding="utf-8")
         linked_count += 1
 
     print(f" [OK] Structured dataset directory ready: {target_folder} ({linked_count} image-text pairs)")
@@ -791,7 +796,8 @@ def prepare_multi_subset_dataset(subsets: list, workspace_data_dir: Path) -> tup
                 caption_content = src_txt.read_text(encoding="utf-8", errors="ignore").strip()
             if trigger_clean and not caption_content.lower().startswith(trigger_clean.lower()):
                 caption_content = f"{trigger_clean}, {caption_content}" if caption_content else trigger_clean
-            dest_txt.write_text(caption_content, encoding="utf-8")
+            if not dest_txt.exists() or dest_txt.read_text(encoding="utf-8", errors="ignore") != caption_content:
+                dest_txt.write_text(caption_content, encoding="utf-8")
 
         epoch_exp = len(raw_images) * spec["repeats"]
         total_epoch_exposures += epoch_exp
@@ -1189,7 +1195,7 @@ DATASETS = [
         "source": "kohya",
         "path": data_root,
         "repeat_prefix": "first",
-        "artist_from_folder": "name",
+        "artist_from_folder": None,
         "txt_as": "nl",
     }}
 ]
@@ -1219,6 +1225,7 @@ VAE_ENCODE = {{"compile": "off"}}
     fp16_fix_val = "online" if (args.precision == "fp16" and not is_healed_backbone) else "none"
     if fp16_fix_val == "online":
         print(f" [FP16 Guard] Non-heal backbone '{transformer_filename}' under FP16 detected -> enabled FP16_FIX='online' to prevent overflow!")
+    fp16_fix_kwargs_str = 'FP16_FIX_KWARGS = {"c": 1 / 16}' if fp16_fix_val == "online" else "FP16_FIX_KWARGS = {}"
 
     effective_comfy_models = args.comfy_models_dir
     if not effective_comfy_models:
@@ -1253,6 +1260,7 @@ SAMPLE_EVERY = 0
 VALIDATE_EVERY = 0
 TUNE = "off"
 FP16_FIX = "{fp16_fix_val}"
+{fp16_fix_kwargs_str}
 PRECISION = "{args.precision}"
 ALGO = "{args.algo}"
 {algo_kwargs_str}

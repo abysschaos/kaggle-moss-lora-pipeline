@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Base Model](https://img.shields.io/badge/Base%20Model-MOSS--Image--heal-green.svg)](https://huggingface.co/KBlueLeaf/MOSS-Image-heal)
 [![Framework](https://img.shields.io/badge/Framework-KohakuMossTrainer-orange.svg)](https://github.com/KohakuBlueleaf/KohakuMossTrainer)
-[![Latest Release](https://img.shields.io/badge/Release-v1.2.0%20Stable-blueviolet.svg)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/tag/v1.2.0)
+[![Latest Release](https://img.shields.io/badge/Release-v1.2.1%20Stable-blueviolet.svg)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/tag/v1.2.1)
 [![Direct Download](https://img.shields.io/badge/Download-Source%20ZIP-success.svg)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)
 
 一套专为 **OpenMOSS MOSS-Image (5B Single-Stream DiT)** 打造的工业级 LoRA 自动化炼制工程方案。依托 [KohakuBlueleaf/KohakuMossTrainer](https://github.com/KohakuBlueleaf/KohakuMossTrainer) 架构，支持 **云端 Kaggle 免费算力** 与 **本地 Windows 消费级显卡 (RTX 4070/4060/3060 8GB~12GB)** 双轨运行。
@@ -16,7 +16,7 @@
 
 ### 1. 方式 A：纯小白一键直接下载 ZIP (推荐，免 Git 环境)
 - **直接下载主分支最新包**：👉 [**【⬇️ 点击直接下载最新项目压缩包 (main.zip)】**](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)
-- **官方发行版本页面**：👉 [**【🏷️ GitHub Releases 官方稳定版页面 (v1.2.0)】**](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases)（详见 [CHANGELOG.md](CHANGELOG.md)）
+- **官方发行版本页面**：👉 [**【🏷️ GitHub Releases 官方稳定版页面 (v1.2.1)】**](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases)（详见 [CHANGELOG.md](CHANGELOG.md)）
 - **新手解压避坑关键**：
   下载后请解压到纯英文路径（例如 `D:\kaggle_moss_lora_pipeline\`）。**路径中严禁包含中文、空格或特殊符号**，以避免 Windows 下 PyTorch C++ 底层算子加载崩溃。
 

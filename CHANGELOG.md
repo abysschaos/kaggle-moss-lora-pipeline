@@ -7,6 +7,16 @@
 
 ---
 
+## [v1.2.1] - 2026-11-20
+
+### 🛠️ `KohakuMossTrainer` 引擎深度适配加固
+- **补齐 `FP16_FIX_KWARGS = {"c": 1 / 16}` 防溢出系数**：修复本地 `train_local.py` 与云端 `train_moss.py` 在启用 `FP16_FIX="online"`（如 `6g/8g/12g + FP16 + Base/SFT` 组合）时因缺少缩放系数参数触发引擎 `knobs.validate()` 报错的问题。
+- **清除 `artist_from_folder` 空标注图目录名污染**：将本地与云端 `DATASETS` 配置中的 `"artist_from_folder"` 统一由 `"name"` 调整为 `None`，避免纯多子集目录下的无标注图片回退触发 `TagTemplate` 时把文件夹名（如 `char_bob`）误当画师标签拼接进训练文本。
+- **保留 `.txt` 原始 `mtime` 保护增量扫描缓存**：`prepare_dataset_structure` 与 `prepare_multi_subset_dataset` 仅在目标 `.txt` 不存在或内容确实变化时执行写盘，防止每次重跑无故刷新时间戳导致 `kohakumoss_data` catalog 缓存失效。
+- **幂等化 `objective.py` 兼容补丁**：改用正则归一化替换逻辑，彻底消除多次运行引发的 `if isinstance(sub, dict)` 嵌套叠加并自动清理既有冗余。
+
+---
+
 ## [v1.2.0] - 2026-11-20
 
 ### ✨ 核心新增功能（多人物 / 多画风 / 概念 LoRA 与高阶适配器引擎）

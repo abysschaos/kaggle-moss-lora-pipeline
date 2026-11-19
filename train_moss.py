@@ -437,15 +437,19 @@ if os.path.exists(obj_check_file):
     try:
         with open(obj_check_file, "r", encoding="utf-8") as f:
             obj_content = f.read()
-        obj_content = obj_content.replace(
-            'raw_end = sub.get("end", -1)',
-            'raw_end = sub.get("end", -1) if isinstance(sub, dict) else -1'
-        ).replace(
-            'warmup = sub.get("warmup", 0)',
-            'warmup = sub.get("warmup", 0) if isinstance(sub, dict) else 0'
+        patched_obj = re.sub(
+            r'raw_end = sub\.get\("end", -1\)(?:\s+if isinstance\(sub, dict\) else -1)*',
+            'raw_end = sub.get("end", -1) if isinstance(sub, dict) else -1',
+            obj_content,
         )
-        with open(obj_check_file, "w", encoding="utf-8") as f:
-            f.write(obj_content)
+        patched_obj = re.sub(
+            r'warmup = sub\.get\("warmup", 0\)(?:\s+if isinstance\(sub, dict\) else 0)*',
+            'warmup = sub.get("warmup", 0) if isinstance(sub, dict) else 0',
+            patched_obj,
+        )
+        if patched_obj != obj_content:
+            with open(obj_check_file, "w", encoding="utf-8") as f:
+                f.write(patched_obj)
         print("Patched objective.py for schedule_problems defensive check.")
     except Exception as obj_err:
         print("Note: Could not patch objective.py:", obj_err)
@@ -703,7 +707,7 @@ DATASETS = [
         "source": "kohya",
         "path": data_root,
         "repeat_prefix": "first",
-        "artist_from_folder": "name",
+        "artist_from_folder": None,
         "txt_as": "nl",
     }}
 ]
@@ -729,6 +733,7 @@ VAE_ENCODE = {{"compile": "off"}}
 
 warmup_steps = min(30, max(1, int(effective_steps * 0.05))) if effective_steps > 5 else 0
 save_every_val = max(0, int(args.save_every))
+fp16_fix_kwargs_str = 'FP16_FIX_KWARGS = {"c": 1 / 16}' if fp16_fix_val == "online" else "FP16_FIX_KWARGS = {}"
 
 if args.algo == "loha":
     algo_kwargs_str = 'ALGO_KWARGS = {"use_tucker": False, "use_scalar": False, "rank_dropout_scale": False}'
@@ -756,6 +761,7 @@ SAMPLE_EVERY = 0
 VALIDATE_EVERY = 0
 TUNE = "off"
 FP16_FIX = "{fp16_fix_val}"
+{fp16_fix_kwargs_str}
 PRECISION = "{effective_precision}"
 ALGO = "{args.algo}"
 {algo_kwargs_str}

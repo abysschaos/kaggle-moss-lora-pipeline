@@ -123,12 +123,21 @@ class ModernLocalTrainerGUI:
         self.var_steps = tk.IntVar(value=600)
         self.var_rank = tk.IntVar(value=32)
         self.var_alpha = tk.DoubleVar(value=32.0)
+        self.var_algo = tk.StringVar(value=local_cfg.get("algo", "lora"))
+        self.var_dora = tk.BooleanVar(value=bool(local_cfg.get("dora", False)))
+        self.var_target_preset = tk.StringVar(value=local_cfg.get("target_preset", "attn-mlp"))
+        self.var_loraplus = tk.StringVar(value=str(local_cfg.get("loraplus_ratio", "1.0")))
         self.var_lr = tk.StringVar(value="1e-4")
         self.var_precision = tk.StringVar(value="bf16")
         self.var_vram_preset = tk.StringVar(value=local_cfg.get("vram_preset", "auto"))
         self.var_resolution = tk.StringVar(value=str(local_cfg.get("resolution", "1024")))
         self.var_text_device = tk.StringVar(value="cpu")
         self.var_vae_device = tk.StringVar(value="cuda")
+
+        # 多子集配比管理器状态（支持多人物 / 多画风 / 多概念独立触发词与独立 Repeat 配平）
+        self.var_multi_subset = tk.BooleanVar(value=bool(local_cfg.get("multi_subset_enabled", False)))
+        self.subsets = [s for s in local_cfg.get("subsets", []) if isinstance(s, dict)]
+        self.var_subset_summary = tk.StringVar(value="当前未添加子集，点击【➕ 添加子集】开始配比")
 
         # 续炼与进度恢复相关状态变量
         self.train_mode_map = {
@@ -257,7 +266,13 @@ class ModernLocalTrainerGUI:
                 "resolution": self.var_resolution.get(),
                 "train_mode": mode_code,
                 "resume_path": self.var_resume_path.get(),
-                "save_every": self.var_save_every.get()
+                "save_every": self.var_save_every.get(),
+                "algo": self.var_algo.get(),
+                "dora": bool(self.var_dora.get()),
+                "target_preset": self.var_target_preset.get(),
+                "loraplus_ratio": self.var_loraplus.get(),
+                "multi_subset_enabled": bool(self.var_multi_subset.get()),
+                "subsets": self.subsets
             }
             self.config_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
@@ -324,6 +339,30 @@ class ModernLocalTrainerGUI:
         self.root.option_add("*TCombobox*Listbox*selectBackground", self.accent_blue)
         self.root.option_add("*TCombobox*Listbox*selectForeground", "#11111b")
         self.root.option_add("*TCombobox*Listbox*font", (self.font_family, 9))
+
+        # 多子集配比表格暗色 Treeview 样式
+        style.configure(
+            "Dark.Treeview",
+            background=self.input_bg,
+            fieldbackground=self.input_bg,
+            foreground=self.text_main,
+            bordercolor="#45475a",
+            rowheight=24,
+            font=(self.font_family, 8)
+        )
+        style.map(
+            "Dark.Treeview",
+            background=[("selected", self.accent_blue)],
+            foreground=[("selected", "#11111b")]
+        )
+        style.configure(
+            "Dark.Treeview.Heading",
+            background="#181825",
+            foreground=self.accent_blue,
+            relief="flat",
+            font=(self.font_family, 8, "bold")
+        )
+        style.map("Dark.Treeview.Heading", background=[("active", "#313244")])
 
     def build_ui(self):
         # 1. 顶部 Header 状态条
@@ -421,21 +460,38 @@ class ModernLocalTrainerGUI:
         self.build_left_controls(scrollable_frame)
 
     def build_left_controls(self, parent):
-        # 1. 快捷预设按钮栏
-        preset_frame = tk.Frame(parent, bg=self.card_bg)
-        preset_frame.pack(fill=tk.X, pady=(0, 6))
-        
-        tk.Label(preset_frame, text="快速模板预设：", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).pack(side=tk.LEFT, padx=(4, 6), pady=4)
+        # 1. 快捷预设按钮栏 (覆盖单画风/单人物/多人物/多画风/概念动作五大实战预设)
+        preset_card = tk.Frame(parent, bg=self.card_bg)
+        preset_card.pack(fill=tk.X, pady=(0, 6))
 
-        btn_style = tk.Button(preset_frame, text="🎨 艺术画风模板", bg="#45475a", fg=self.text_main,
+        preset_row1 = tk.Frame(preset_card, bg=self.card_bg)
+        preset_row1.pack(fill=tk.X, pady=(0, 3))
+        tk.Label(preset_row1, text="快速模板预设：", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).pack(side=tk.LEFT, padx=(4, 4))
+
+        btn_style = tk.Button(preset_row1, text="🎨 艺术画风", bg="#45475a", fg=self.text_main,
                               activebackground=self.accent_blue, font=(self.font_family, 8, "bold"),
-                              relief=tk.FLAT, padx=10, pady=3, cursor="hand2", command=self.apply_style_preset)
-        btn_style.pack(side=tk.LEFT, padx=4)
+                              relief=tk.FLAT, padx=8, pady=3, cursor="hand2", command=self.apply_style_preset)
+        btn_style.pack(side=tk.LEFT, padx=3)
 
-        btn_char = tk.Button(preset_frame, text="👤 人物角色模板", bg="#45475a", fg=self.text_main,
+        btn_char = tk.Button(preset_row1, text="👤 单人角色", bg="#45475a", fg=self.text_main,
                              activebackground=self.accent_blue, font=(self.font_family, 8, "bold"),
-                             relief=tk.FLAT, padx=10, pady=3, cursor="hand2", command=self.apply_character_preset)
-        btn_char.pack(side=tk.LEFT, padx=4)
+                             relief=tk.FLAT, padx=8, pady=3, cursor="hand2", command=self.apply_character_preset)
+        btn_char.pack(side=tk.LEFT, padx=3)
+
+        btn_mchar = tk.Button(preset_row1, text="👥 多人物配比", bg="#313244", fg=self.accent_purple,
+                              activebackground=self.accent_purple, font=(self.font_family, 8, "bold"),
+                              relief=tk.FLAT, padx=8, pady=3, cursor="hand2", command=self.apply_multi_char_preset)
+        btn_mchar.pack(side=tk.LEFT, padx=3)
+
+        btn_mstyle = tk.Button(preset_row1, text="🎭 多画风配比", bg="#313244", fg=self.accent_blue,
+                               activebackground=self.accent_blue, font=(self.font_family, 8, "bold"),
+                               relief=tk.FLAT, padx=8, pady=3, cursor="hand2", command=self.apply_multi_style_preset)
+        btn_mstyle.pack(side=tk.LEFT, padx=3)
+
+        btn_concept = tk.Button(preset_row1, text="💡 概念/动作", bg="#313244", fg=self.accent_green,
+                                activebackground=self.accent_green, font=(self.font_family, 8, "bold"),
+                                relief=tk.FLAT, padx=8, pady=3, cursor="hand2", command=self.apply_concept_preset)
+        btn_concept.pack(side=tk.LEFT, padx=3)
 
         # 2. 命名与触发词卡片
         name_card = tk.LabelFrame(parent, text=" 🏷️ 自定义 LoRA 命名与触发词 ", bg=self.card_bg, fg=self.accent_blue,
@@ -605,32 +661,113 @@ class ModernLocalTrainerGUI:
         lbl_trainer_note.pack(fill=tk.X, pady=(2, 0))
         self._wrap_labels.append(lbl_trainer_note)
 
-        # 5. 数据集与产出目录卡片
-        path_card = tk.LabelFrame(parent, text=" 📂 数据集与产出目录 ", bg=self.card_bg, fg=self.accent_blue,
+        # 5. 数据集与产出目录卡片（支持单图集与多子集配比无缝切换）
+        path_card = tk.LabelFrame(parent, text=" 📂 数据集配比与产出目录 (支持单图集 / 多人物多画风多子集) ", bg=self.card_bg, fg=self.accent_blue,
                                   font=(self.font_family, 9, "bold"), padx=10, pady=6)
         path_card.pack(fill=tk.X, pady=(0, 6))
 
+        chk_multi = tk.Checkbutton(
+            path_card,
+            text="启用多子集配比模式 (多人物 / 多画风 / 多概念独立目录、专属触发词与 Repeat 配平)",
+            variable=self.var_multi_subset,
+            bg=self.card_bg, fg=self.accent_purple,
+            selectcolor=self.input_bg, activebackground=self.card_bg, activeforeground=self.accent_purple,
+            font=(self.font_family, 8, "bold"), anchor="w", justify=tk.LEFT, wraplength=560,
+            command=self.toggle_multi_subset_mode
+        )
+        chk_multi.pack(fill=tk.X, pady=(0, 4))
+        self._wrap_labels.append(chk_multi)
+
+        # (5A) 单图集选择容器
+        self.single_data_frame = tk.Frame(path_card, bg=self.card_bg)
         self.create_dir_picker_block(
-            path_card, "训练图片目录 (成对 jpg/png + txt):", self.var_data_dir,
+            self.single_data_frame, "训练图片目录 (成对 jpg/png + txt):", self.var_data_dir,
             browse_cmd=self.browse_data_dir, stat_var=self.var_dataset_stat
         )
 
+        # (5B) 多子集配比管理容器
+        self.multi_data_frame = tk.Frame(path_card, bg=self.card_bg)
+        sub_btn_bar = tk.Frame(self.multi_data_frame, bg=self.card_bg)
+        sub_btn_bar.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Button(
+            sub_btn_bar, text="➕ 添加子集", bg=self.accent_blue, fg="#11111b",
+            relief=tk.FLAT, font=(self.font_family, 8, "bold"), cursor="hand2", padx=9, pady=2,
+            command=self.add_subset_dialog
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        tk.Button(
+            sub_btn_bar, text="✏️ 编辑选中", bg="#313244", fg=self.text_main,
+            relief=tk.FLAT, font=(self.font_family, 8, "bold"), cursor="hand2", padx=8, pady=2,
+            command=self.edit_selected_subset
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        tk.Button(
+            sub_btn_bar, text="⚖️ 一键配平 Repeat", bg="#313244", fg=self.accent_green,
+            relief=tk.FLAT, font=(self.font_family, 8, "bold"), cursor="hand2", padx=8, pady=2,
+            command=self.auto_balance_subset_repeats
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        tk.Button(
+            sub_btn_bar, text="🗑️ 移除", bg="#45475a", fg=self.accent_red,
+            relief=tk.FLAT, font=(self.font_family, 8, "bold"), cursor="hand2", padx=8, pady=2,
+            command=self.remove_selected_subset
+        ).pack(side=tk.LEFT)
+
+        tree_wrap = tk.Frame(self.multi_data_frame, bg=self.card_bg)
+        tree_wrap.pack(fill=tk.X, pady=(0, 3))
+
+        cols = ("name", "imgs", "rep", "exp", "trigger")
+        self.subset_tree = ttk.Treeview(tree_wrap, columns=cols, show="headings", height=4, style="Dark.Treeview")
+        self.subset_tree.heading("name", text="子集名称")
+        self.subset_tree.heading("imgs", text="图数")
+        self.subset_tree.heading("rep", text="Repeat")
+        self.subset_tree.heading("exp", text="单轮曝光(占比)")
+        self.subset_tree.heading("trigger", text="专属触发词")
+        self.subset_tree.column("name", width=115, anchor="w")
+        self.subset_tree.column("imgs", width=52, anchor="center")
+        self.subset_tree.column("rep", width=58, anchor="center")
+        self.subset_tree.column("exp", width=118, anchor="center")
+        self.subset_tree.column("trigger", width=190, anchor="w")
+
+        tree_sb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.subset_tree.yview)
+        self.subset_tree.configure(yscrollcommand=tree_sb.set)
+        self.subset_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tree_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.subset_tree.bind("<Double-1>", lambda e: self.edit_selected_subset())
+
+        lbl_sub_sum = tk.Label(
+            self.multi_data_frame, textvariable=self.var_subset_summary,
+            bg=self.card_bg, fg=self.accent_yellow, font=(self.font_family, 8),
+            anchor="w", justify=tk.LEFT, wraplength=560
+        )
+        lbl_sub_sum.pack(fill=tk.X, pady=(1, 3))
+        self._wrap_labels.append(lbl_sub_sum)
+
+        # 公共容器确保模式切换始终处于产出目录上方
+        self.output_dirs_anchor = tk.Frame(path_card, bg=self.card_bg)
+        self.output_dirs_anchor.pack(fill=tk.X)
+
         self.create_dir_picker_block(
-            path_card, "结果存放根目录 (LoRA 归档位置):", self.var_output_dir,
+            self.output_dirs_anchor, "结果存放根目录 (LoRA 归档位置):", self.var_output_dir,
             browse_cmd=self.browse_output_dir
         )
 
         self.create_dir_picker_block(
-            path_card, "ComfyUI 模型库目录 (自动复用):", self.var_comfy_models,
+            self.output_dirs_anchor, "ComfyUI 模型库目录 (自动复用):", self.var_comfy_models,
             browse_cmd=self.browse_comfy_dir
         )
 
-        chk_comfy = tk.Checkbutton(path_card, text="训练完成后自动同步复制权重至 ComfyUI models/loras 专属子目录",
+        chk_comfy = tk.Checkbutton(self.output_dirs_anchor, text="训练完成后自动同步复制权重至 ComfyUI models/loras 专属子目录",
                                    variable=self.var_copy_comfy, bg=self.card_bg, fg=self.text_main,
                                    selectcolor=self.input_bg, activebackground=self.card_bg,
                                    font=(self.font_family, 8), wraplength=560, justify=tk.LEFT, anchor="w")
         chk_comfy.pack(fill=tk.X, pady=(4, 2))
         self._wrap_labels.append(chk_comfy)
+
+        # 按当前模式展示单图集或多子集面板
+        self._apply_subset_panel_visibility()
+        self.refresh_subset_tree()
 
         # 6. 超参数配置卡片
         hp_card = tk.LabelFrame(parent, text=" ⚙️ 核心训练超参数 ", bg=self.card_bg, fg=self.accent_blue,
@@ -664,15 +801,55 @@ class ModernLocalTrainerGUI:
         ra_f = tk.Frame(hp_card, bg=self.card_bg)
         ra_f.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=2)
         tk.Label(ra_f, text="LoRA 矩阵秩 (Rank):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
-        cb_rank = ttk.Combobox(ra_f, textvariable=self.var_rank, values=[16, 32, 64, 128], width=7, state="readonly")
+        cb_rank = ttk.Combobox(ra_f, textvariable=self.var_rank, values=[16, 32, 48, 64, 128], width=7, state="readonly")
         cb_rank.pack(side=tk.LEFT, padx=(0, 14))
 
         tk.Label(ra_f, text="缩放系数 (Alpha):", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
         ent_alpha = tk.Entry(ra_f, textvariable=self.var_alpha, width=7, bg=self.input_bg, fg=self.text_main)
         ent_alpha.pack(side=tk.LEFT, padx=(4, 0))
 
+        # 进阶适配器算法 + DoRA + 目标注入层预设
+        alg_f = tk.Frame(hp_card, bg=self.card_bg)
+        alg_f.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        tk.Label(alg_f, text="适配器算法 (Algo):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        cb_algo = ttk.Combobox(alg_f, textvariable=self.var_algo, values=["lora", "loha", "lokr"], width=7, state="readonly")
+        cb_algo.pack(side=tk.LEFT, padx=(0, 10))
+        cb_algo.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+
+        chk_dora = tk.Checkbutton(
+            alg_f, text="启用 DoRA (权重分解)", variable=self.var_dora,
+            bg=self.card_bg, fg=self.accent_green, selectcolor=self.input_bg,
+            activebackground=self.card_bg, activeforeground=self.accent_green,
+            font=(self.font_family, 8, "bold"), command=self.save_local_config
+        )
+        chk_dora.pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Label(alg_f, text="LoRA+ 倍率:", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
+        cb_lplus = ttk.Combobox(alg_f, textvariable=self.var_loraplus, values=["1.0", "2.0", "4.0"], width=5, state="readonly")
+        cb_lplus.pack(side=tk.LEFT, padx=(4, 0))
+        cb_lplus.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+
+        layer_f = tk.Frame(hp_card, bg=self.card_bg)
+        layer_f.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        tk.Label(layer_f, text="目标注入层 (Preset):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
+        cb_layer = ttk.Combobox(
+            layer_f, textvariable=self.var_target_preset,
+            values=["attn-mlp", "attn", "attn-mlp+modulation", "attn-mlp+text-refiner", "full-block", "all"],
+            width=22, state="readonly"
+        )
+        cb_layer.pack(side=tk.LEFT, padx=(0, 8))
+        cb_layer.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+
+        lbl_alg_hint = tk.Label(
+            hp_card,
+            text="说明: DoRA 解耦幅值与方向提升细节/画风还原；多画风推荐 attn-mlp+modulation，多人物/概念推荐 attn-mlp+text-refiner。",
+            bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8), wraplength=560, justify=tk.LEFT
+        )
+        lbl_alg_hint.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
+        self._wrap_labels.append(lbl_alg_hint)
+
         lr_f = tk.Frame(hp_card, bg=self.card_bg)
-        lr_f.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        lr_f.grid(row=7, column=0, columnspan=2, sticky=tk.EW, pady=2)
         tk.Label(lr_f, text="基础学习率 (LR):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
         ent_lr = tk.Entry(lr_f, textvariable=self.var_lr, width=9, bg=self.input_bg, fg=self.text_main)
         ent_lr.pack(side=tk.LEFT, padx=(0, 14))
@@ -682,7 +859,7 @@ class ModernLocalTrainerGUI:
         cb_prec.pack(side=tk.LEFT, padx=(4, 0))
 
         preset_f = tk.Frame(hp_card, bg=self.card_bg)
-        preset_f.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        preset_f.grid(row=8, column=0, columnspan=2, sticky=tk.EW, pady=2)
         tk.Label(preset_f, text="显存优化档位:", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
         cb_vram = ttk.Combobox(preset_f, textvariable=self.var_vram_preset, values=["auto", "6g", "8g", "12g", "16g"], width=7, state="readonly")
         cb_vram.pack(side=tk.LEFT, padx=(0, 14))
@@ -694,7 +871,7 @@ class ModernLocalTrainerGUI:
         cb_res.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
 
         dev_f = tk.Frame(hp_card, bg=self.card_bg)
-        dev_f.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(2, 4))
+        dev_f.grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=(2, 4))
         tk.Label(dev_f, text="文本提取设备:", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
         cb_txt_dev = ttk.Combobox(dev_f, textvariable=self.var_text_device, values=["cpu", "cuda"], width=7, state="readonly")
         cb_txt_dev.pack(side=tk.LEFT, padx=(0, 6))
@@ -1494,9 +1671,16 @@ class ModernLocalTrainerGUI:
                         self.var_rank.set(info["rank"])
                     if info.get("alpha"):
                         self.var_alpha.set(info["alpha"])
+                    if info.get("algo") in ("lora", "loha", "lokr"):
+                        self.var_algo.set(info["algo"])
+                    self.var_dora.set(bool(info.get("dora", False)))
+                    if info.get("preset"):
+                        self.var_target_preset.set(info["preset"])
                     step_tag = f"原步数 {info['step']}, " if info.get("step") else ""
+                    dora_tag = "+DoRA" if info.get("dora") else ""
+                    algo_tag = f"{str(info.get('algo', 'lora')).upper()}{dora_tag}"
                     self.var_resume_status.set(
-                        f"✅ 已加载基底 LoRA: {target_sf.name} ({step_tag}已自动对齐 Rank={info.get('rank')}, Alpha={info.get('alpha')})。"
+                        f"✅ 已加载基底权重: {target_sf.name} ({step_tag}自动对齐 {algo_tag}, Rank={info.get('rank')}, Alpha={info.get('alpha')})。"
                         f"将以全新学习率周期在该权重基础上继续训练下方设定的【核心步数】！"
                     )
                 else:
@@ -1505,6 +1689,209 @@ class ModernLocalTrainerGUI:
                     )
         except Exception as e:
             self.var_resume_status.set(f"进度检测提示: {e}")
+
+    # 多子集配比管理器辅助方法 (多人物 / 多画风 / 多概念独立目录与 Repeat 配平)
+    def _count_images_in_dir(self, dir_path_str: str) -> int:
+        try:
+            p = Path(dir_path_str)
+            if not p.is_dir():
+                return 0
+            return sum(1 for f in p.iterdir() if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"))
+        except Exception:
+            return 0
+
+    def _apply_subset_panel_visibility(self):
+        if self.var_multi_subset.get():
+            self.single_data_frame.pack_forget()
+            self.multi_data_frame.pack(fill=tk.X, before=self.output_dirs_anchor, pady=(0, 4))
+        else:
+            self.multi_data_frame.pack_forget()
+            self.single_data_frame.pack(fill=tk.X, before=self.output_dirs_anchor)
+
+    def toggle_multi_subset_mode(self):
+        self._apply_subset_panel_visibility()
+        self.refresh_subset_tree()
+        self.recalculate_math()
+        self.save_local_config()
+
+    def refresh_subset_tree(self):
+        if not hasattr(self, "subset_tree"):
+            return
+        for row_id in self.subset_tree.get_children():
+            self.subset_tree.delete(row_id)
+
+        total_imgs = 0
+        total_epoch_exp = 0
+        row_stats = []
+        for idx, sub in enumerate(self.subsets):
+            imgs = self._count_images_in_dir(sub.get("path", ""))
+            rep = max(1, int(sub.get("repeats", 1)))
+            exp = imgs * rep
+            total_imgs += imgs
+            total_epoch_exp += exp
+            row_stats.append((idx, sub, imgs, rep, exp))
+
+        for idx, sub, imgs, rep, exp in row_stats:
+            pct = (exp / total_epoch_exp * 100.0) if total_epoch_exp > 0 else 0.0
+            trig_show = sub.get("trigger", "").strip() or "(使用原标注)"
+            img_txt = f"{imgs}" if os.path.isdir(sub.get("path", "")) else "缺失"
+            self.subset_tree.insert(
+                "", tk.END, iid=str(idx),
+                values=(sub.get("name", f"subset_{idx+1}"), img_txt, rep, f"{exp} ({pct:.1f}%)", trig_show)
+            )
+
+        if not self.subsets:
+            self.var_subset_summary.set("当前未添加子集，点击【➕ 添加子集】分别添加不同人物/画风/概念文件夹。")
+        else:
+            self.var_subset_summary.set(
+                f"多子集就绪：共 {len(self.subsets)} 个子集，合计 {total_imgs} 张图，单轮总曝光 {total_epoch_exp} 次 (双击行可修改)"
+            )
+
+    def _open_subset_editor_dialog(self, existing_idx=None):
+        is_edit = existing_idx is not None and 0 <= existing_idx < len(self.subsets)
+        cur = self.subsets[existing_idx] if is_edit else {"name": "", "path": "", "trigger": "", "repeats": 10}
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("编辑训练子集" if is_edit else "添加训练子集 (多人物/多画风/概念)")
+        dlg.configure(bg=self.card_bg)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        w, h = 540, 275
+        rx = self.root.winfo_rootx() + max(40, (self.root.winfo_width() - w) // 2)
+        ry = self.root.winfo_rooty() + max(40, (self.root.winfo_height() - h) // 2)
+        dlg.geometry(f"{w}x{h}+{rx}+{ry}")
+
+        v_path = tk.StringVar(value=cur.get("path", ""))
+        v_name = tk.StringVar(value=cur.get("name", ""))
+        v_trig = tk.StringVar(value=cur.get("trigger", ""))
+        v_rep = tk.IntVar(value=max(1, int(cur.get("repeats", 10))))
+        v_info = tk.StringVar(value="")
+
+        def _update_info():
+            p = v_path.get().strip()
+            if p and os.path.isdir(p):
+                cnt = self._count_images_in_dir(p)
+                v_info.set(f"已检测到 {cnt} 张有效图片")
+            else:
+                v_info.set("请选择包含图片与 .txt 标注的文件夹")
+
+        def _pick_dir():
+            init_d = v_path.get().strip() if os.path.isdir(v_path.get().strip()) else self.var_data_dir.get()
+            picked = filedialog.askdirectory(parent=dlg, initialdir=init_d if os.path.isdir(init_d) else ".", title="选择子集图片文件夹")
+            if picked:
+                v_path.set(picked)
+                if not v_name.get().strip():
+                    v_name.set(Path(picked).name)
+                _update_info()
+
+        body = tk.Frame(dlg, bg=self.card_bg, padx=14, pady=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(1, weight=1)
+
+        tk.Label(body, text="子集图片目录:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).grid(row=0, column=0, sticky="w", pady=5)
+        p_row = tk.Frame(body, bg=self.card_bg)
+        p_row.grid(row=0, column=1, sticky="ew", pady=5)
+        tk.Button(p_row, text="📁 浏览...", bg=self.accent_blue, fg="#11111b", relief=tk.FLAT,
+                  font=(self.font_family, 8, "bold"), padx=8, pady=2, cursor="hand2", command=_pick_dir).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Entry(p_row, textvariable=v_path, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, font=("Consolas", 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(body, textvariable=v_info, bg=self.card_bg, fg=self.accent_green, font=(self.font_family, 8)).grid(row=1, column=1, sticky="w")
+
+        tk.Label(body, text="子集标识名称:", bg=self.card_bg, fg=self.text_main).grid(row=2, column=0, sticky="w", pady=5)
+        tk.Entry(body, textvariable=v_name, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main).grid(row=2, column=1, sticky="ew", pady=5)
+
+        tk.Label(body, text="专属触发词(可选):", bg=self.card_bg, fg=self.text_main).grid(row=3, column=0, sticky="w", pady=5)
+        tk.Entry(body, textvariable=v_trig, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main).grid(row=3, column=1, sticky="ew", pady=5)
+
+        tk.Label(body, text="独立重复 (Repeat):", bg=self.card_bg, fg=self.text_main).grid(row=4, column=0, sticky="w", pady=5)
+        r_row = tk.Frame(body, bg=self.card_bg)
+        r_row.grid(row=4, column=1, sticky="w", pady=5)
+        tk.Spinbox(r_row, from_=1, to=200, textvariable=v_rep, width=8, bg=self.input_bg, fg=self.text_main).pack(side=tk.LEFT)
+        tk.Label(r_row, text="  (图少的子集提高 Repeat，或添加后点【⚖️ 一键配平】)", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
+
+        def _confirm():
+            p_val = v_path.get().strip()
+            if not p_val or not os.path.isdir(p_val):
+                messagebox.showerror("目录无效", "请选择一个真实存在的子集图片目录！", parent=dlg)
+                return
+            if self._count_images_in_dir(p_val) < 1:
+                messagebox.showwarning("无图片", "该目录下未检测到有效图片 (.jpg/.png/.webp)，请确认目录内容。", parent=dlg)
+                return
+            try:
+                rep_val = int(v_rep.get())
+                if rep_val < 1:
+                    raise ValueError
+            except Exception:
+                messagebox.showerror("重复次数无效", "请输入大于等于 1 的整数 Repeat。", parent=dlg)
+                return
+            entry = {
+                "name": v_name.get().strip() or Path(p_val).name,
+                "path": p_val,
+                "trigger": v_trig.get().strip(),
+                "repeats": rep_val,
+                "enabled": True
+            }
+            if is_edit:
+                self.subsets[existing_idx] = entry
+            else:
+                self.subsets.append(entry)
+            self.refresh_subset_tree()
+            self.recalculate_math()
+            self.save_local_config()
+            dlg.destroy()
+
+        btn_row = tk.Frame(body, bg=self.card_bg)
+        btn_row.grid(row=5, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        tk.Button(btn_row, text="取消", bg="#45475a", fg=self.text_main, relief=tk.FLAT, padx=14, pady=4, cursor="hand2", command=dlg.destroy).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btn_row, text="保存子集", bg=self.accent_green, fg="#11111b", relief=tk.FLAT, font=(self.font_family, 9, "bold"), padx=16, pady=4, cursor="hand2", command=_confirm).pack(side=tk.LEFT)
+
+        _update_info()
+
+    def add_subset_dialog(self):
+        self._open_subset_editor_dialog(existing_idx=None)
+
+    def edit_selected_subset(self):
+        sel = self.subset_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在列表中点击选中一个子集行。")
+            return
+        self._open_subset_editor_dialog(existing_idx=int(sel[0]))
+
+    def remove_selected_subset(self):
+        sel = self.subset_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选中要移除的子集行。")
+            return
+        idx = int(sel[0])
+        if 0 <= idx < len(self.subsets):
+            self.subsets.pop(idx)
+            self.refresh_subset_tree()
+            self.recalculate_math()
+            self.save_local_config()
+
+    def auto_balance_subset_repeats(self):
+        """按各子集图片数反比自动计算 Repeat，确保不同人物/画风单轮曝光量严格配平。"""
+        if len(self.subsets) < 2:
+            messagebox.showinfo("提示", "请至少添加 2 个子集后再执行自动配平。")
+            return
+        counts = [self._count_images_in_dir(s.get("path", "")) for s in self.subsets]
+        valid_counts = [c for c in counts if c > 0]
+        if not valid_counts:
+            messagebox.showwarning("无法配平", "当前子集目录中均未检测到有效图片。")
+            return
+        max_imgs = max(valid_counts)
+        # 目标单轮曝光基准：让图片最多的子集保持适中基准 Repeat（默认 6~10），图少的子集按反比拉齐
+        base_rep = 6 if max_imgs >= 30 else 10
+        target_exp = max_imgs * base_rep
+        for sub, cnt in zip(self.subsets, counts):
+            if cnt > 0:
+                sub["repeats"] = max(1, min(100, int(round(target_exp / cnt))))
+        self.refresh_subset_tree()
+        self.recalculate_math()
+        self.save_local_config()
+        self.log(f"[多子集配平] 已按最大子集 ({max_imgs} 张 × {base_rep} = {target_exp} 曝光/轮) 自动均衡所有子集 Repeat！\n")
 
     # 路径浏览与检测
     def browse_data_dir(self):
@@ -1539,13 +1926,33 @@ class ModernLocalTrainerGUI:
             self.var_dataset_stat.set("⚠️ 目录不存在，请检查路径")
 
     def recalculate_math(self):
+        try:
+            ep = self.var_epochs.get()
+        except tk.TclError:
+            self.var_calc_stat.set("换算：请输入有效的正整数训练轮数")
+            return
+
+        if self.var_multi_subset.get():
+            total_imgs = 0
+            epoch_exp = 0
+            for sub in self.subsets:
+                c = self._count_images_in_dir(sub.get("path", ""))
+                r = max(1, int(sub.get("repeats", 1)))
+                total_imgs += c
+                epoch_exp += c * r
+            total_exposures = epoch_exp * ep
+            recommended_steps = max(1, total_exposures // 4)
+            self.var_calc_stat.set(
+                f"多子集换算：{len(self.subsets)}子集 ({total_imgs}图, 单轮{epoch_exp}曝光) × {ep}轮 = {total_exposures}总曝光 (推荐约 {recommended_steps} 步)"
+            )
+            return
+
         dpath = Path(self.var_data_dir.get())
         img_count = 0
         if dpath.exists():
             img_count = len([f for f in dpath.iterdir() if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]])
         try:
             rep = self.var_repeats.get()
-            ep = self.var_epochs.get()
         except tk.TclError:
             self.var_calc_stat.set("换算：请输入有效的正整数重复次数与轮数")
             return
@@ -1554,12 +1961,29 @@ class ModernLocalTrainerGUI:
         self.var_calc_stat.set(f"换算：{img_count}图 × {rep}重复 × {ep}轮 = {total_exposures}次曝光 (等效推荐约 {recommended_steps} 步)")
 
     def align_steps_by_formula(self):
+        try:
+            ep = self.var_epochs.get()
+        except tk.TclError:
+            messagebox.showwarning("参数输入提示", "请先填写有效的正整数【训练轮数】。")
+            return
+
+        if self.var_multi_subset.get():
+            epoch_exp = sum(
+                self._count_images_in_dir(sub.get("path", "")) * max(1, int(sub.get("repeats", 1)))
+                for sub in self.subsets
+            )
+            if epoch_exp <= 0:
+                return
+            recommended = max(1, (epoch_exp * ep) // 4)
+            self.var_steps.set(recommended)
+            self.log(f"[提示] 步数已根据多子集汇总曝光公式对齐为: {recommended} 步\n")
+            return
+
         dpath = Path(self.var_data_dir.get())
         if not dpath.exists():
             return
         try:
             rep = self.var_repeats.get()
-            ep = self.var_epochs.get()
         except tk.TclError:
             messagebox.showwarning("参数输入提示", "请先填写有效的正整数【单图重复】和【训练轮数】。")
             return
@@ -1570,28 +1994,107 @@ class ModernLocalTrainerGUI:
 
     # 预设模板应用
     def apply_style_preset(self):
+        self.var_multi_subset.set(False)
+        self._apply_subset_panel_visibility()
         self.var_repeats.set(10)
         self.var_epochs.set(6)
         self.var_rank.set(32)
         self.var_alpha.set(32.0)
+        self.var_algo.set("lora")
+        self.var_dora.set(False)
+        self.var_target_preset.set("attn-mlp")
         self.var_lr.set("1e-4")
         self.var_lora_name.set("my_art_style")
         self.var_trigger_word.set("in the style of my_art_style")
         self.align_steps_by_formula()
         self.update_output_preview()
-        messagebox.showinfo("模板切换", "已成功加载【艺术画风模板】：\nLoRA名称: my_art_style\n触发词: in the style of my_art_style\nRepeats=10, Epochs=6, Rank=32, Alpha=32.0, LR=1e-4")
+        self.save_local_config()
+        messagebox.showinfo("模板切换", "已成功加载【艺术画风模板】：\nLoRA名称: my_art_style | 算法: LoRA (attn-mlp)\nRepeats=10, Epochs=6, Rank=32, Alpha=32.0, LR=1e-4")
 
     def apply_character_preset(self):
+        self.var_multi_subset.set(False)
+        self._apply_subset_panel_visibility()
         self.var_repeats.set(6)
         self.var_epochs.set(3)
         self.var_rank.set(32)
         self.var_alpha.set(16.0)
+        self.var_algo.set("lora")
+        self.var_dora.set(False)
+        self.var_target_preset.set("attn-mlp")
         self.var_lr.set("8e-5")
         self.var_lora_name.set("my_character")
         self.var_trigger_word.set("my_character_char")
         self.align_steps_by_formula()
         self.update_output_preview()
-        messagebox.showinfo("模板切换", "已成功加载【人物角色模板】：\nLoRA名称: my_character\n触发词: my_character_char\nRepeats=6, Epochs=3, Rank=32, Alpha=16.0, LR=8e-5")
+        self.save_local_config()
+        messagebox.showinfo("模板切换", "已成功加载【单人角色模板】：\nLoRA名称: my_character | 算法: LoRA (attn-mlp)\nRepeats=6, Epochs=3, Rank=32, Alpha=16.0, LR=8e-5")
+
+    def apply_multi_char_preset(self):
+        self.var_multi_subset.set(True)
+        self._apply_subset_panel_visibility()
+        self.refresh_subset_tree()
+        self.var_epochs.set(4)
+        self.var_rank.set(48)
+        self.var_alpha.set(32.0)
+        self.var_algo.set("lora")
+        self.var_dora.set(True)
+        self.var_target_preset.set("attn-mlp+text-refiner")
+        self.var_lr.set("8e-5")
+        self.var_lora_name.set("multi_char_pack")
+        self.var_trigger_word.set("")
+        self.recalculate_math()
+        self.update_output_preview()
+        self.save_local_config()
+        messagebox.showinfo(
+            "多人物模板就绪",
+            "已加载【多人物配比模板】并展开多子集面板！\n"
+            "• 架构配置：LoRA + DoRA (Rank=48, Alpha=32.0, attn-mlp+text-refiner)\n"
+            "• 使用提示：请在下方点击【➕ 添加子集】分别添加各角色文件夹并设置互不冲突的专属触发词，添加完后点【⚖️ 一键配平 Repeat】即可均衡曝光！"
+        )
+
+    def apply_multi_style_preset(self):
+        self.var_multi_subset.set(True)
+        self._apply_subset_panel_visibility()
+        self.refresh_subset_tree()
+        self.var_epochs.set(5)
+        self.var_rank.set(48)
+        self.var_alpha.set(48.0)
+        self.var_algo.set("lora")
+        self.var_dora.set(True)
+        self.var_target_preset.set("attn-mlp+modulation")
+        self.var_lr.set("1e-4")
+        self.var_lora_name.set("multi_style_pack")
+        self.var_trigger_word.set("")
+        self.recalculate_math()
+        self.update_output_preview()
+        self.save_local_config()
+        messagebox.showinfo(
+            "多画风模板就绪",
+            "已加载【多画风配比模板】并展开多子集面板！\n"
+            "• 架构配置：LoRA + DoRA (Rank=48, Alpha=48.0, attn-mlp+modulation 强化全局影调与笔触)\n"
+            "• 使用提示：请分别添加不同画风子目录并绑定唯一风格前缀触发词，标注中务必剔除画风词以防串味！"
+        )
+
+    def apply_concept_preset(self):
+        self.var_repeats.set(8)
+        self.var_epochs.set(4)
+        self.var_rank.set(32)
+        self.var_alpha.set(32.0)
+        self.var_algo.set("lora")
+        self.var_dora.set(True)
+        self.var_target_preset.set("attn-mlp+text-refiner")
+        self.var_lr.set("1e-4")
+        self.var_lora_name.set("my_concept")
+        self.var_trigger_word.set("my_concept_v1")
+        self.align_steps_by_formula()
+        self.update_output_preview()
+        self.save_local_config()
+        messagebox.showinfo(
+            "概念/动作模板就绪",
+            "已加载【概念/动作/材质模板】：\n"
+            "• 架构配置：LoRA + DoRA (Rank=32, Alpha=32.0, attn-mlp+text-refiner 增强局部语义绑定)\n"
+            "• 建议图集保持主体与背景高度随机，仅目标动作/镜头/材质保持一致。"
+        )
 
     def clear_console(self):
         self.console.delete("1.0", tk.END)
@@ -1615,11 +2118,25 @@ class ModernLocalTrainerGUI:
         if not (trainer_dir / "pyproject.toml").exists():
             messagebox.showwarning("训练器未就绪", "检测到 KohakuMossTrainer 训练器尚未就绪！\n系统将在启动时自动尝试从 GitHub 克隆。若您网络无法访问 GitHub，请先点击【📂 打开训练器放置目录】手动解压源码。")
 
-        # 检查数据集
-        dpath = Path(self.var_data_dir.get())
-        if not dpath.exists():
-            messagebox.showerror("错误", f"训练数据集路径不存在: {dpath}")
-            return
+        # 检查数据集（兼容单图集与多子集配比模式）
+        subsets_manifest_path = None
+        if self.var_multi_subset.get():
+            if not self.subsets:
+                messagebox.showerror("缺少训练子集", "当前已开启【多子集配比模式】，请至少点击【➕ 添加子集】添加一个有效图集目录！")
+                return
+            for i, sub in enumerate(self.subsets, start=1):
+                sp = sub.get("path", "")
+                if not sp or not os.path.isdir(sp):
+                    messagebox.showerror("子集路径无效", f"第 {i} 个子集 [{sub.get('name')}] 的目录不存在：\n{sp}")
+                    return
+                if self._count_images_in_dir(sp) < 1:
+                    messagebox.showerror("子集无图片", f"第 {i} 个子集 [{sub.get('name')}] 中未检测到任何图片文件！")
+                    return
+        else:
+            dpath = Path(self.var_data_dir.get())
+            if not dpath.exists():
+                messagebox.showerror("错误", f"训练数据集路径不存在: {dpath}")
+                return
 
         # 数值型超参数合法性校验，防御空输入引发 TclError 崩溃
         try:
@@ -1686,6 +2203,12 @@ class ModernLocalTrainerGUI:
         self.save_local_config()
         self.pause_requested = False
 
+        if self.var_multi_subset.get():
+            ws_dir = Path("./workspace").resolve()
+            ws_dir.mkdir(parents=True, exist_ok=True)
+            subsets_manifest_path = ws_dir / f"{lora_name_clean}_subsets.json"
+            subsets_manifest_path.write_text(json.dumps(self.subsets, indent=2, ensure_ascii=False), encoding="utf-8")
+
         cmd = [
             _resolve_cli_python(), "-u", "train_local.py",
             "--data_dir", self.var_data_dir.get(),
@@ -1698,6 +2221,9 @@ class ModernLocalTrainerGUI:
             "--steps", str(self.var_steps.get()),
             "--rank", str(self.var_rank.get()),
             "--alpha", str(self.var_alpha.get()),
+            "--algo", self.var_algo.get(),
+            "--target_preset", self.var_target_preset.get(),
+            "--loraplus_ratio", str(self.var_loraplus.get()),
             "--lr", str(self.var_lr.get()),
             "--precision", self.var_precision.get(),
             "--vram_preset", self.var_vram_preset.get(),
@@ -1708,6 +2234,11 @@ class ModernLocalTrainerGUI:
             "--text_device", self.var_text_device.get(),
             "--vae_device", self.var_vae_device.get()
         ]
+
+        if self.var_dora.get():
+            cmd.append("--dora")
+        if subsets_manifest_path is not None:
+            cmd.extend(["--subsets_json", str(subsets_manifest_path)])
 
         if mode_code == "resume" and custom_resume_p:
             if os.path.isfile(custom_resume_p) and custom_resume_p.lower().endswith(".safetensors"):

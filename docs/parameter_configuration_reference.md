@@ -15,6 +15,11 @@
 | **优化器步数 (Steps)** | 梯度反向传播总更新步数 | 200 ~ 800 | `--steps <int>` | 第 192 行 (`default=600`) | 第 288 行 (`STEPS = 600`) |
 | **LoRA 矩阵秩 (Rank)** | 权重低秩适应矩阵维度 | 16 ~ 64 | `--rank <int>` | 第 194 行 (`default=32`) | 第 286 行 (`DIM = 32`) |
 | **LoRA 缩放倍率 (Alpha)**| 权重注入强度系数 | 16.0 ~ 64.0 | `--alpha <float>` | 第 196 行 (`default=32.0`)| 第 287 行 (`ALPHA = 32.0`) |
+| **适配器算法 (`ALGO`)** | 低秩结构算法（LoRA / 哈达玛 LoHa / 克罗内克 LoKr） | `lora` / `loha` / `lokr` | `--algo` | `default="lora"` | `--algo` (`ALGO`) |
+| **DoRA 权重分解** | 解耦幅值与方向（自动启用官方 `DORA_DETACH=True`） | 开启 (`--dora`) | `--dora` | `action="store_true"` | `--dora` (`USE_DORA`) |
+| **目标注入层 (`PRESET`)** | Transformer 注入层范围（多画风 `+modulation`，多人物 `+text-refiner`） | `attn-mlp` 等 6 档 | `--target_preset` | `default="attn-mlp"` | `--target_preset` (`TARGET_PRESET`) |
+| **LoRA+ 学习率倍率** | 零初始化上投影层学习率放大倍率 | `1.0` / `2.0` / `4.0` | `--loraplus_ratio` | `default=1.0` | `--loraplus_ratio` (`LORAPLUS_RATIO`) |
+| **多子集配比 JSON** | 多人物/多画风/概念独立子目录、专属触发词与独立 Repeat | JSON 路径或数组字符串 | `--subsets_json` | `default=""` | `--subsets_json` (`SUBSETS_JSON`) |
 | **学习率 (LR)** | 优化器学习速率 | 8e-5 ~ 1e-4 | `--lr <float>` | 第 198 行 (`default=1e-4`) | 第 289 行 (`LR = 1e-4`) |
 | **训练计算精度** | 浮点运算精度模式 | `auto` / `bf16` | `--precision` | `default="bf16"` | `--precision` (`auto`/`fp16`/`bf16`) |
 | **显存优化档位** | 流式缓冲、卸载与最大 Token 预算 | `auto` (`6g`/`8g`/`12g`/`16g`) | `--vram_preset` | `default="auto"` | `--vram_preset` (`VRAM_PRESET`) |

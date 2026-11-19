@@ -26,6 +26,19 @@ parser.add_argument("--rank", type=int, default=int(os.environ.get("RANK", "32")
                     help="LoRA Rank / Dim (default: 32)")
 parser.add_argument("--alpha", type=float, default=float(os.environ.get("ALPHA", "32.0")),
                     help="LoRA Alpha scaling factor (default: 32.0)")
+parser.add_argument("--algo", type=str, default=os.environ.get("ALGO", "lora"),
+                    choices=["lora", "loha", "lokr"],
+                    help="Adapter algorithm: lora (default), loha (Hadamard), lokr (Kronecker)")
+parser.add_argument("--dora", action="store_true",
+                    default=os.environ.get("USE_DORA", os.environ.get("DORA", "false")).strip().lower() in ("1", "true", "yes", "on"),
+                    help="Enable DoRA (Weight-Decomposed Low-Rank Adaptation)")
+parser.add_argument("--target_preset", type=str, default=os.environ.get("TARGET_PRESET", "attn-mlp"),
+                    choices=["attn", "attn-mlp", "attn-mlp+modulation", "attn-mlp+text-refiner", "full-block", "all"],
+                    help="Target transformer layers preset (default: attn-mlp)")
+parser.add_argument("--loraplus_ratio", type=float, default=float(os.environ.get("LORAPLUS_RATIO", "1.0")),
+                    help="LoRA+ up-projection learning rate ratio (1.0=off, 2.0~4.0 recommended for multi-concept)")
+parser.add_argument("--subsets_json", type=str, default=os.environ.get("SUBSETS_JSON", ""),
+                    help="Optional JSON file path or JSON array string for multi-subset training")
 parser.add_argument("--lr", type=str, default=os.environ.get("LR", "1e-4"),
                     help="Learning rate (default: 1e-4)")
 parser.add_argument("--vram_preset", type=str, default=os.environ.get("VRAM_PRESET", "auto"),
@@ -67,7 +80,8 @@ print("=" * 75)
 print(">>> OpenMOSS MOSS-Image Cloud LoRA Training Engine (Production v2) <<<")
 print(f">>> Target LoRA: '{args.lora_name}' | Trigger Word: '{args.trigger_word if args.trigger_word else '(None)'}' <<<")
 print(f">>> Hyperparameters: Repeats={args.repeats}, Epochs={args.epochs}, Steps={args.steps} <<<")
-print(f">>> Architecture: Rank={args.rank}, Alpha={args.alpha}, LR={args.lr} <<<")
+print(f">>> Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, Preset={args.target_preset}, LoRA+={args.loraplus_ratio} <<<")
+print(f">>> Dimensions: Rank={args.rank}, Alpha={args.alpha}, LR={args.lr} <<<")
 print(f">>> Cloud Options: Variant={args.variant}, VRAM={args.vram_preset}, Res={args.resolution}, Quant={args.base_quant}, Prec={args.precision} <<<")
 print("=" * 75)
 
@@ -182,122 +196,182 @@ os.makedirs("/tmp/models/vae", exist_ok=True)
 
 workspace_data_root = "/tmp/workspace_dataset"
 os.makedirs(workspace_data_root, exist_ok=True)
-target_data_dir = os.path.join(workspace_data_root, f"{args.repeats}_{args.lora_name}")
-os.makedirs(target_data_dir, exist_ok=True)
-
-# 3. 智能发现与准备数据集 (自动识别 /kaggle/input/ 挂载或解压，严格孤儿清理并自动前置注入触发词)
-print("\n>>> Preparing Kohya structured dataset in /tmp/workspace_dataset...")
-source_dir = None
-if args.dataset_dir and os.path.exists(args.dataset_dir):
-    print(f"Using explicitly specified dataset path: {args.dataset_dir}")
-    source_dir = args.dataset_dir
-elif os.path.exists("/kaggle/input"):
-    candidate_dirs = []
-    for root, dirs, files in os.walk("/kaggle/input"):
-        imgs = [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
-        if imgs:
-            candidate_dirs.append((root, len(imgs)))
-    if candidate_dirs:
-        candidate_dirs.sort(key=lambda x: x[1], reverse=True)
-        source_dir = candidate_dirs[0][0]
-        print(f"Auto-detected Kaggle mounted dataset directory ({candidate_dirs[0][1]} images): {source_dir}")
-
 valid_img_exts = {".jpg", ".jpeg", ".png", ".webp"}
 trigger_clean = args.trigger_word.strip() if args.trigger_word else ""
+cloud_subsets_summary = []
 
-# 清理 workspace_data_root 下的历史陈旧数据集子目录，防止多任务残留污染
-for sub_name in os.listdir(workspace_data_root):
-    sub_path = os.path.join(workspace_data_root, sub_name)
-    if os.path.isdir(sub_path) and sub_name != "cache" and sub_name != os.path.basename(target_data_dir):
-        shutil.rmtree(sub_path, ignore_errors=True)
-        print(f" [Cleanup] Removed obsolete dataset folder: {sub_name}")
+# 3. 智能发现与准备数据集 (支持多子集独立配比 --subsets_json，或单图集 /kaggle/input/ 挂载与解压)
+parsed_cloud_subsets = []
+if args.subsets_json and args.subsets_json.strip():
+    raw_sub = args.subsets_json.strip()
+    if os.path.isfile(raw_sub):
+        parsed_cloud_subsets = json.loads(Path(raw_sub).read_text(encoding="utf-8"))
+    else:
+        parsed_cloud_subsets = json.loads(raw_sub)
 
-if source_dir and os.path.isdir(source_dir):
-    print(f"Ingesting training data from {source_dir} -> {target_data_dir}...")
-    src_imgs = [f for f in os.listdir(source_dir) if os.path.splitext(f)[1].lower() in valid_img_exts]
-    valid_img_names = set(src_imgs)
-    valid_txt_names = {os.path.splitext(f)[0] + ".txt" for f in src_imgs}
+if parsed_cloud_subsets:
+    print(f"\n>>> Preparing Multi-Subset Kohya dataset ({len(parsed_cloud_subsets)} subsets) in /tmp/workspace_dataset...")
+    active_folders = set()
+    total_exp = 0
+    for idx, item in enumerate(parsed_cloud_subsets, start=1):
+        if not isinstance(item, dict) or item.get("enabled", True) is False:
+            continue
+        s_dir = str(item.get("path", "")).strip()
+        if not s_dir or not os.path.isdir(s_dir):
+            raise FileNotFoundError(f"Cloud subset #{idx} directory not found: {s_dir}")
+        s_rep = max(1, int(item.get("repeats", 1)))
+        s_name_raw = str(item.get("name") or os.path.basename(s_dir.rstrip("/\\")))
+        s_name = re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "_", s_name_raw).strip("_") or f"subset_{idx}"
+        folder_name = f"{s_rep}_{s_name}"
+        dup_n = 2
+        while folder_name in active_folders:
+            folder_name = f"{s_rep}_{s_name}_{dup_n}"
+            dup_n += 1
+        active_folders.add(folder_name)
+        dst_sub = os.path.join(workspace_data_root, folder_name)
+        os.makedirs(dst_sub, exist_ok=True)
+        s_trig = str(item.get("trigger", "") or "").strip()
 
-    # 清理 target_data_dir 中的孤儿文件，保证 1:1 对齐
-    orphan_purged = 0
-    for existing in os.listdir(target_data_dir):
-        existing_path = os.path.join(target_data_dir, existing)
-        if os.path.isfile(existing_path) and existing not in valid_img_names and existing not in valid_txt_names:
-            try:
-                os.remove(existing_path)
-                orphan_purged += 1
-            except Exception:
-                pass
-    if orphan_purged > 0:
-        cache_dir = os.path.join(workspace_data_root, "cache")
-        if os.path.exists(cache_dir):
-            shutil.rmtree(cache_dir, ignore_errors=True)
-        print(f" [Cleanup] Purged {orphan_purged} orphan files and reset stale cache.")
+        src_imgs = [f for f in os.listdir(s_dir) if os.path.splitext(f)[1].lower() in valid_img_exts]
+        if not src_imgs:
+            raise RuntimeError(f"No images found in cloud subset '{s_name}' ({s_dir})")
+        for f in src_imgs:
+            shutil.copy2(os.path.join(s_dir, f), os.path.join(dst_sub, f))
+            base_name = os.path.splitext(f)[0]
+            src_txt = os.path.join(s_dir, base_name + ".txt")
+            cap = ""
+            if os.path.exists(src_txt):
+                with open(src_txt, "r", encoding="utf-8", errors="ignore") as tf:
+                    cap = tf.read().strip()
+            if s_trig and not cap.lower().startswith(s_trig.lower()):
+                cap = f"{s_trig}, {cap}" if cap else s_trig
+            with open(os.path.join(dst_sub, base_name + ".txt"), "w", encoding="utf-8") as tf:
+                tf.write(cap)
+        exp = len(src_imgs) * s_rep
+        total_exp += exp
+        cloud_subsets_summary.append({
+            "name": s_name_raw, "folder": folder_name, "images": len(src_imgs),
+            "repeats": s_rep, "epoch_exposures": exp, "trigger": s_trig or "(None)"
+        })
 
-    for f in src_imgs:
-        src_img = os.path.join(source_dir, f)
-        dest_img = os.path.join(target_data_dir, f)
-        shutil.copy2(src_img, dest_img)
-
-        base_name = os.path.splitext(f)[0]
-        src_txt = os.path.join(source_dir, base_name + ".txt")
-        dest_txt = os.path.join(target_data_dir, base_name + ".txt")
-        caption = ""
-        if os.path.exists(src_txt):
-            with open(src_txt, "r", encoding="utf-8", errors="ignore") as tf:
-                caption = tf.read().strip()
-
-        if trigger_clean and not caption.lower().startswith(trigger_clean.lower()):
-            caption = f"{trigger_clean}, {caption}" if caption else trigger_clean
-
-        with open(dest_txt, "w", encoding="utf-8") as tf:
-            tf.write(caption)
+    for sub_name in os.listdir(workspace_data_root):
+        sub_path = os.path.join(workspace_data_root, sub_name)
+        if os.path.isdir(sub_path) and sub_name != "cache" and sub_name not in active_folders:
+            shutil.rmtree(sub_path, ignore_errors=True)
+    for s in cloud_subsets_summary:
+        pct = (s["epoch_exposures"] / total_exp * 100.0) if total_exp > 0 else 0.0
+        s["share_percent"] = round(pct, 1)
+        print(f" - [{s['folder']}] {s['images']} imgs x {s['repeats']} repeats = {s['epoch_exposures']} exp/epoch ({pct:.1f}%) | Trigger: {s['trigger']}")
 else:
-    # 备用：若未挂载自定义数据集目录，尝试本地 zip 或用户指定的 --dataset_url 拉取
-    local_zip = "/tmp/dataset.zip"
-    chosen_zip = None
-    found_zips = glob.glob("/kaggle/**/dataset.zip", recursive=True) + glob.glob("**/dataset.zip", recursive=True)
-    if found_zips and os.path.getsize(found_zips[0]) > 1024:
-        chosen_zip = found_zips[0]
-        print(f"Found local dataset archive candidate: {chosen_zip}")
-    elif args.dataset_url:
-        print(f"Fetching dataset archive via curl from --dataset_url: {args.dataset_url}...")
-        curl_cmd = [
-            "curl", "-s", "-L",
-            "--retry", "3",
-            "--retry-delay", "2",
-            "--retry-all-errors",
-            args.dataset_url,
-            "-o", local_zip
-        ]
-        subprocess.run(curl_cmd, check=True)
-        if os.path.exists(local_zip) and os.path.getsize(local_zip) > 1024:
-            chosen_zip = local_zip
-            print(f"Downloaded dataset archive: {chosen_zip} ({os.path.getsize(chosen_zip) / (1024**2):.2f} MB)")
+    target_data_dir = os.path.join(workspace_data_root, f"{args.repeats}_{args.lora_name}")
+    os.makedirs(target_data_dir, exist_ok=True)
+    print("\n>>> Preparing Kohya structured dataset in /tmp/workspace_dataset...")
+    source_dir = None
+    if args.dataset_dir and os.path.exists(args.dataset_dir):
+        print(f"Using explicitly specified dataset path: {args.dataset_dir}")
+        source_dir = args.dataset_dir
+    elif os.path.exists("/kaggle/input"):
+        candidate_dirs = []
+        for root, dirs, files in os.walk("/kaggle/input"):
+            imgs = [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+            if imgs:
+                candidate_dirs.append((root, len(imgs)))
+        if candidate_dirs:
+            candidate_dirs.sort(key=lambda x: x[1], reverse=True)
+            source_dir = candidate_dirs[0][0]
+            print(f"Auto-detected Kaggle mounted dataset directory ({candidate_dirs[0][1]} images): {source_dir}")
 
-    if not chosen_zip or not os.path.exists(chosen_zip):
-        raise RuntimeError(
-            "No dataset found! Please mount your Kaggle Private Dataset under /kaggle/input/, "
-            "pass --dataset_dir <path>, or pass --dataset_url <zip_url>."
-        )
+    # 清理 workspace_data_root 下的历史陈旧数据集子目录，防止多任务残留污染
+    for sub_name in os.listdir(workspace_data_root):
+        sub_path = os.path.join(workspace_data_root, sub_name)
+        if os.path.isdir(sub_path) and sub_name != "cache" and sub_name != os.path.basename(target_data_dir):
+            shutil.rmtree(sub_path, ignore_errors=True)
+            print(f" [Cleanup] Removed obsolete dataset folder: {sub_name}")
 
-    print(f"Unpacking {chosen_zip} -> {target_data_dir}...")
-    with zipfile.ZipFile(chosen_zip, 'r') as zf:
-        zf.extractall(target_data_dir)
-    if trigger_clean:
-        for txt_f in glob.glob(os.path.join(target_data_dir, "*.txt")):
-            with open(txt_f, "r", encoding="utf-8", errors="ignore") as tf:
-                cap = tf.read().strip()
-            if not cap.lower().startswith(trigger_clean.lower()):
-                cap = f"{trigger_clean}, {cap}" if cap else trigger_clean
-                with open(txt_f, "w", encoding="utf-8") as tf:
-                    tf.write(cap)
+    if source_dir and os.path.isdir(source_dir):
+        print(f"Ingesting training data from {source_dir} -> {target_data_dir}...")
+        src_imgs = [f for f in os.listdir(source_dir) if os.path.splitext(f)[1].lower() in valid_img_exts]
+        valid_img_names = set(src_imgs)
+        valid_txt_names = {os.path.splitext(f)[0] + ".txt" for f in src_imgs}
 
-img_count = len([f for f in os.listdir(target_data_dir) if os.path.splitext(f)[1].lower() in valid_img_exts])
-txt_count = len([f for f in os.listdir(target_data_dir) if f.lower().endswith(".txt")])
-print(f"Dataset verified: {img_count} images, {txt_count} txt captions in {target_data_dir}.")
-if img_count < 1 or txt_count < 1:
-    raise RuntimeError(f"Dataset verification failed: Expected at least 1 image and caption, found {img_count} images, {txt_count} txt files.")
+        orphan_purged = 0
+        for existing in os.listdir(target_data_dir):
+            existing_path = os.path.join(target_data_dir, existing)
+            if os.path.isfile(existing_path) and existing not in valid_img_names and existing not in valid_txt_names:
+                try:
+                    os.remove(existing_path)
+                    orphan_purged += 1
+                except Exception:
+                    pass
+        if orphan_purged > 0:
+            cache_dir = os.path.join(workspace_data_root, "cache")
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            print(f" [Cleanup] Purged {orphan_purged} orphan files and reset stale cache.")
+
+        for f in src_imgs:
+            src_img = os.path.join(source_dir, f)
+            dest_img = os.path.join(target_data_dir, f)
+            shutil.copy2(src_img, dest_img)
+
+            base_name = os.path.splitext(f)[0]
+            src_txt = os.path.join(source_dir, base_name + ".txt")
+            dest_txt = os.path.join(target_data_dir, base_name + ".txt")
+            caption = ""
+            if os.path.exists(src_txt):
+                with open(src_txt, "r", encoding="utf-8", errors="ignore") as tf:
+                    caption = tf.read().strip()
+
+            if trigger_clean and not caption.lower().startswith(trigger_clean.lower()):
+                caption = f"{trigger_clean}, {caption}" if caption else trigger_clean
+
+            with open(dest_txt, "w", encoding="utf-8") as tf:
+                tf.write(caption)
+    else:
+        local_zip = "/tmp/dataset.zip"
+        chosen_zip = None
+        found_zips = glob.glob("/kaggle/**/dataset.zip", recursive=True) + glob.glob("**/dataset.zip", recursive=True)
+        if found_zips and os.path.getsize(found_zips[0]) > 1024:
+            chosen_zip = found_zips[0]
+            print(f"Found local dataset archive candidate: {chosen_zip}")
+        elif args.dataset_url:
+            print(f"Fetching dataset archive via curl from --dataset_url: {args.dataset_url}...")
+            curl_cmd = [
+                "curl", "-s", "-L",
+                "--retry", "3",
+                "--retry-delay", "2",
+                "--retry-all-errors",
+                args.dataset_url,
+                "-o", local_zip
+            ]
+            subprocess.run(curl_cmd, check=True)
+            if os.path.exists(local_zip) and os.path.getsize(local_zip) > 1024:
+                chosen_zip = local_zip
+                print(f"Downloaded dataset archive: {chosen_zip} ({os.path.getsize(chosen_zip) / (1024**2):.2f} MB)")
+
+        if not chosen_zip or not os.path.exists(chosen_zip):
+            raise RuntimeError(
+                "No dataset found! Please mount your Kaggle Private Dataset under /kaggle/input/, "
+                "pass --dataset_dir <path>, or pass --dataset_url <zip_url>."
+            )
+
+        print(f"Unpacking {chosen_zip} -> {target_data_dir}...")
+        with zipfile.ZipFile(chosen_zip, 'r') as zf:
+            zf.extractall(target_data_dir)
+        if trigger_clean:
+            for txt_f in glob.glob(os.path.join(target_data_dir, "*.txt")):
+                with open(txt_f, "r", encoding="utf-8", errors="ignore") as tf:
+                    cap = tf.read().strip()
+                if not cap.lower().startswith(trigger_clean.lower()):
+                    cap = f"{trigger_clean}, {cap}" if cap else trigger_clean
+                    with open(txt_f, "w", encoding="utf-8") as tf:
+                        tf.write(cap)
+
+    img_count = len([f for f in os.listdir(target_data_dir) if os.path.splitext(f)[1].lower() in valid_img_exts])
+    txt_count = len([f for f in os.listdir(target_data_dir) if f.lower().endswith(".txt")])
+    print(f"Dataset verified: {img_count} images, {txt_count} txt captions in {target_data_dir}.")
+    if img_count < 1 or txt_count < 1:
+        raise RuntimeError(f"Dataset verification failed: Expected at least 1 image and caption, found {img_count} images, {txt_count} txt files.")
 
 # 4. 安装外围依赖
 print("\n>>> Installing auxiliary utilities (safetensors, hf-transfer, bitsandbytes)...")
@@ -656,6 +730,15 @@ VAE_ENCODE = {{"compile": "off"}}
 warmup_steps = min(30, max(1, int(effective_steps * 0.05))) if effective_steps > 5 else 0
 save_every_val = max(0, int(args.save_every))
 
+if args.algo == "loha":
+    algo_kwargs_str = 'ALGO_KWARGS = {"use_tucker": False, "use_scalar": False, "rank_dropout_scale": False}'
+elif args.algo == "lokr":
+    algo_kwargs_str = 'ALGO_KWARGS = {"factor": 8, "decompose_both": False, "full_matrix": False, "use_tucker": False, "rank_dropout_scale": False}'
+else:
+    algo_kwargs_str = "ALGO_KWARGS = {}"
+dora_detach_val = True if args.dora else False
+loraplus_val = max(1.0, float(args.loraplus_ratio))
+
 train_cfg_content = f"""
 from kohakuengine import use_config
 
@@ -674,6 +757,12 @@ VALIDATE_EVERY = 0
 TUNE = "off"
 FP16_FIX = "{fp16_fix_val}"
 PRECISION = "{effective_precision}"
+ALGO = "{args.algo}"
+{algo_kwargs_str}
+DORA = {bool(args.dora)}
+DORA_DETACH = {dora_detach_val}
+PRESET = "{args.target_preset}"
+LORAPLUS_RATIO = {loraplus_val}
 DIM = {args.rank}
 ALPHA = {args.alpha}
 STEPS = {effective_steps}
@@ -682,6 +771,7 @@ SAVE_EVERY = {save_every_val}
 SAVE_MINUTES = 25
 KEEP_LAST = 5
 SAVE_FORMAT = "both"
+SAVE_FUSED_QKV = False
 SCHEDULE = {{
     "mode": "cosine",
     "warmup": {warmup_steps},
@@ -785,6 +875,13 @@ summary_data = {
     "epochs": args.epochs,
     "rank": args.rank,
     "alpha": args.alpha,
+    "algo": args.algo,
+    "dora": bool(args.dora),
+    "dora_detach": dora_detach_val,
+    "target_preset": args.target_preset,
+    "loraplus_ratio": loraplus_val,
+    "dataset_mode": "multi_subset" if cloud_subsets_summary else "single",
+    "subsets": cloud_subsets_summary,
     "learning_rate": args.lr,
     "model_variant": selected_variant,
     "arch_variant": arch_variant,

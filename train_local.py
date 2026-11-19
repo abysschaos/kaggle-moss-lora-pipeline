@@ -279,8 +279,17 @@ def apply_compatibility_patches(trainer_dir: Path):
 
 
 def inspect_safetensors_lora(sf_path: Path) -> dict:
-    """秒级解析 .safetensors 文件头，提取真实 Rank(Dim)、Alpha、训练步数与键数量（零显存占用）。"""
-    info = {"rank": None, "alpha": None, "step": None, "algo": "lora", "keys_count": 0, "path": str(sf_path)}
+    """秒级解析 .safetensors 文件头，提取真实 Rank(Dim)、Alpha、算法、DoRA、步数与键数量（零显存占用）。"""
+    info = {
+        "rank": None,
+        "alpha": None,
+        "step": None,
+        "algo": "lora",
+        "dora": False,
+        "preset": None,
+        "keys_count": 0,
+        "path": str(sf_path),
+    }
     try:
         import struct
         with open(sf_path, "rb") as f:
@@ -313,13 +322,27 @@ def inspect_safetensors_lora(sf_path: Path) -> dict:
                     info["rank"] = int(spec["dim"])
                 if info["alpha"] is None and "alpha" in spec:
                     info["alpha"] = float(spec["alpha"])
+                if spec.get("algo"):
+                    info["algo"] = str(spec["algo"]).lower()
+                if "dora" in spec:
+                    info["dora"] = bool(spec["dora"])
+                if spec.get("preset") and isinstance(spec["preset"], str):
+                    info["preset"] = spec["preset"]
             except Exception:
                 pass
 
-        # 2. 从 lora_down.weight 的实际张量形状兜底推断真实 Rank
+        # 2. 从张量命名与形状兜底推断算法、DoRA 与真实 Rank
+        if any(k.endswith(".dora_scale") for k in tensor_keys):
+            info["dora"] = True
+        if info["algo"] == "lora":
+            if any(".hada_w1_" in k for k in tensor_keys):
+                info["algo"] = "loha"
+            elif any(".lokr_w" in k for k in tensor_keys):
+                info["algo"] = "lokr"
+
         if info["rank"] is None:
             for k in tensor_keys:
-                if k.endswith(".lora_down.weight"):
+                if k.endswith(".lora_down.weight") or k.endswith(".hada_w1_b") or k.endswith(".lokr_w2_b"):
                     shape = header[k].get("shape", [])
                     if len(shape) >= 2:
                         info["rank"] = int(shape[0])
@@ -644,10 +667,170 @@ def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, r
     print(f" [OK] Structured dataset directory ready: {target_folder} ({linked_count} image-text pairs)")
     return workspace_data_dir
 
+
+def sanitize_subset_folder_name(raw_name: str, fallback_idx: int) -> str:
+    """将子集名清洗为安全的文件系统目录名（保留字母/数字/下划线/短横线，避免特殊字符触发路径异常）。"""
+    cleaned = re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "_", (raw_name or "").strip()).strip("_")
+    return cleaned if cleaned else f"subset_{fallback_idx}"
+
+
+def load_subsets_spec(subsets_arg: str) -> list:
+    """解析 --subsets_json 参数（支持 JSON 文件路径或直接内联 JSON 字符串）。"""
+    if not subsets_arg or not subsets_arg.strip():
+        return []
+    raw = subsets_arg.strip()
+    if os.path.isfile(raw):
+        data = json.loads(Path(raw).read_text(encoding="utf-8"))
+    else:
+        data = json.loads(raw)
+    if not isinstance(data, list):
+        raise ValueError("--subsets_json must resolve to a JSON array of subset objects.")
+    return data
+
+
+def prepare_multi_subset_dataset(subsets: list, workspace_data_dir: Path) -> tuple:
+    """
+    多子集配比数据集构建器（适用于多人物、多画风、多概念 LoRA）：
+    1. 为每个启用的子集创建独立的 Kohya 规范目录 <repeats>_<subset_name>；
+    2. 每个子集独立同步图片并前置注入专属触发词，互不污染；
+    3. 严格清理陈旧目录与孤儿文件，必要时重置缓存，并打印多子集曝光配比总表。
+    返回 (workspace_data_dir, subset_summaries_list)。
+    """
+    workspace_data_dir.mkdir(parents=True, exist_ok=True)
+    img_exts = {".jpg", ".jpeg", ".png", ".webp"}
+
+    active_specs = []
+    used_folder_names = set()
+    for idx, item in enumerate(subsets, start=1):
+        if not isinstance(item, dict):
+            continue
+        if item.get("enabled", True) is False:
+            continue
+        src_str = str(item.get("path", "")).strip()
+        if not src_str or not os.path.isdir(src_str):
+            raise FileNotFoundError(f"Subset #{idx} directory not found: {src_str}")
+        rep = max(1, int(item.get("repeats", 1)))
+        base_name = sanitize_subset_folder_name(item.get("name") or Path(src_str).name, idx)
+        folder_name = f"{rep}_{base_name}"
+        suffix_n = 2
+        while folder_name.lower() in used_folder_names:
+            folder_name = f"{rep}_{base_name}_{suffix_n}"
+            suffix_n += 1
+        used_folder_names.add(folder_name.lower())
+        active_specs.append({
+            "name": item.get("name") or Path(src_str).name,
+            "folder_name": folder_name,
+            "source_dir": Path(src_str).resolve(),
+            "repeats": rep,
+            "trigger": str(item.get("trigger", "") or "").strip(),
+        })
+
+    if not active_specs:
+        raise ValueError("Multi-subset mode enabled, but no valid active subsets were provided!")
+
+    active_folder_names = {s["folder_name"] for s in active_specs}
+    orphan_purged = 0
+
+    # 1. 清理不属于当前活跃子集的旧目录
+    for sub_dir in list(workspace_data_dir.iterdir()):
+        if sub_dir.is_dir() and sub_dir.name != "cache" and sub_dir.name not in active_folder_names:
+            try:
+                shutil.rmtree(str(sub_dir))
+                print(f" [Cleanup] Removed obsolete subset directory: {sub_dir.name}")
+                orphan_purged += 1
+            except Exception as e:
+                print(f" Warning cleaning obsolete subset dir {sub_dir.name}: {e}")
+
+    subset_summaries = []
+    total_epoch_exposures = 0
+
+    for spec in active_specs:
+        target_folder = workspace_data_dir / spec["folder_name"]
+        target_folder.mkdir(parents=True, exist_ok=True)
+        src_dir = spec["source_dir"]
+        raw_images = [f for f in src_dir.iterdir() if f.is_file() and f.suffix.lower() in img_exts]
+        if not raw_images:
+            raise ValueError(f"No image files found in subset '{spec['name']}' ({src_dir})")
+
+        valid_img_names = {img.name for img in raw_images}
+        valid_txt_names = {f"{img.stem}.txt" for img in raw_images}
+
+        # 清理当前子集目录孤儿文件
+        for existing_file in list(target_folder.iterdir()):
+            if existing_file.is_file() and existing_file.name not in valid_img_names and existing_file.name not in valid_txt_names:
+                try:
+                    existing_file.unlink()
+                    orphan_purged += 1
+                except Exception:
+                    pass
+
+        trigger_clean = spec["trigger"]
+        for img in raw_images:
+            dest_img = target_folder / img.name
+            dest_txt = target_folder / f"{img.stem}.txt"
+            src_txt = src_dir / f"{img.stem}.txt"
+
+            need_update_img = not dest_img.exists()
+            if not need_update_img:
+                try:
+                    src_st = img.stat()
+                    dst_st = dest_img.stat()
+                    if src_st.st_size != dst_st.st_size or src_st.st_mtime > dst_st.st_mtime + 1.0:
+                        need_update_img = True
+                        dest_img.unlink()
+                except Exception:
+                    pass
+            if need_update_img:
+                try:
+                    os.link(str(img), str(dest_img))
+                except Exception:
+                    shutil.copy2(str(img), str(dest_img))
+
+            caption_content = ""
+            if src_txt.exists():
+                caption_content = src_txt.read_text(encoding="utf-8", errors="ignore").strip()
+            if trigger_clean and not caption_content.lower().startswith(trigger_clean.lower()):
+                caption_content = f"{trigger_clean}, {caption_content}" if caption_content else trigger_clean
+            dest_txt.write_text(caption_content, encoding="utf-8")
+
+        epoch_exp = len(raw_images) * spec["repeats"]
+        total_epoch_exposures += epoch_exp
+        subset_summaries.append({
+            "name": spec["name"],
+            "folder": spec["folder_name"],
+            "source_dir": str(src_dir),
+            "images": len(raw_images),
+            "repeats": spec["repeats"],
+            "epoch_exposures": epoch_exp,
+            "trigger": trigger_clean if trigger_clean else "(None)",
+        })
+
+    if orphan_purged > 0:
+        cache_dir = workspace_data_dir / "cache"
+        if cache_dir.exists():
+            try:
+                shutil.rmtree(str(cache_dir))
+            except Exception:
+                pass
+        print(f" [Cleanup] Purged {orphan_purged} stale entries and reset dataset cache for consistency.")
+
+    print(f" [Multi-Subset Summary] Active Subsets: {len(subset_summaries)} | Total Exposures/Epoch: {total_epoch_exposures}")
+    for s in subset_summaries:
+        pct = (s["epoch_exposures"] / total_epoch_exposures * 100.0) if total_epoch_exposures > 0 else 0.0
+        s["share_percent"] = round(pct, 1)
+        print(
+            f"   - [{s['folder']}] {s['images']} imgs x {s['repeats']} repeats = {s['epoch_exposures']} exp/epoch "
+            f"({pct:.1f}%) | Trigger: {s['trigger']}"
+        )
+
+    return workspace_data_dir, subset_summaries
+
 def main():
     parser = argparse.ArgumentParser(description="OpenMOSS MOSS-Image Local Training Engine for Windows Consumer GPUs")
     parser.add_argument("--data_dir", type=str, default="./dataset",
                         help="Path to folder containing source images and .txt captions")
+    parser.add_argument("--subsets_json", type=str, default="",
+                        help="Optional JSON file path or JSON array string for multi-subset training (multi-character / multi-style / concept balancing)")
     parser.add_argument("--comfy_models_dir", type=str, default=None,
                         help="Path to ComfyUI models directory containing diffusion_models, text_encoders, and vae")
     parser.add_argument("--transformer_path", type=str, default="",
@@ -674,6 +857,15 @@ def main():
                         help="LoRA Rank / Dim (default: 32)")
     parser.add_argument("--alpha", type=float, default=32.0,
                         help="LoRA Alpha (default: 32.0 for full strength 1.0)")
+    parser.add_argument("--algo", type=str, default="lora", choices=["lora", "loha", "lokr"],
+                        help="Adapter algorithm: lora (default), loha (Hadamard), lokr (Kronecker)")
+    parser.add_argument("--dora", action="store_true",
+                        help="Enable DoRA (Weight-Decomposed Low-Rank Adaptation, ICML 2024) for improved detail and style fidelity")
+    parser.add_argument("--target_preset", type=str, default="attn-mlp",
+                        choices=["attn", "attn-mlp", "attn-mlp+modulation", "attn-mlp+text-refiner", "full-block", "all"],
+                        help="Target transformer layers preset for adapter injection (default: attn-mlp)")
+    parser.add_argument("--loraplus_ratio", type=float, default=1.0,
+                        help="LoRA+ learning rate multiplier for up-projection weights (1.0=off, recommended 2.0~4.0 for faster multi-concept convergence)")
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Learning rate (default: 1e-4)")
     parser.add_argument("--precision", type=str, default="bf16", choices=["bf16", "fp16"],
@@ -712,6 +904,7 @@ def main():
     print(f"Custom Trigger Word:          {args.trigger_word if args.trigger_word else '(None, using original captions)'}")
     print(f"Dedicated Output Directory:   {lora_dedicated_folder}")
     print(f"OS: Windows | Target Precision: {args.precision.upper()} | Text Device: {args.text_device.upper()}")
+    print(f"Adapter Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, Preset={args.target_preset}")
     print(f"Hyperparameters: Steps={args.steps}, Dim={args.rank}, Alpha={args.alpha}, LR={args.lr}")
 
     # 1. 硬件与 PyTorch 环境预检
@@ -797,11 +990,17 @@ def main():
             except Exception:
                 shutil.copyfile(str(src), str(dst))
 
-    # 3. 准备 Kohya 结构化数据集并注入自定义触发词
-    print_banner("Preparing Dataset Structure with Custom Trigger Word")
-    src_data_path = Path(args.data_dir).resolve()
+    # 3. 准备 Kohya 结构化数据集并注入自定义触发词（支持单图集与多子集独立配比）
     workspace_data_root = workspace_dir / "dataset"
-    prepare_dataset_structure(src_data_path, workspace_data_root, args.repeats, args.lora_name, args.trigger_word)
+    multi_subset_summaries = []
+    parsed_subsets = load_subsets_spec(args.subsets_json) if args.subsets_json else []
+    if parsed_subsets:
+        print_banner(f"Preparing Multi-Subset Dataset ({len(parsed_subsets)} configured subsets)")
+        _, multi_subset_summaries = prepare_multi_subset_dataset(parsed_subsets, workspace_data_root)
+    else:
+        print_banner("Preparing Dataset Structure with Custom Trigger Word")
+        src_data_path = Path(args.data_dir).resolve()
+        prepare_dataset_structure(src_data_path, workspace_data_root, args.repeats, args.lora_name, args.trigger_word)
 
     # 4. 检查并准备 KohakuMossTrainer 训练器
     trainer_dir = project_root / "KohakuMossTrainer"
@@ -908,7 +1107,7 @@ def main():
         ckpts = list_lora_checkpoints(trainer_dir, args.lora_name, custom_resume)
         if ckpts:
             resumed_step, latest_ckpt_dir = ckpts[-1]
-            # 自动探测断点中的真实 Rank 与 Alpha，防止恢复时维度冲突
+            # 自动探测断点中的真实 Rank、Alpha 与适配器架构，防止恢复时结构/维度冲突
             t_sf = latest_ckpt_dir / "trainable.safetensors"
             if t_sf.exists():
                 l_info = inspect_safetensors_lora(t_sf)
@@ -917,6 +1116,15 @@ def main():
                     args.rank = l_info["rank"]
                     if l_info.get("alpha"):
                         args.alpha = l_info["alpha"]
+                if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
+                    print(f" [Resume Auto-Align] Aligned Algo from {args.algo} -> {l_info['algo']}")
+                    args.algo = l_info["algo"]
+                if bool(l_info.get("dora", False)) != bool(args.dora):
+                    print(f" [Resume Auto-Align] Aligned DoRA from {args.dora} -> {bool(l_info.get('dora', False))}")
+                    args.dora = bool(l_info.get("dora", False))
+                if l_info.get("preset") and l_info["preset"] != args.target_preset:
+                    print(f" [Resume Auto-Align] Aligned Target Preset from {args.target_preset} -> {l_info['preset']}")
+                    args.target_preset = l_info["preset"]
             resume_cfg_str = f'RESUME = "{sanitize_path(latest_ckpt_dir)}"'
             if args.steps <= resumed_step:
                 effective_steps = resumed_step + args.steps
@@ -949,6 +1157,15 @@ def main():
             args.rank = l_info["rank"]
             if l_info.get("alpha"):
                 args.alpha = l_info["alpha"]
+        if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
+            print(f" [Init-From Auto-Align] Aligned Algo from {args.algo} -> {l_info['algo']}")
+            args.algo = l_info["algo"]
+        if bool(l_info.get("dora", False)) != bool(args.dora):
+            print(f" [Init-From Auto-Align] Aligned DoRA from {args.dora} -> {bool(l_info.get('dora', False))}")
+            args.dora = bool(l_info.get("dora", False))
+        if l_info.get("preset") and l_info["preset"] != args.target_preset:
+            print(f" [Init-From Auto-Align] Aligned Target Preset from {args.target_preset} -> {l_info['preset']}")
+            args.target_preset = l_info["preset"]
         init_from_cfg_str = f'INIT_FROM = "{sanitize_path(staged_init_dir)}"'
         resume_source_info = f"Continued training (INIT_FROM) based on '{Path(l_info['source_file']).name}' (Rank={args.rank}, Alpha={args.alpha})"
         print(f" [Init-From] Loaded base LoRA weights from: {l_info['source_file']} (training {effective_steps} new steps)")
@@ -1009,6 +1226,16 @@ VAE_ENCODE = {{"compile": "off"}}
         if broad_m:
             effective_comfy_models = str(broad_m[0])
 
+    # 按 KohakuMossTrainer 官方 algo_*.py 配方注入各算法防坑参数，确保 LyCORIS 融合内核与 ComfyUI 导出零冲突
+    if args.algo == "loha":
+        algo_kwargs_str = 'ALGO_KWARGS = {"use_tucker": False, "use_scalar": False, "rank_dropout_scale": False}'
+    elif args.algo == "lokr":
+        algo_kwargs_str = 'ALGO_KWARGS = {"factor": 8, "decompose_both": False, "full_matrix": False, "use_tucker": False, "rank_dropout_scale": False}'
+    else:
+        algo_kwargs_str = "ALGO_KWARGS = {}"
+    dora_detach_val = True if args.dora else False
+    loraplus_val = max(1.0, float(args.loraplus_ratio))
+
     train_cfg_code = f"""
 from kohakuengine import use_config
 
@@ -1027,6 +1254,12 @@ VALIDATE_EVERY = 0
 TUNE = "off"
 FP16_FIX = "{fp16_fix_val}"
 PRECISION = "{args.precision}"
+ALGO = "{args.algo}"
+{algo_kwargs_str}
+DORA = {bool(args.dora)}
+DORA_DETACH = {dora_detach_val}
+PRESET = "{args.target_preset}"
+LORAPLUS_RATIO = {loraplus_val}
 DIM = {args.rank}
 ALPHA = {args.alpha}
 STEPS = {effective_steps}
@@ -1035,6 +1268,7 @@ SAVE_EVERY = {save_every_val}
 SAVE_MINUTES = 20
 KEEP_LAST = 5
 SAVE_FORMAT = "both"
+SAVE_FUSED_QKV = False
 SCHEDULE = {{
     "mode": "cosine",
     "warmup": {warmup_steps},
@@ -1154,12 +1388,19 @@ SCHEDULE = {{
         "epochs": args.epochs,
         "rank": args.rank,
         "alpha": args.alpha,
+        "algo": args.algo,
+        "dora": bool(args.dora),
+        "dora_detach": dora_detach_val,
+        "target_preset": args.target_preset,
+        "loraplus_ratio": loraplus_val,
         "learning_rate": args.lr,
         "precision": args.precision,
         "vram_preset": effective_preset,
         "resolution": args.resolution,
         "model_variant": model_variant,
         "text_device": args.text_device,
+        "dataset_mode": "multi_subset" if multi_subset_summaries else "single",
+        "subsets": multi_subset_summaries,
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "comfyui_prompt_example": (
             f"A high quality digital painting of {args.trigger_word}, in the style of {args.lora_name}, masterpiece, cinematic lighting"

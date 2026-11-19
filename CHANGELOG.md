@@ -7,6 +7,15 @@
 
 ---
 
+## [v1.2.0] - 2026-11-20
+
+### ✨ 核心新增功能（多人物 / 多画风 / 概念 LoRA 与高阶适配器引擎）
+- **多子集配比管理器（本地 GUI / CLI & 云端全同步）**：支持在单个训练任务中配置多个独立子目录，每个子集独立绑定专属触发词与独立 `Repeat` 重复权重，自动生成标准 Kohya `<repeat>_<subset_name>` 目录结构并独立隔离清理孤儿文件；GUI 新增深色 `Treeview` 子集管理表格、独立添加/编辑弹窗与【⚖️ 一键配平 Repeat】功能（按子集图片数反比自动均衡曝光占比），并与公式步数换算实时联动。
+- **高阶适配器架构与目标注入层预设**：严格参照 `KohakuMossTrainer` 官方 `algo_*.py` 与 `export-to-comfy.md` 规范，双轨开放 **LoRA / LoHa / LoKr** 算法切换（自动注入对应安全内核参数 `ALGO_KWARGS`）、**DoRA** 权重分解（自动配对 `DORA_DETACH = True` 兼顾稳定性与省显存）、**LoRA+ 学习率倍率**（`LORAPLUS_RATIO`）以及 6 档 Transformer 注入层预设（`attn` / `attn-mlp` / `attn-mlp+modulation` / `attn-mlp+text-refiner` / `full-block` / `all`），并显式锁定 `SAVE_FUSED_QKV = False` 保障 ComfyUI 紧凑原生加载。
+- **五大实战预设模板与续炼结构自动对齐**：GUI 顶部预设栏扩充为【🎨 艺术画风】、【👤 单人角色】、【👥 多人物配比】、【🎭 多画风配比】与【💡 概念/动作】；增强 `inspect_safetensors_lora` 支持自动识别已有权重中的 `LoRA / LoHa / LoKr`、`DoRA` 与 `PRESET` 并在续炼时自动对齐。
+
+---
+
 ## [v1.1.0] - 2026-11-20
 
 ### ✨ 核心新增功能

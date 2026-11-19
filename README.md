@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Base Model](https://img.shields.io/badge/Base%20Model-MOSS--Image--heal-green.svg)](https://huggingface.co/KBlueLeaf/MOSS-Image-heal)
 [![Framework](https://img.shields.io/badge/Framework-KohakuMossTrainer-orange.svg)](https://github.com/KohakuBlueleaf/KohakuMossTrainer)
-[![Latest Release](https://img.shields.io/badge/Release-v1.1.0%20Stable-blueviolet.svg)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/tag/v1.1.0)
+[![Latest Release](https://img.shields.io/badge/Release-v1.2.0%20Stable-blueviolet.svg)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/tag/v1.2.0)
 [![Direct Download](https://img.shields.io/badge/Download-Source%20ZIP-success.svg)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)
 
 一套专为 **OpenMOSS MOSS-Image (5B Single-Stream DiT)** 打造的工业级 LoRA 自动化炼制工程方案。依托 [KohakuBlueleaf/KohakuMossTrainer](https://github.com/KohakuBlueleaf/KohakuMossTrainer) 架构，支持 **云端 Kaggle 免费算力** 与 **本地 Windows 消费级显卡 (RTX 4070/4060/3060 8GB~12GB)** 双轨运行。
@@ -16,7 +16,7 @@
 
 ### 1. 方式 A：纯小白一键直接下载 ZIP (推荐，免 Git 环境)
 - **直接下载主分支最新包**：👉 [**【⬇️ 点击直接下载最新项目压缩包 (main.zip)】**](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)
-- **官方发行版本页面**：👉 [**【🏷️ GitHub Releases 官方稳定版页面 (v1.1.0)】**](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases)（详见 [CHANGELOG.md](CHANGELOG.md)）
+- **官方发行版本页面**：👉 [**【🏷️ GitHub Releases 官方稳定版页面 (v1.2.0)】**](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases)（详见 [CHANGELOG.md](CHANGELOG.md)）
 - **新手解压避坑关键**：
   下载后请解压到纯英文路径（例如 `D:\kaggle_moss_lora_pipeline\`）。**路径中严禁包含中文、空格或特殊符号**，以避免 Windows 下 PyTorch C++ 底层算子加载崩溃。
 
@@ -117,7 +117,8 @@ kaggle_moss_lora_pipeline/
 - **触发词智能前置注入**：支持用户自定义触发词，系统自动在训练缓存区将触发词前置拼接至标注文本最前，原始图集标注保持纯净无破坏；
 - **全可视化傻瓜式操作**：所有路径均配备独立的大按钮【📁 点此自选文件/文件夹】，无需手动复制粘贴文本路径，选定图集后自动统计当前图片与 txt 数量；
 - **本地偏好自动记忆且隐私隔离**：选定的路径会自动保存在本地 `local_config.json` 中，再次打开自动载入；该配置文件已在 `.gitignore` 中彻底忽略，绝不泄露任何本地私有目录信息；
-- **模板一键切换**：内置【🎨 艺术画风模板】与【👤 人物角色模板】，单选自动填入最佳参数；
+- **多子集配比与高阶适配器引擎 (`v1.2.0`)**：支持一键切换【多子集配比模式】，可添加多个独立人物/画风/概念子目录并各自绑定专属触发词与独立 `Repeat` 权重，内置【⚖️ 一键配平 Repeat】自动按图数反比对齐单轮曝光占比；原生开放 **LoRA / LoHa / LoKr** 算法、**DoRA** 权重分解（自动启用官方 `DORA_DETACH=True` 防溢出省显存）、**LoRA+ 倍率** 与多档目标注入层预设（`attn-mlp+modulation` / `attn-mlp+text-refiner` 等），本地与云端双轨完全同步；
+- **模板一键切换**：内置五大实战模板【🎨 艺术画风】、【👤 单人角色】、【👥 多人物配比】、【🎭 多画风配比】与【💡 概念/动作】，单选自动填入最佳架构与超参数；
 - **智能公式联动**：动态计算总样本曝光量，提供一键“按公式对齐”核心步数按钮；
 - **实时流式控制台**：多线程终端监控面板，实时回传日志与进度，支持中途安全终止与完成提示；
 - **无缝部署**：勾选“自动复制到 ComfyUI”，训练完毕后自动将权重直推 `models/loras/`。

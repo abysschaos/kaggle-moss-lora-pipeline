@@ -16,6 +16,19 @@ try:
 except Exception:
     pass
 
+# Windows 下彻底禁止后台子进程弹出 CMD/PowerShell 黑框
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _resolve_cli_python() -> str:
+    """当 GUI 通过 pythonw.exe 无黑框运行时，将子进程解释器安全映射回同目录 python.exe 以保障完整 stdout 管道。"""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        cli_py = exe.with_name("python.exe")
+        if cli_py.is_file():
+            return str(cli_py)
+    return sys.executable
+
 class ModernLocalTrainerGUI:
     def __init__(self, root):
         self.root = root
@@ -187,6 +200,7 @@ class ModernLocalTrainerGUI:
                         ["taskkill", "/F", "/T", "/PID", str(pid)],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
+                        creationflags=_NO_WINDOW,
                         check=False
                     )
                     self.current_process.kill()
@@ -825,7 +839,7 @@ class ModernLocalTrainerGUI:
                 ]
                 for cmd in git_cmds:
                     self.log(f"执行命令: {' '.join(cmd)}\n")
-                    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+                    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
                     self.log(p.stdout + "\n")
                     if p.returncode == 0 and (trainer_dir / "pyproject.toml").exists():
                         git_success = True
@@ -1664,7 +1678,7 @@ class ModernLocalTrainerGUI:
         self.pause_requested = False
 
         cmd = [
-            sys.executable, "-u", "train_local.py",
+            _resolve_cli_python(), "-u", "train_local.py",
             "--data_dir", self.var_data_dir.get(),
             "--comfy_models_dir", self.var_comfy_models.get(),
             "--output_dir", self.var_output_dir.get(),
@@ -1729,7 +1743,8 @@ class ModernLocalTrainerGUI:
                 text=True,
                 bufsize=1,
                 encoding="utf-8",
-                errors="replace"
+                errors="replace",
+                creationflags=_NO_WINDOW
             )
 
             for line in iter(self.current_process.stdout.readline, ""):
@@ -1779,6 +1794,7 @@ class ModernLocalTrainerGUI:
                         ["taskkill", "/F", "/T", "/PID", str(pid)],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
+                        creationflags=_NO_WINDOW,
                         check=False
                     )
                 except Exception as e:
@@ -1844,6 +1860,24 @@ class ModernLocalTrainerGUI:
             self.log(f"\n>>> [提示] 训练进程已结束，退出码: {return_code} <<<\n")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ModernLocalTrainerGUI(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        app = ModernLocalTrainerGUI(root)
+        root.mainloop()
+    except Exception as _fatal_err:
+        import traceback
+        _tb = traceback.format_exc()
+        try:
+            _crash_dir = Path("./workspace").resolve()
+            _crash_dir.mkdir(parents=True, exist_ok=True)
+            (_crash_dir / "gui_crash.log").write_text(_tb, encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            _err_root = tk.Tk()
+            _err_root.withdraw()
+            messagebox.showerror("启动异常", f"训练器 GUI 启动失败：\n{_fatal_err}\n\n详细日志已保存至 workspace/gui_crash.log")
+            _err_root.destroy()
+        except Exception:
+            pass
+        raise

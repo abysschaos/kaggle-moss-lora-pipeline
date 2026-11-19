@@ -1,26 +1,20 @@
 # ==============================================================================
-# OpenMOSS MOSS-Image Local GUI Launcher (PowerShell)
+# OpenMOSS MOSS-Image Local GUI Silent Launcher (PowerShell)
 # ==============================================================================
 
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location (Join-Path $scriptDir "..")
+$projectRoot = (Get-Item (Join-Path $scriptDir "..")).FullName
+$vbsLauncher = Join-Path $projectRoot "launch_ui.vbs"
 
-$pythonExe = ""
-if (Test-Path ".\venv\Scripts\python.exe") {
-    $pythonExe = (Resolve-Path ".\venv\Scripts\python.exe").Path
-} elseif ($env:COMFYUI_PYTHON -and (Test-Path $env:COMFYUI_PYTHON)) {
-    $pythonExe = $env:COMFYUI_PYTHON
+if (Test-Path $vbsLauncher) {
+    Start-Process -FilePath "wscript.exe" -ArgumentList "//nologo `"$vbsLauncher`"" -WindowStyle Hidden
+    exit 0
+}
+
+$pywLauncher = Join-Path $projectRoot "scripts\silent_launcher.pyw"
+$venvPyw = Join-Path $projectRoot "venv\Scripts\pythonw.exe"
+if (Test-Path $venvPyw) {
+    Start-Process -FilePath $venvPyw -ArgumentList "`"$pywLauncher`"" -WorkingDirectory $projectRoot -WindowStyle Hidden
 } else {
-    $detectedPy = (python ".\scripts\detect_env.py" 2>$null | Select-Object -First 1)
-    if ($detectedPy -and (Test-Path $detectedPy)) {
-        $pythonExe = $detectedPy
-    }
+    Start-Process -FilePath "pythonw.exe" -ArgumentList "`"$pywLauncher`"" -WorkingDirectory $projectRoot -WindowStyle Hidden
 }
-
-if (-not $pythonExe) {
-    $pythonExe = "python"
-}
-
-Write-Host "Launching OpenMOSS Local LoRA Trainer GUI with: $pythonExe" -ForegroundColor Green
-& $pythonExe gui_local.py

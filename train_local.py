@@ -9,6 +9,9 @@ import subprocess
 import time
 from pathlib import Path
 
+# Windows 下彻底禁止内部子进程 (pip/git/kogine) 闪烁弹出 CMD 黑框
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # 确保当前 Python 解释器配套的 Scripts 目录进入系统 PATH，保障 kogine、accelerate 等 CLI 工具顺利执行
 py_scripts_dir = Path(sys.executable).parent / "Scripts"
 if py_scripts_dir.exists():
@@ -804,18 +807,18 @@ def main():
     trainer_dir = project_root / "KohakuMossTrainer"
     if not trainer_dir.exists():
         print_banner("Cloning KohakuMossTrainer Framework")
-        subprocess.run(["git", "clone", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(trainer_dir)], check=True)
+        subprocess.run(["git", "clone", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(trainer_dir)], creationflags=_NO_WINDOW, check=True)
     
     apply_compatibility_patches(trainer_dir)
 
     # 确保本地依赖与可编辑模块就绪
     subprocess.run([
         sys.executable, "-m", "pip", "install", "-q", "--no-build-isolation", "--no-deps", "-e", str(trainer_dir)
-    ], check=True)
+    ], creationflags=_NO_WINDOW, check=True)
     subprocess.run([
         sys.executable, "-m", "pip", "install", "-q", "--no-deps",
         "kohaku-engine", "kohakuvault", "lycoris-lora", "anyschedule", "safetensors"
-    ], check=True)
+    ], creationflags=_NO_WINDOW, check=True)
 
     # 5. 生成本地训练与离线缓存专属配置文件 (名称与 lora_name 强对齐)
     print_banner(f"Generating Local Configurations for '{args.lora_name}'")
@@ -1059,13 +1062,13 @@ SCHEDULE = {{
     subprocess.run([
         kogine_cmd, "run", "scripts/data/cache_text.py",
         "--config", f"configs/user/{args.lora_name}_local_data.py"
-    ], cwd=str(trainer_dir), env=os.environ, check=True)
+    ], cwd=str(trainer_dir), env=os.environ, creationflags=_NO_WINDOW, check=True)
 
     print_banner(f"Step 2/2: Extracting Image Latents (Device: {args.vae_device.upper()})")
     subprocess.run([
         kogine_cmd, "run", "scripts/data/cache_latents.py",
         "--config", f"configs/user/{args.lora_name}_local_data.py"
-    ], cwd=str(trainer_dir), env=os.environ, check=True)
+    ], cwd=str(trainer_dir), env=os.environ, creationflags=_NO_WINDOW, check=True)
 
     # 7. 物理级清洗配置文件中的临时离线编码器旋钮
     print_banner("Sanitizing Configuration Knobs for moss.py Validation")
@@ -1113,7 +1116,7 @@ SCHEDULE = {{
     ]
     print(f"Executing: {' '.join(train_cmd)}")
     try:
-        subprocess.run(train_cmd, cwd=str(trainer_dir), env=os.environ, check=True)
+        subprocess.run(train_cmd, cwd=str(trainer_dir), env=os.environ, creationflags=_NO_WINDOW, check=True)
     finally:
         stop_sync_event.set()
 

@@ -53,8 +53,9 @@ cd kaggle-moss-lora-pipeline
 kaggle_moss_lora_pipeline/
 ├── README.md                      # 项目核心说明与双轨使用指南
 ├── install_windows.bat            # Windows 专属一键自动部署虚拟环境与 CUDA 依赖
-├── launch_ui.bat                  # Windows 专属一键双击启动 GUI 控制面板
-├── gui_local.py                   # 现代极简本地训练 GUI (图形化参数调节/模板切换/实时日志)
+├── launch_ui.vbs                  # Windows 零黑框原生桌面一键启动器 (推荐，全程无 CMD/PowerShell 窗口)
+├── launch_ui.bat                  # Windows 快捷启动脚本 (自动后台无黑框拉起 GUI 并立刻关闭黑框)
+├── gui_local.py                   # 现代极简本地训练 GUI (含实时 Loss 折线图看板/断点续炼/随时暂停存盘)
 ├── train_local.py                 # 生产级本地消费级显卡执行引擎 (Windows 专属)
 ├── train_moss.py                  # 生产级云端一键执行脚本 (Kaggle 专用)
 ├── requirements.txt               # 云端辅助工具与 CLI 依赖清单
@@ -99,8 +100,8 @@ kaggle_moss_lora_pipeline/
 
 ### 3. 一键启动方式
 
-#### 方式 1：双击图形化控制面板 (GUI 模式，强烈推荐)
-直接双击项目根目录下的 **`launch_ui.bat`**（或在终端运行 `python gui_local.py`）：
+#### 方式 1：双击图形化控制面板 (GUI 模式，零黑框原生体验，强烈推荐)
+直接双击项目根目录下的 **`launch_ui.vbs`**（全程零黑框、不弹出 CMD/PowerShell 窗口；亦可双击 **`launch_ui.bat`**，同样会自动无黑框拉起界面并瞬间关闭自身窗口）：
 - **全自动宽域环境发现**：全新升级的启动引导自动遍历全盘（C:、D:、E:、F: 等所有分区）检索您现有的 ComfyUI 便携版或独立环境 Python 与模型库。若机器已有成熟环境，无需手动安装任何依赖，双击即能自动借用高性能 PyTorch 环境启动；
 - **训练器框架一键管理**：内置【🛠️ 训练器框架管理】卡片，自带就绪状态检测指示灯、一键打开放置目录、一键自动克隆/下载、离线防套娃放置指引与一键自愈补丁注入；
 - **底模自选与目录直达**：支持自选单模型文件（DiT/文本编码器/VAE）或一键自动探测；每个组件均配备【📂 打开放置目录】按钮，点击即可直接在 Windows 窗口中直达目标文件夹；

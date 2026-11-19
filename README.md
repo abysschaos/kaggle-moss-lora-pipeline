@@ -42,7 +42,7 @@ cd kaggle-moss-lora-pipeline
 | **单步运算耗时** | ~42 秒 / step (1024) 或 ~24 秒 / step (768) | **~7 - 9 秒 / step (性能跃升 4.5 倍)** |
 | **600 步训练周期**| 约 4.0 ~ 7.0 小时 (按分辨率) | **约 1.0 - 1.5 小时** |
 | **模型资产依赖** | 按所选变体与量化规格从 HuggingFace 极速下载 | **直连本地 ComfyUI 现有模型库，零网络下载秒级启动** |
-| **启动命令** | `.\scripts\push_to_kaggle.ps1` 或导入 Notebook | `.\scripts\run_local.ps1` 或双击 `launch_ui.bat` |
+| **启动命令** | `.\scripts\push_to_kaggle.ps1` 或导入 Notebook | 双击 `MOSS_LoRA_Trainer.exe`（由 `build_exe.bat` 1 秒编译）或 `launch_ui.vbs` |
 | **自定义命名与触发词** | **Notebook / CLI / 环境变量全自定义，自动生成专属归档与元数据** | **GUI / CLI 全自定义：自动创建专属产出子文件夹、同步权重名称、前置注入触发词** |
 
 ---
@@ -53,7 +53,8 @@ cd kaggle-moss-lora-pipeline
 kaggle_moss_lora_pipeline/
 ├── README.md                      # 项目核心说明与双轨使用指南
 ├── install_windows.bat            # Windows 专属一键自动部署虚拟环境与 CUDA 依赖
-├── launch_ui.vbs                  # Windows 零黑框原生桌面一键启动器 (推荐，全程无 CMD/PowerShell 窗口)
+├── build_exe.bat                  # 1 秒本地透明编译原生零黑框启动器 MOSS_LoRA_Trainer.exe (免第三方依赖)
+├── launch_ui.vbs                  # Windows 零黑框原生桌面一键启动器 (免编译备选，全程无 CMD/PowerShell 窗口)
 ├── launch_ui.bat                  # Windows 快捷启动脚本 (自动后台无黑框拉起 GUI 并立刻关闭黑框)
 ├── gui_local.py                   # 现代极简本地训练 GUI (含实时 Loss 折线图看板/断点续炼/随时暂停存盘)
 ├── train_local.py                 # 生产级本地消费级显卡执行引擎 (Windows 专属)
@@ -61,6 +62,10 @@ kaggle_moss_lora_pipeline/
 ├── requirements.txt               # 云端辅助工具与 CLI 依赖清单
 ├── requirements-local.txt         # 本地 Windows 平台依赖清单
 ├── kernel-metadata.json           # Kaggle CLI 专用元数据配置
+├── assets/
+│   └── moss_trainer.ico           # 原生多分辨率应用图标 (16px~256px)
+├── launcher/
+│   └── MossTrainerLauncher.cs     # 开源可审计的 Windows 原生 C# 零黑框启动器源码
 ├── notebooks/
 │   └── kaggle_moss_lora_training.ipynb # Kaggle 云端一键开箱即用 Notebook 模板 (支持自定义图集/参数)
 ├── docs/
@@ -73,6 +78,9 @@ kaggle_moss_lora_pipeline/
 │   ├── dit_flow_matching_guide.md # 5B DiT 与 Flow Matching 连续流训练超参数理论
 │   └── comfyui_inference_guide.md # ComfyUI 官方原生推理规范 (CFG 3.0 / Shift 5.0)
 └── scripts/
+    ├── build_exe.ps1              # 原生启动器编译脚本 (调用系统内置 .NET csc.exe，支持 -CreateDesktopShortcut)
+    ├── generate_icon.py           # 多分辨率应用图标生成脚本 (1024px 超采样)
+    ├── silent_launcher.pyw        # 零黑框环境寻址与 GUI 引导脚本
     ├── install.ps1                # 本地环境一键安装脚本 (PowerShell 版)
     ├── launch_ui.ps1              # 本地 GUI 启动脚本 (PowerShell 版)
     ├── run_local.ps1              # 本地一键启动与硬件自检交互式脚本 (CLI 版)
@@ -100,8 +108,8 @@ kaggle_moss_lora_pipeline/
 
 ### 3. 一键启动方式
 
-#### 方式 1：双击图形化控制面板 (GUI 模式，零黑框原生体验，强烈推荐)
-直接双击项目根目录下的 **`launch_ui.vbs`**（全程零黑框、不弹出 CMD/PowerShell 窗口；亦可双击 **`launch_ui.bat`**，同样会自动无黑框拉起界面并瞬间关闭自身窗口）：
+#### 方式 1：原生桌面 `.exe` 启动器 (零黑框 + 专属图标 + 可固定任务栏，最推荐)
+首次使用只需双击项目根目录下的 **`build_exe.bat`**（或在终端执行 `.\scripts\build_exe.ps1 -CreateDesktopShortcut`），系统会自动调用 Windows 原生自带的 `.NET Framework` 编译器，1 秒内将明文源码 `launcher/MossTrainerLauncher.cs` 透明编译为约 80KB 的 **`MOSS_LoRA_Trainer.exe`**（含 16px~256px 高清多分辨率图标，无需安装 PyInstaller 或任何第三方工具）。此后直接双击 **`MOSS_LoRA_Trainer.exe`** 即可零黑框秒开界面，并支持右键“固定到任务栏”与创建桌面快捷方式（免编译备选方案仍可直接双击 **`launch_ui.vbs`** 或 **`launch_ui.bat`**）：
 - **全自动宽域环境发现**：全新升级的启动引导自动遍历全盘（C:、D:、E:、F: 等所有分区）检索您现有的 ComfyUI 便携版或独立环境 Python 与模型库。若机器已有成熟环境，无需手动安装任何依赖，双击即能自动借用高性能 PyTorch 环境启动；
 - **训练器框架一键管理**：内置【🛠️ 训练器框架管理】卡片，自带就绪状态检测指示灯、一键打开放置目录、一键自动克隆/下载、离线防套娃放置指引与一键自愈补丁注入；
 - **底模自选与目录直达**：支持自选单模型文件（DiT/文本编码器/VAE）或一键自动探测；每个组件均配备【📂 打开放置目录】按钮，点击即可直接在 Windows 窗口中直达目标文件夹；

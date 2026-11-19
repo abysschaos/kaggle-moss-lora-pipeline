@@ -9,10 +9,11 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# 启用 Windows 高 DPI 适配，防止界面模糊
+# 启用 Windows 高 DPI 适配与独立任务栏应用分组 ID（必须在创建 tk.Tk() 之前调用）
 try:
     import ctypes
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("OpenMOSS.MOSSImage.LoRATrainer.1")
 except Exception:
     pass
 
@@ -33,6 +34,14 @@ class ModernLocalTrainerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("OpenMOSS MOSS-Image 本地 LoRA 训练引擎控制台")
+
+        # 挂载自定义应用图标（与 MOSS_LoRA_Trainer.exe 保持任务栏/标题栏一致）
+        try:
+            icon_path = Path(__file__).resolve().parent / "assets" / "moss_trainer.ico"
+            if icon_path.is_file():
+                self.root.iconbitmap(default=str(icon_path))
+        except Exception:
+            pass
         
         # 窗口大小与屏幕居中适配 (宽屏自适应，保证左右两栏均有宽裕空间)
         screen_w = self.root.winfo_screenwidth()

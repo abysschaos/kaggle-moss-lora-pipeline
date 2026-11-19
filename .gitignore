@@ -28,6 +28,9 @@ KohakuMossTrainer/
 local_config.json
 local_env.bat
 
+# Built Windows native launcher (Transparently compiled locally via build_exe.bat)
+MOSS_LoRA_Trainer.exe
+
 # OS specific
 .DS_Store
 Thumbs.db

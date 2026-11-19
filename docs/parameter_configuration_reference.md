@@ -22,6 +22,10 @@
 | **模型架构变体** | 切换 Base / Heal / SFT 底模分支 | `auto` / `heal` / `sft` | `--variant` | `default="auto"` | `--variant` (`heal`/`base`/`sft`) |
 | **云端底模量化** | 云端拉取 int8 量化版或全精度底模 | `auto` (`int8`/`full`) | 自动识别本地文件 | 本地自动匹配 | `--base_quant` (`BASE_QUANT`) |
 | **文本提取设备** | Qwen3.5-9B 特征提取宿主 | `cpu` / `auto` | `--text_device` | `default="cpu"` | `--text_device` (`auto`/`cuda`/`cpu`) |
+| **训练/续炼模式** | 全新训练 / 断点续炼 / 基于已有 LoRA 继续训练 | `fresh` / `resume` / `init_from` | `--train_mode` | `default="fresh"` | `--train_mode` (`TRAIN_MODE`) |
+| **断点续炼目录** | 指定中断或已完结的 `step_XXXXXXXX` 目录 | `latest` 或目录路径 | `--resume_from` | `default="latest"` | `--resume_from` (`RESUME_FROM`) |
+| **基底 LoRA 路径** | 指定已训练结束的 `.safetensors` 权重继续微调 | `.safetensors` 路径 | `--init_from` | `default=""` | `--init_from` (`INIT_FROM`) |
+| **自动存盘间隔** | 每隔 N 步自动保存一次中间 checkpoint 与权重 | `100` | `--save_every` | `default=100` | `--save_every` (`SAVE_EVERY`) |
 | **数据集路径** | 输入图片与 txt 所在文件夹 | 绝对路径 | `--data_dir` | 第 176 行 | 第 65 行 (`target_data_dir`) |
 | **ComfyUI模型库路径** | ComfyUI 模型存放根目录 | 绝对路径 | `--comfy_models_dir`| 第 178 行 | 第 61 ~ 63 行 (`/tmp/models`) |
 | **DiT 底模单文件** | 自选 MOSS-Image 底模文件路径 | 绝对路径 | `--transformer_path` | 第 180 行 (`default=""`) | 自动下载 |

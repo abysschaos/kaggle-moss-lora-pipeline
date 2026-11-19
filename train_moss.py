@@ -48,6 +48,15 @@ parser.add_argument("--text_device", type=str, default=os.environ.get("TEXT_DEVI
 parser.add_argument("--vae_device", type=str, default=os.environ.get("VAE_DEVICE", "cuda"),
                     choices=["cuda", "cpu"],
                     help="Device for offline VAE latents extraction (default: cuda)")
+parser.add_argument("--train_mode", type=str, default=os.environ.get("TRAIN_MODE", "fresh"),
+                    choices=["fresh", "resume", "init_from"],
+                    help="Training mode: 'fresh' (from scratch), 'resume' (continue from checkpoint), 'init_from' (continue training from an existing .safetensors LoRA)")
+parser.add_argument("--resume_from", type=str, default=os.environ.get("RESUME_FROM", "latest"),
+                    help="Checkpoint directory path to resume from, or 'latest'")
+parser.add_argument("--init_from", type=str, default=os.environ.get("INIT_FROM", ""),
+                    help="Path to an existing .safetensors LoRA file or checkpoint dir to continue training from")
+parser.add_argument("--save_every", type=int, default=int(os.environ.get("SAVE_EVERY", "100")),
+                    help="Save intermediate checkpoint every N steps (default: 100)")
 parser.add_argument("--dataset_dir", type=str, default=os.environ.get("DATASET_DIR", ""),
                     help="Path to training dataset folder or archive")
 args, _ = parser.parse_known_args()
@@ -363,6 +372,33 @@ if os.path.exists(obj_check_file):
     except Exception as obj_err:
         print("Note: Could not patch objective.py:", obj_err)
 
+native_driver_file = os.path.join(trainer_dir, "src", "kohakumoss", "training", "drivers", "native.py")
+if os.path.exists(native_driver_file):
+    try:
+        with open(native_driver_file, "r", encoding="utf-8") as f:
+            nd_content = f.read()
+        if "KOHAKUMOSS_PAUSE_FILE" not in nd_content:
+            target_line = "finish_step(state, group, bundle, ema, self.runner, out)"
+            pause_hook = (
+                "finish_step(state, group, bundle, ema, self.runner, out)\n"
+                "            import os as _os\n"
+                "            _pfile = _os.environ.get('KOHAKUMOSS_PAUSE_FILE', '')\n"
+                "            if _pfile and _os.path.exists(_pfile):\n"
+                "                try:\n"
+                "                    _os.remove(_pfile)\n"
+                "                except Exception:\n"
+                "                    pass\n"
+                "                print(f'\\n[Pause & Save] Detected pause request at step {state.step}! Saving checkpoint and exporting current weights...', flush=True)\n"
+                "                self.checkpoints.save(state.step, self.parts(state))\n"
+                "                break"
+            )
+            if target_line in nd_content:
+                with open(native_driver_file, "w", encoding="utf-8") as f:
+                    f.write(nd_content.replace(target_line, pause_hook, 1))
+                print("Injected graceful Pause & Save hook into drivers/native.py.")
+    except Exception as nd_err:
+        print("Note: Could not patch native.py:", nd_err)
+
 os.chdir(trainer_dir)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-build-isolation", "--no-deps", "-e", "."], check=True)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "kohaku-engine", "kohakuvault", "lycoris-lora", "anyschedule"], check=True)
@@ -445,7 +481,138 @@ hf_hub_download(
 )
 print("All model weights successfully downloaded to /tmp/models!")
 
-# 8. 生成标准训练与数据配置 (与本地引擎完全对齐，注入分辨率、显存档位、架构变体与防 OOM 守卫)
+# 7.8 提前建立 /kaggle/working/runs 软链接，确保断点检测与实时落盘统一
+working_runs = "/kaggle/working/runs"
+os.makedirs(working_runs, exist_ok=True)
+trainer_runs = os.path.join(trainer_dir, "runs")
+if os.path.exists(trainer_runs) and not os.path.islink(trainer_runs):
+    shutil.rmtree(trainer_runs)
+if not os.path.exists(trainer_runs):
+    os.symlink(working_runs, trainer_runs)
+    print(f"Created real-time runs symlink: {trainer_runs} -> {working_runs}")
+
+
+def _inspect_safetensors(sf_path: str) -> dict:
+    info = {"rank": None, "alpha": None, "step": None}
+    try:
+        import struct
+        with open(sf_path, "rb") as f:
+            h_size = struct.unpack("<Q", f.read(8))[0]
+            hdr = json.loads(f.read(h_size).decode("utf-8"))
+        meta = hdr.get("__metadata__", {}) or {}
+        if "ss_network_dim" in meta:
+            info["rank"] = int(float(meta["ss_network_dim"]))
+        if "ss_network_alpha" in meta:
+            info["alpha"] = float(meta["ss_network_alpha"])
+        if "kohakumoss_step" in meta:
+            info["step"] = int(meta["kohakumoss_step"])
+        if info["rank"] is None:
+            for k, v in hdr.items():
+                if k != "__metadata__" and k.endswith(".lora_down.weight"):
+                    shp = v.get("shape", [])
+                    if len(shp) >= 2:
+                        info["rank"] = int(shp[0])
+                        break
+        if info["alpha"] is None and info["rank"] is not None:
+            info["alpha"] = float(info["rank"])
+    except Exception:
+        pass
+    return info
+
+
+# 7.9 解析训练模式 (fresh / resume / init_from)
+train_mode = args.train_mode.lower()
+resume_cfg_str = ""
+init_from_cfg_str = ""
+effective_steps = args.steps
+resumed_step = 0
+
+if train_mode == "resume":
+    ckpt_candidates = []
+    search_roots = []
+    if args.resume_from and args.resume_from.lower() not in ("auto", "latest") and os.path.exists(args.resume_from):
+        search_roots.append(args.resume_from)
+    default_c_root = os.path.join(working_runs, "moss", args.lora_name, "checkpoints")
+    if os.path.exists(default_c_root):
+        search_roots.append(default_c_root)
+    if os.path.exists("/kaggle/input"):
+        for r, d, files in os.walk("/kaggle/input"):
+            if "state.json" in files and "trainable.safetensors" in files:
+                search_roots.append(r)
+
+    for sr in search_roots:
+        if os.path.isfile(os.path.join(sr, "state.json")) and os.path.isfile(os.path.join(sr, "trainable.safetensors")):
+            try:
+                st = json.loads(Path(os.path.join(sr, "state.json")).read_text(encoding="utf-8"))
+                ckpt_candidates.append((int(st.get("step", 0)), sr))
+            except Exception:
+                ckpt_candidates.append((0, sr))
+        elif os.path.isdir(sr):
+            for sub in glob.glob(os.path.join(sr, "step_*")):
+                if os.path.isfile(os.path.join(sub, "state.json")) and os.path.isfile(os.path.join(sub, "trainable.safetensors")):
+                    try:
+                        st = json.loads(Path(os.path.join(sub, "state.json")).read_text(encoding="utf-8"))
+                        ckpt_candidates.append((int(st.get("step", 0)), sub))
+                    except Exception:
+                        ckpt_candidates.append((0, sub))
+
+    if ckpt_candidates:
+        ckpt_candidates.sort(key=lambda x: x[0])
+        resumed_step, chosen_ckpt = ckpt_candidates[-1]
+        l_info = _inspect_safetensors(os.path.join(chosen_ckpt, "trainable.safetensors"))
+        if l_info.get("rank") and l_info["rank"] != args.rank:
+            print(f" [Resume Auto-Align] Aligned Rank {args.rank} -> {l_info['rank']}")
+            args.rank = l_info["rank"]
+            if l_info.get("alpha"):
+                args.alpha = l_info["alpha"]
+        resume_cfg_str = f'RESUME = "{Path(chosen_ckpt).as_posix()}"'
+        if args.steps <= resumed_step:
+            effective_steps = resumed_step + args.steps
+            print(f" [Resume Auto-Extend] Checkpoint at step {resumed_step} (>= {args.steps}). Extended target STEPS = {effective_steps}!")
+        else:
+            print(f" [Resume] Resuming from {chosen_ckpt} (step {resumed_step} -> {effective_steps})")
+    else:
+        print(" [Resume Fallback] No checkpoint dir found. Falling back to INIT_FROM mode...")
+        train_mode = "init_from"
+
+if train_mode == "init_from":
+    chosen_sf = None
+    if args.init_from and os.path.exists(args.init_from):
+        if os.path.isfile(args.init_from):
+            chosen_sf = args.init_from
+        elif os.path.isdir(args.init_from):
+            sfs = glob.glob(os.path.join(args.init_from, "*.safetensors"))
+            if sfs:
+                chosen_sf = sorted(sfs, key=os.path.getmtime, reverse=True)[0]
+    if not chosen_sf:
+        # 自动从 /kaggle/working/output 或 /kaggle/input 搜索已训练好的 LoRA .safetensors
+        cand_sfs = glob.glob(f"/kaggle/working/output/{args.lora_name}/*.safetensors") + \
+                   glob.glob("/kaggle/input/**/*.safetensors", recursive=True)
+        cand_sfs = [
+            f for f in cand_sfs
+            if "moss_image" not in os.path.basename(f).lower()
+            and "qwen" not in os.path.basename(f).lower()
+            and "flux2" not in os.path.basename(f).lower()
+        ]
+        if cand_sfs:
+            chosen_sf = sorted(cand_sfs, key=os.path.getmtime, reverse=True)[0]
+
+    if not chosen_sf:
+        raise FileNotFoundError("No existing .safetensors LoRA found for --train_mode=init_from!")
+
+    stage_init_dir = f"/tmp/init_from_stage/{args.lora_name}"
+    os.makedirs(stage_init_dir, exist_ok=True)
+    shutil.copy2(chosen_sf, os.path.join(stage_init_dir, "trainable.safetensors"))
+    l_info = _inspect_safetensors(chosen_sf)
+    if l_info.get("rank") and l_info["rank"] != args.rank:
+        print(f" [Init-From Auto-Align] Aligned Rank {args.rank} -> {l_info['rank']} from {chosen_sf}")
+        args.rank = l_info["rank"]
+        if l_info.get("alpha"):
+            args.alpha = l_info["alpha"]
+    init_from_cfg_str = f'INIT_FROM = "{stage_init_dir}"'
+    print(f" [Init-From] Continuing training from existing LoRA: {chosen_sf} (Rank={args.rank}, Alpha={args.alpha}, Steps={effective_steps})")
+
+# 8. 生成标准训练与数据配置 (与本地引擎完全对齐，注入分辨率、显存档位、架构变体、续炼与防 OOM 守卫)
 user_cfg_dir = os.path.join(trainer_dir, "configs", "user")
 os.makedirs(user_cfg_dir, exist_ok=True)
 
@@ -482,7 +649,8 @@ IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
 VAE_ENCODE = {{"compile": "off"}}
 """
 
-warmup_steps = min(30, max(1, int(args.steps * 0.05))) if args.steps > 5 else 0
+warmup_steps = min(30, max(1, int(effective_steps * 0.05))) if effective_steps > 5 else 0
+save_every_val = max(0, int(args.save_every))
 
 train_cfg_content = f"""
 from kohakuengine import use_config
@@ -495,6 +663,8 @@ RUN_NAME = "{args.lora_name}"
 TRANSFORMER = "{transformer_filename}"
 {base_prec_str}
 {memory_profile_str}
+{resume_cfg_str}
+{init_from_cfg_str}
 SAMPLE_EVERY = 0
 VALIDATE_EVERY = 0
 TUNE = "off"
@@ -502,9 +672,11 @@ FP16_FIX = "{fp16_fix_val}"
 PRECISION = "{effective_precision}"
 DIM = {args.rank}
 ALPHA = {args.alpha}
-STEPS = {args.steps}
+STEPS = {effective_steps}
 LR = {args.lr}
+SAVE_EVERY = {save_every_val}
 SAVE_MINUTES = 25
+KEEP_LAST = 5
 SAVE_FORMAT = "both"
 SCHEDULE = {{
     "mode": "cosine",
@@ -549,18 +721,9 @@ with open(data_cfg_file, "w", encoding="utf-8") as f:
     f.write(sanitized_cfg.strip() + "\n")
 print("Sanitization complete! Knobs TEXT_ENCODER_KWARGS and IMAGE_ENCODER_KWARGS physically removed.")
 
-# 9.8 实时重定向与软链接：确保所有生成的 checkpoints 实时写入 /kaggle/working/runs
-working_runs = "/kaggle/working/runs"
-os.makedirs(working_runs, exist_ok=True)
-trainer_runs = os.path.join(trainer_dir, "runs")
-if os.path.exists(trainer_runs) and not os.path.islink(trainer_runs):
-    shutil.rmtree(trainer_runs)
-if not os.path.exists(trainer_runs):
-    os.symlink(working_runs, trainer_runs)
-    print(f"Created real-time runs symlink: {trainer_runs} -> {working_runs}")
-
 # 10. 启动核心 LoRA 深度训练
-print(f"\n>>> Starting {args.steps}-step Deep LoRA Training Loop: '{args.lora_name}' (Variant={selected_variant.upper()}, VRAM={effective_preset}, Res={args.resolution})...")
+os.environ["KOHAKUMOSS_PAUSE_FILE"] = "/tmp/.pause_request"
+print(f"\n>>> Starting {effective_steps}-step Deep LoRA Training Loop: '{args.lora_name}' (Mode={train_mode.upper()}, Variant={selected_variant.upper()}, VRAM={effective_preset}, Res={args.resolution})...")
 start_time = time.time()
 train_cmd = [
     "kogine", "run", "scripts/train/moss.py",
@@ -569,16 +732,17 @@ train_cmd = [
 print("Executing command:", " ".join(train_cmd))
 subprocess.run(train_cmd, check=True)
 elapsed = time.time() - start_time
-print(f" [OK] Core training completed in {elapsed / 60:.2f} minutes ({elapsed / max(1, args.steps):.2f} s/step)!")
+print(f" [OK] Core training completed in {elapsed / 60:.2f} minutes ({elapsed / max(1, effective_steps - resumed_step):.2f} s/step)!")
 
 # 11. 智能检索所有生成的 .safetensors 权重并归档打包
 print("\n>>> Locating and packaging all generated .safetensors weights...")
 output_lora_dir = f"/kaggle/working/output/{args.lora_name}"
 os.makedirs(output_lora_dir, exist_ok=True)
 
-safetensors_files = glob.glob(f"{trainer_dir}/**/runs/**/*.safetensors", recursive=True) + \
-                    glob.glob(f"{trainer_dir}/**/checkpoints/**/*.safetensors", recursive=True) + \
-                    glob.glob("/kaggle/working/runs/**/*.safetensors", recursive=True)
+safetensors_files = glob.glob(f"{working_runs}/moss/{args.lora_name}/**/*.safetensors", recursive=True)
+if not safetensors_files:
+    safetensors_files = glob.glob(f"{trainer_dir}/**/runs/**/*.safetensors", recursive=True) + \
+                        glob.glob("/kaggle/working/runs/**/*.safetensors", recursive=True)
 
 safetensors_files = [
     f for f in set(safetensors_files)
@@ -599,6 +763,8 @@ for sf in safetensors_files:
         dest_name = f"{args.lora_name}-comfy.safetensors"
     elif "-lycoris" in sf_lower or fname.endswith("_lycoris.safetensors"):
         dest_name = f"{args.lora_name}-lycoris.safetensors"
+    elif fname == "trainable.safetensors":
+        dest_name = f"{args.lora_name}-trainable.safetensors"
     else:
         dest_name = fname
     dest = os.path.join(output_lora_dir, dest_name)
@@ -607,8 +773,10 @@ for sf in safetensors_files:
 
 summary_data = {
     "lora_name": args.lora_name,
+    "train_mode": train_mode,
     "trigger_word": args.trigger_word if args.trigger_word else "(None)",
-    "steps": args.steps,
+    "steps": effective_steps,
+    "resumed_from_step": resumed_step,
     "repeats": args.repeats,
     "epochs": args.epochs,
     "rank": args.rank,

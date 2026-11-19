@@ -88,6 +88,21 @@ class ModernLocalTrainerGUI:
         self.var_text_device = tk.StringVar(value="cpu")
         self.var_vae_device = tk.StringVar(value="cuda")
 
+        # 续炼与进度恢复相关状态变量
+        self.train_mode_map = {
+            "全新训练 (从头开始)": "fresh",
+            "断点续炼 (接着上次暂停或已有进度继续)": "resume",
+            "基于已有 LoRA 继续训练 (加载 .safetensors 二阶段微调)": "init_from"
+        }
+        self.train_mode_rev_map = {v: k for k, v in self.train_mode_map.items()}
+        saved_mode_code = local_cfg.get("train_mode", "fresh")
+        default_mode_label = self.train_mode_rev_map.get(saved_mode_code, "全新训练 (从头开始)")
+        self.var_train_mode_label = tk.StringVar(value=default_mode_label)
+        self.var_resume_path = tk.StringVar(value=local_cfg.get("resume_path", ""))
+        self.var_save_every = tk.IntVar(value=int(local_cfg.get("save_every", 100)))
+        self.var_resume_status = tk.StringVar(value="正在检测历史训练进度...")
+        self.pause_requested = False
+
         self.var_dataset_stat = tk.StringVar(value="未检测")
         self.var_calc_stat = tk.StringVar(value="曝光计算：就绪")
         self.var_output_preview = tk.StringVar(value="")
@@ -97,6 +112,7 @@ class ModernLocalTrainerGUI:
         self.recalculate_math()
         self.update_output_preview()
         self.check_trainer_status()
+        self.refresh_resume_status()
 
         # 动态分配初始左右分栏位置，确保左侧控制区充足不被挤压
         self.root.update_idletasks()
@@ -108,8 +124,9 @@ class ModernLocalTrainerGUI:
         # 启动时执行一次静默自动底模探测并预填
         self.auto_scan_models(silent=True)
 
-        # 监听名称变动实时刷新产出路径预览
-        self.var_lora_name.trace_add("write", lambda *args: self.update_output_preview())
+        # 监听名称变动实时刷新产出路径预览与历史断点状态
+        self.var_lora_name.trace_add("write", lambda *args: (self.update_output_preview(), self.refresh_resume_status()))
+        self.var_resume_path.trace_add("write", lambda *args: self.refresh_resume_status())
 
     def load_local_config(self) -> dict:
         """从本地私有配置文件读取用户历史偏好路径（该文件不入 Git）。"""
@@ -125,6 +142,7 @@ class ModernLocalTrainerGUI:
         """将当前用户选定的本地路径记忆到本地私有配置文件中。"""
         try:
             import json
+            mode_code = self.train_mode_map.get(self.var_train_mode_label.get(), "fresh")
             cfg = {
                 "data_dir": self.var_data_dir.get(),
                 "comfy_models_dir": self.var_comfy_models.get(),
@@ -132,7 +150,10 @@ class ModernLocalTrainerGUI:
                 "lora_name": self.var_lora_name.get(),
                 "trigger_word": self.var_trigger_word.get(),
                 "vram_preset": self.var_vram_preset.get(),
-                "resolution": self.var_resolution.get()
+                "resolution": self.var_resolution.get(),
+                "train_mode": mode_code,
+                "resume_path": self.var_resume_path.get(),
+                "save_every": self.var_save_every.get()
             }
             self.config_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
@@ -318,6 +339,67 @@ class ModernLocalTrainerGUI:
         lbl_preview = tk.Label(name_card, textvariable=self.var_output_preview, bg=self.card_bg, fg=self.accent_green,
                                font=(self.font_family, 8), wraplength=480, justify=tk.LEFT)
         lbl_preview.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
+
+        # 2.5 续炼与进度恢复卡片 (支持中途暂停断点续炼 / 已训练结束的 LoRA 继续训练)
+        resume_card = tk.LabelFrame(parent, text=" 🔄 续炼与进度恢复 (支持中途断点续炼 / 已完工 LoRA 继续训练) ", bg=self.card_bg, fg=self.accent_blue,
+                                    font=(self.font_family, 9, "bold"), padx=10, pady=6)
+        resume_card.pack(fill=tk.X, pady=(0, 6))
+
+        rm_row0 = tk.Frame(resume_card, bg=self.card_bg)
+        rm_row0.pack(fill=tk.X, pady=2)
+        tk.Label(rm_row0, text="训练/续炼模式:", bg=self.card_bg, fg=self.text_main, width=15, anchor="w").pack(side=tk.LEFT)
+        cb_tmode = ttk.Combobox(
+            rm_row0,
+            textvariable=self.var_train_mode_label,
+            values=list(self.train_mode_map.keys()),
+            state="readonly",
+            width=36
+        )
+        cb_tmode.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 4))
+        cb_tmode.bind("<<ComboboxSelected>>", lambda e: (self.refresh_resume_status(), self.save_local_config()))
+
+        btn_chk_prog = tk.Button(
+            rm_row0, text="🔍 检测进度", bg="#313244", fg=self.accent_blue,
+            relief=tk.FLAT, font=(self.font_family, 8, "bold"), cursor="hand2", padx=6, pady=1,
+            command=self.refresh_resume_status
+        )
+        btn_chk_prog.pack(side=tk.RIGHT)
+
+        rm_row1 = tk.Frame(resume_card, bg=self.card_bg)
+        rm_row1.pack(fill=tk.X, pady=(4, 2))
+        tk.Label(rm_row1, text="指定已有 LoRA / 断点 (留空则自动匹配当前名称最新进度):",
+                 bg=self.card_bg, fg=self.text_main, font=(self.font_family, 8, "bold"), anchor="w").pack(side=tk.LEFT)
+
+        btn_pick_ckpt = tk.Button(
+            rm_row1, text="📂 选断点目录", bg="#313244", fg=self.accent_green,
+            relief=tk.FLAT, font=(self.font_family, 8), cursor="hand2", padx=6, pady=1,
+            command=self.browse_resume_ckpt_dir
+        )
+        btn_pick_ckpt.pack(side=tk.RIGHT, padx=(3, 0))
+
+        btn_pick_lora = tk.Button(
+            rm_row1, text="📁 选已训 LoRA (.safetensors)", bg=self.accent_blue, fg="#11111b",
+            relief=tk.FLAT, font=(self.font_family, 8, "bold"), cursor="hand2", padx=6, pady=1,
+            command=self.browse_existing_lora_file
+        )
+        btn_pick_lora.pack(side=tk.RIGHT)
+
+        ent_resume_p = tk.Entry(resume_card, textvariable=self.var_resume_path, bg=self.input_bg, fg=self.text_main,
+                                insertbackground=self.text_main, font=(self.font_family, 8))
+        ent_resume_p.pack(fill=tk.X, pady=(0, 3))
+
+        rm_row2 = tk.Frame(resume_card, bg=self.card_bg)
+        rm_row2.pack(fill=tk.X, pady=2)
+        tk.Label(rm_row2, text="自动存盘步数间隔:", bg=self.card_bg, fg=self.text_main, width=15, anchor="w").pack(side=tk.LEFT)
+        sp_save_ev = tk.Spinbox(rm_row2, from_=10, to=2000, increment=10, textvariable=self.var_save_every, width=7,
+                                bg=self.input_bg, fg=self.text_main, command=self.save_local_config)
+        sp_save_ev.pack(side=tk.LEFT, padx=(4, 6))
+        tk.Label(rm_row2, text="步/次 (训练中可随时点右侧【⏸️ 保存当前进度并暂停】即时存盘)",
+                 bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
+
+        lbl_rstat = tk.Label(resume_card, textvariable=self.var_resume_status, bg=self.card_bg, fg=self.accent_yellow,
+                             font=(self.font_family, 8), wraplength=480, justify=tk.LEFT)
+        lbl_rstat.pack(fill=tk.X, pady=(2, 0))
 
         # 3. 训练底模与组件权重设置卡片
         model_card = tk.LabelFrame(parent, text=" 📦 训练底模与组件权重设置 (支持自选或自动探测) ", bg=self.card_bg, fg=self.accent_blue,
@@ -759,10 +841,132 @@ class ModernLocalTrainerGUI:
                                    relief=tk.FLAT, pady=7, cursor="hand2", command=self.start_training)
         self.btn_start.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
-        self.btn_stop = tk.Button(btn_bar, text="⏹ 终止训练", bg="#c62828", fg="white",
-                                  activebackground="#d32f2f", font=(self.font_family, 10, "bold"),
+        self.btn_pause = tk.Button(btn_bar, text="⏸️ 保存当前进度并暂停", bg="#d97706", fg="white",
+                                   activebackground="#b45309", font=(self.font_family, 9, "bold"),
+                                   relief=tk.FLAT, pady=7, state=tk.DISABLED, cursor="hand2",
+                                   command=self.pause_and_save_training)
+        self.btn_pause.pack(side=tk.LEFT, padx=4, ipadx=10)
+
+        self.btn_stop = tk.Button(btn_bar, text="⏹ 强制终止", bg="#c62828", fg="white",
+                                  activebackground="#d32f2f", font=(self.font_family, 9, "bold"),
                                   relief=tk.FLAT, pady=7, state=tk.DISABLED, cursor="hand2", command=self.stop_training)
-        self.btn_stop.pack(side=tk.RIGHT, padx=(4, 0), ipadx=14)
+        self.btn_stop.pack(side=tk.RIGHT, padx=(4, 0), ipadx=10)
+
+    # 续炼与进度恢复辅助方法
+    def browse_existing_lora_file(self):
+        init_dir = self.var_output_dir.get() if os.path.exists(self.var_output_dir.get()) else "."
+        selected = filedialog.askopenfilename(
+            initialdir=init_dir,
+            title="选择已训练结束的 LoRA 权重文件 (.safetensors) 以继续训练",
+            filetypes=[("Safetensors LoRA 权重", "*.safetensors"), ("所有文件", "*.*")]
+        )
+        if selected:
+            self.var_resume_path.set(selected)
+            self.var_train_mode_label.set(self.train_mode_rev_map["init_from"])
+            self.refresh_resume_status(align_hyperparams=True)
+            self.save_local_config()
+
+    def browse_resume_ckpt_dir(self):
+        trainer_runs = Path("./KohakuMossTrainer/runs/moss").resolve()
+        init_dir = str(trainer_runs) if trainer_runs.exists() else "."
+        selected = filedialog.askdirectory(
+            initialdir=init_dir,
+            title="选择训练断点目录 (如 step_00000310 或 checkpoints 目录)"
+        )
+        if selected:
+            self.var_resume_path.set(selected)
+            self.var_train_mode_label.set(self.train_mode_rev_map["resume"])
+            self.refresh_resume_status(align_hyperparams=True)
+            self.save_local_config()
+
+    def refresh_resume_status(self, align_hyperparams=False):
+        """实时探测当前 LoRA 名称或自选路径下的历史断点与已完工 .safetensors 权重。"""
+        try:
+            import train_local
+            mode_code = self.train_mode_map.get(self.var_train_mode_label.get(), "fresh")
+            lora_name = self.var_lora_name.get().strip() or "my_lora"
+            trainer_dir = Path("./KohakuMossTrainer").resolve()
+            out_dir = Path(self.var_output_dir.get()).resolve()
+            custom_p = self.var_resume_path.get().strip()
+
+            ckpts = train_local.list_lora_checkpoints(trainer_dir, lora_name, custom_p if (mode_code == "resume" and custom_p) else "")
+
+            # 查找是否有已导出的 .safetensors
+            existing_sf = None
+            if custom_p and os.path.isfile(custom_p) and custom_p.lower().endswith(".safetensors"):
+                existing_sf = Path(custom_p)
+            else:
+                lora_out_folder = out_dir / lora_name
+                if lora_out_folder.exists():
+                    for cand_name in [f"{lora_name}-comfy.safetensors", f"{lora_name}-lycoris.safetensors", f"{lora_name}-trainable.safetensors"]:
+                        if (lora_out_folder / cand_name).exists():
+                            existing_sf = lora_out_folder / cand_name
+                            break
+
+            if mode_code == "fresh":
+                if ckpts:
+                    last_step, last_dir = ckpts[-1]
+                    self.var_resume_status.set(
+                        f"💡 检测到 [{lora_name}] 已有历史进度 ({last_dir.name}, 已完成 {last_step} 步)。"
+                        f"当前为【全新训练】(启动时将自动备份旧断点并从0开始)；若想接着练请切换上方模式为【断点续炼】或【基于已有 LoRA 继续训练】。"
+                    )
+                elif existing_sf:
+                    info = train_local.inspect_safetensors_lora(existing_sf)
+                    self.var_resume_status.set(
+                        f"💡 检测到 [{lora_name}] 已有完工权重 {existing_sf.name} (Rank={info.get('rank')})。"
+                        f"当前为【全新训练】；若想在该 LoRA 基础上加练，请切换为【基于已有 LoRA 继续训练】。"
+                    )
+                else:
+                    self.var_resume_status.set("模式状态: 全新训练 (将从 Step 0 全新开始训练)")
+
+            elif mode_code == "resume":
+                if ckpts:
+                    last_step, last_dir = ckpts[-1]
+                    t_sf = last_dir / "trainable.safetensors"
+                    r_str = ""
+                    if t_sf.exists():
+                        info = train_local.inspect_safetensors_lora(t_sf)
+                        if info.get("rank"):
+                            r_str = f", Rank={info['rank']}"
+                            if align_hyperparams:
+                                self.var_rank.set(info["rank"])
+                                if info.get("alpha"):
+                                    self.var_alpha.set(info["alpha"])
+                    self.var_resume_status.set(
+                        f"✅ 已锁定断点: {last_dir.name} (已训 {last_step} 步{r_str})。"
+                        f"若下方【核心步数】> {last_step} 则补齐剩余步数；若 <= {last_step} (如填 200) 将自动作为【追加步数】顺延训练至 {last_step} + N 步！"
+                    )
+                elif existing_sf:
+                    info = train_local.inspect_safetensors_lora(existing_sf)
+                    self.var_resume_status.set(
+                        f"✅ 未找到中间断点目录，已自动回退匹配完工权重: {existing_sf.name} (Rank={info.get('rank')})，将在此权重基础上继续训练！"
+                    )
+                else:
+                    self.var_resume_status.set(
+                        f"⚠️ 未检测到 [{lora_name}] 的历史断点！请点击【📂 选断点目录】或【📁 选已训 LoRA】，或先切换回【全新训练】。"
+                    )
+
+            elif mode_code == "init_from":
+                target_sf = existing_sf
+                if not target_sf and ckpts:
+                    target_sf = ckpts[-1][1] / "trainable.safetensors"
+                if target_sf and target_sf.exists():
+                    info = train_local.inspect_safetensors_lora(target_sf)
+                    if info.get("rank"):
+                        self.var_rank.set(info["rank"])
+                    if info.get("alpha"):
+                        self.var_alpha.set(info["alpha"])
+                    step_tag = f"原步数 {info['step']}, " if info.get("step") else ""
+                    self.var_resume_status.set(
+                        f"✅ 已加载基底 LoRA: {target_sf.name} ({step_tag}已自动对齐 Rank={info.get('rank')}, Alpha={info.get('alpha')})。"
+                        f"将以全新学习率周期在该权重基础上继续训练下方设定的【核心步数】！"
+                    )
+                else:
+                    self.var_resume_status.set(
+                        "⚠️ 请点击上方【📁 选已训 LoRA (.safetensors)】选择一个已训练完成的 LoRA 权重文件作为继续训练的起点！"
+                    )
+        except Exception as e:
+            self.var_resume_status.set(f"进度检测提示: {e}")
 
     # 路径浏览与检测
     def browse_data_dir(self):
@@ -872,6 +1076,35 @@ class ModernLocalTrainerGUI:
         if not lora_name_clean:
             lora_name_clean = "my_lora"
 
+        mode_code = self.train_mode_map.get(self.var_train_mode_label.get(), "fresh")
+        custom_resume_p = self.var_resume_path.get().strip()
+
+        # 若用户在 fresh 模式下发现已有历史断点，友好询问是要全新覆盖还是断点续炼
+        if mode_code == "fresh":
+            try:
+                import train_local
+                existing_ckpts = train_local.list_lora_checkpoints(trainer_dir, lora_name_clean)
+                if existing_ckpts:
+                    last_s, last_d = existing_ckpts[-1]
+                    ans = messagebox.askyesnocancel(
+                        "发现已有训练进度",
+                        f"检测到【{lora_name_clean}】已有历史断点 {last_d.name} (已完成 {last_s} 步)！\n\n"
+                        f"• 点击【是 (Yes)】：自动切换为【断点续炼】接着第 {last_s} 步继续训练（推荐）；\n"
+                        f"• 点击【否 (No)】：备份旧断点，从第 0 步开始【全新训练】；\n"
+                        f"• 点击【取消 (Cancel)】：返回界面手动调整。"
+                    )
+                    if ans is None:
+                        return
+                    elif ans is True:
+                        mode_code = "resume"
+                        self.var_train_mode_label.set(self.train_mode_rev_map["resume"])
+                        self.refresh_resume_status(align_hyperparams=True)
+            except Exception:
+                pass
+
+        self.save_local_config()
+        self.pause_requested = False
+
         cmd = [
             sys.executable, "-u", "train_local.py",
             "--data_dir", self.var_data_dir.get(),
@@ -889,9 +1122,22 @@ class ModernLocalTrainerGUI:
             "--vram_preset", self.var_vram_preset.get(),
             "--resolution", str(self.var_resolution.get()),
             "--variant", "auto",
+            "--train_mode", mode_code,
+            "--save_every", str(self.var_save_every.get()),
             "--text_device", self.var_text_device.get(),
             "--vae_device", self.var_vae_device.get()
         ]
+
+        if mode_code == "resume" and custom_resume_p:
+            if os.path.isfile(custom_resume_p) and custom_resume_p.lower().endswith(".safetensors"):
+                # 用户在 resume 模式下选了单个 .safetensors 文件，智能路由至 init_from
+                idx = cmd.index("--train_mode")
+                cmd[idx + 1] = "init_from"
+                cmd.extend(["--init_from", custom_resume_p])
+            else:
+                cmd.extend(["--resume_from", custom_resume_p])
+        elif mode_code == "init_from" and custom_resume_p:
+            cmd.extend(["--init_from", custom_resume_p])
 
         if self.var_transformer_path.get().strip():
             cmd.extend(["--transformer_path", self.var_transformer_path.get().strip()])
@@ -903,9 +1149,10 @@ class ModernLocalTrainerGUI:
         if self.var_copy_comfy.get():
             cmd.append("--copy_to_comfy_loras")
 
-        self.log(f"\n{'='*75}\n>>> 正在启动训练引擎...\n执行命令: {' '.join(cmd)}\n{'='*75}\n")
+        self.log(f"\n{'='*75}\n>>> 正在启动训练引擎 (模式: {mode_code.upper()})...\n执行命令: {' '.join(cmd)}\n{'='*75}\n")
         self.is_training = True
         self.btn_start.config(state=tk.DISABLED, bg="#45475a")
+        self.btn_pause.config(state=tk.NORMAL, text="⏸️ 保存当前进度并暂停", bg="#d97706")
         self.btn_stop.config(state=tk.NORMAL)
 
         threading.Thread(target=self.run_subprocess_worker, args=(cmd,), daemon=True).start()
@@ -935,9 +1182,33 @@ class ModernLocalTrainerGUI:
             self.root.after(0, self.log, f"\n[异常退出] 执行失败: {e}\n")
             self.root.after(0, self.training_finished, -1)
 
+    def pause_and_save_training(self):
+        """在当前训练步完成时，立即触发完整 Checkpoint 保存、导出当前版本 LoRA 并安全暂停退出。"""
+        if not self.current_process or not self.is_training:
+            return
+        workspace_dir = Path("./workspace").resolve()
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        pause_flag_file = workspace_dir / ".pause_request"
+        try:
+            pause_flag_file.write_text("pause", encoding="utf-8")
+            self.pause_requested = True
+            self.btn_pause.config(state=tk.DISABLED, text="⏳ 正在保存当前步...", bg="#45475a")
+            self.log(
+                f"\n{'='*75}\n"
+                f">>> [保存并暂停] 已向训练内核发送即时存盘指令！\n"
+                f">>> 系统将在当前训练步（约 5~8 秒内）完成后，自动保存完整断点并导出截止至当前的 LoRA 权重，请稍候...\n"
+                f"{'='*75}\n"
+            )
+        except Exception as e:
+            messagebox.showerror("暂停异常", f"无法写入暂停信号文件: {e}")
+
     def stop_training(self):
         if self.current_process and self.is_training:
-            reply = messagebox.askyesno("确认终止", "确定要强制中断当前正在运行的训练进程吗？")
+            reply = messagebox.askyesno(
+                "确认强制终止",
+                "确定要立刻强制杀死训练进程吗？\n\n"
+                "💡 提示：如果您希望【保存当前正在训练的步数进度】以便稍后继续训练，请点击【否】改用旁边的橙色按钮【⏸️ 保存当前进度并暂停】！"
+            )
             if reply:
                 pid = self.current_process.pid
                 self.log(f"\n[用户操作] 正在强制级联终止训练进程树 (PID: {pid})...\n")
@@ -957,6 +1228,24 @@ class ModernLocalTrainerGUI:
                 except Exception:
                     pass
 
+                # 兜底回收强杀前已存盘的阶段性 checkpoint 权重至 output/<lora_name>
+                try:
+                    import train_local
+                    lora_name = self.var_lora_name.get().strip() or "my_lora"
+                    dest_dir = Path(self.var_output_dir.get()) / lora_name
+                    files, latest_s = train_local.export_and_sync_weights(
+                        Path("./KohakuMossTrainer").resolve(),
+                        lora_name,
+                        dest_dir,
+                        self.var_comfy_models.get(),
+                        self.var_copy_comfy.get(),
+                        quiet=True
+                    )
+                    if latest_s > 0:
+                        self.log(f"[自动抢救] 已将强制终止前最新保存的第 {latest_s} 步权重同步至: {dest_dir}\n")
+                except Exception:
+                    pass
+
                 self.log("[用户操作] 训练进程树已全部强制中断，GPU 与内存资源已安全释放。\n")
                 self.root.after(0, self.training_finished, -9)
 
@@ -964,14 +1253,31 @@ class ModernLocalTrainerGUI:
         self.is_training = False
         self.current_process = None
         self.btn_start.config(state=tk.NORMAL, bg="#2e7d32")
+        self.btn_pause.config(state=tk.DISABLED, text="⏸️ 保存当前进度并暂停", bg="#d97706")
         self.btn_stop.config(state=tk.DISABLED)
+        self.refresh_resume_status()
 
         if return_code == 0:
             lora_name = self.var_lora_name.get().strip() or "my_lora"
             dest_dir = Path(self.var_output_dir.get()) / lora_name
-            self.log(f"\n{'='*75}\n>>> [成功] 本地训练已圆满完成！权重已归档至专属子文件夹: {dest_dir} <<<\n{'='*75}\n")
-            messagebox.showinfo("训练成功", f"LoRA 训练已圆满完成！\n专属产出文件夹:\n{dest_dir}\n包含: {lora_name}-comfy.safetensors 等。")
+            if self.pause_requested:
+                self.pause_requested = False
+                # 自动将模式切换为【断点续炼】，方便用户下次打开直接点击启动继续训练
+                self.var_train_mode_label.set(self.train_mode_rev_map["resume"])
+                self.refresh_resume_status()
+                self.save_local_config()
+                self.log(f"\n{'='*75}\n>>> [已保存并暂停] 截止至当前步数的断点与 LoRA 权重已完整归档至: {dest_dir} <<<\n{'='*75}\n")
+                messagebox.showinfo(
+                    "已保存当前进度并暂停",
+                    f"训练已安全暂停，截止至当前步数的 LoRA 权重已导出至：\n{dest_dir}\n\n"
+                    f"• 您现在可以直接在 ComfyUI 中测试当前版本的生图效果；\n"
+                    f"• 界面已自动为您切换为【断点续炼】模式，之后随时点击【🚀 启动本地极速训练】即可无缝接着当前步数继续！"
+                )
+            else:
+                self.log(f"\n{'='*75}\n>>> [成功] 本地训练已圆满完成！权重已归档至专属子文件夹: {dest_dir} <<<\n{'='*75}\n")
+                messagebox.showinfo("训练成功", f"LoRA 训练已圆满完成！\n专属产出文件夹:\n{dest_dir}\n包含: {lora_name}-comfy.safetensors 及各阶段 checkpoints。")
         else:
+            self.pause_requested = False
             self.log(f"\n>>> [提示] 训练进程已结束，退出码: {return_code} <<<\n")
 
 if __name__ == "__main__":

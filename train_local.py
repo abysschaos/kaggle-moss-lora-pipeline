@@ -247,6 +247,304 @@ def apply_compatibility_patches(trainer_dir: Path):
         except Exception as e:
             print(f" Warning patching objective.py: {e}")
 
+    # 4. 为 native.py 注入【随时保存当前进度并优雅暂停】钩子 (KOHAKUMOSS_PAUSE_FILE)
+    native_driver_file = trainer_dir / "src" / "kohakumoss" / "training" / "drivers" / "native.py"
+    if native_driver_file.exists():
+        try:
+            content = native_driver_file.read_text(encoding="utf-8")
+            if "KOHAKUMOSS_PAUSE_FILE" not in content:
+                target_line = "finish_step(state, group, bundle, ema, self.runner, out)"
+                pause_hook = (
+                    "finish_step(state, group, bundle, ema, self.runner, out)\n"
+                    "            import os as _os\n"
+                    "            _pfile = _os.environ.get('KOHAKUMOSS_PAUSE_FILE', '')\n"
+                    "            if _pfile and _os.path.exists(_pfile):\n"
+                    "                try:\n"
+                    "                    _os.remove(_pfile)\n"
+                    "                except Exception:\n"
+                    "                    pass\n"
+                    "                print(f'\\n[Pause & Save] Detected user pause request at step {state.step}! Saving checkpoint and exporting current weights...', flush=True)\n"
+                    "                self.checkpoints.save(state.step, self.parts(state))\n"
+                    "                break"
+                )
+                if target_line in content:
+                    patched = content.replace(target_line, pause_hook, 1)
+                    native_driver_file.write_text(patched, encoding="utf-8")
+                    print(" [OK] Injected graceful Pause & Save hook into drivers/native.py.")
+        except Exception as e:
+            print(f" Warning patching native.py: {e}")
+
+
+def inspect_safetensors_lora(sf_path: Path) -> dict:
+    """秒级解析 .safetensors 文件头，提取真实 Rank(Dim)、Alpha、训练步数与键数量（零显存占用）。"""
+    info = {"rank": None, "alpha": None, "step": None, "algo": "lora", "keys_count": 0, "path": str(sf_path)}
+    try:
+        import struct
+        with open(sf_path, "rb") as f:
+            header_size = struct.unpack("<Q", f.read(8))[0]
+            header = json.loads(f.read(header_size).decode("utf-8"))
+        meta = header.get("__metadata__", {}) or {}
+        tensor_keys = [k for k in header.keys() if k != "__metadata__"]
+        info["keys_count"] = len(tensor_keys)
+
+        # 1. 从 metadata 读取
+        if "ss_network_dim" in meta:
+            try:
+                info["rank"] = int(float(meta["ss_network_dim"]))
+            except Exception:
+                pass
+        if "ss_network_alpha" in meta:
+            try:
+                info["alpha"] = float(meta["ss_network_alpha"])
+            except Exception:
+                pass
+        if "kohakumoss_step" in meta:
+            try:
+                info["step"] = int(meta["kohakumoss_step"])
+            except Exception:
+                pass
+        if "kohakumoss_spec" in meta:
+            try:
+                spec = json.loads(meta["kohakumoss_spec"])
+                if info["rank"] is None and "dim" in spec:
+                    info["rank"] = int(spec["dim"])
+                if info["alpha"] is None and "alpha" in spec:
+                    info["alpha"] = float(spec["alpha"])
+            except Exception:
+                pass
+
+        # 2. 从 lora_down.weight 的实际张量形状兜底推断真实 Rank
+        if info["rank"] is None:
+            for k in tensor_keys:
+                if k.endswith(".lora_down.weight"):
+                    shape = header[k].get("shape", [])
+                    if len(shape) >= 2:
+                        info["rank"] = int(shape[0])
+                        break
+        if info["alpha"] is None and info["rank"] is not None:
+            info["alpha"] = float(info["rank"])
+    except Exception as e:
+        print(f" Warning inspecting safetensors {sf_path}: {e}")
+    return info
+
+
+def list_lora_checkpoints(trainer_dir: Path, lora_name: str, custom_dir: str = "") -> list:
+    """
+    检索指定 LoRA 的所有完整断点目录 (同时具备 state.json 与 trainable.safetensors)。
+    返回按步数升序排列的 [(step_num, ckpt_path), ...] 列表。
+    """
+    candidates = []
+    search_roots = []
+    if custom_dir and os.path.exists(custom_dir):
+        cpath = Path(custom_dir).resolve()
+        if (cpath / "state.json").exists() and (cpath / "trainable.safetensors").exists():
+            try:
+                st = json.loads((cpath / "state.json").read_text(encoding="utf-8"))
+                return [(int(st.get("step", 0)), cpath)]
+            except Exception:
+                return [(0, cpath)]
+        search_roots.append(cpath)
+
+    default_ckpt_root = trainer_dir / "runs" / "moss" / lora_name / "checkpoints"
+    if default_ckpt_root.exists() and default_ckpt_root not in search_roots:
+        search_roots.append(default_ckpt_root)
+
+    for root in search_roots:
+        for p in root.glob("step_*"):
+            if p.is_dir() and (p / "state.json").exists() and (p / "trainable.safetensors").exists():
+                try:
+                    st = json.loads((p / "state.json").read_text(encoding="utf-8"))
+                    step_val = int(st.get("step", 0))
+                except Exception:
+                    m = re.search(r"step_(\d+)", p.name)
+                    step_val = int(m.group(1)) if m else 0
+                candidates.append((step_val, p))
+
+    candidates.sort(key=lambda x: x[0])
+    return candidates
+
+
+def prepare_init_from_checkpoint(source_path_str: str, workspace_dir: Path, lora_name: str, base_output_dir: Path, trainer_dir: Path) -> tuple:
+    """
+    将已训练结束的 LoRA (.safetensors 单文件或目录) 包装为 KohakuMossTrainer INIT_FROM 所需的目录结构。
+    返回 (staged_init_dir, lora_info_dict)。
+    """
+    chosen_sf = None
+    if source_path_str and os.path.exists(source_path_str):
+        sp = Path(source_path_str).resolve()
+        if sp.is_file() and sp.suffix.lower() == ".safetensors":
+            chosen_sf = sp
+        elif sp.is_dir():
+            if (sp / "trainable.safetensors").exists():
+                chosen_sf = sp / "trainable.safetensors"
+            else:
+                sfs = sorted(sp.glob("*.safetensors"), key=lambda x: x.stat().st_mtime, reverse=True)
+                if sfs:
+                    chosen_sf = sfs[0]
+    else:
+        # 自动从 output/<lora_name> 或 runs/moss/<lora_name> 检索已训好的最新权重
+        auto_candidates = []
+        out_folder = base_output_dir / lora_name
+        if out_folder.exists():
+            auto_candidates.extend(out_folder.glob("*.safetensors"))
+        run_folder = trainer_dir / "runs" / "moss" / lora_name
+        if run_folder.exists():
+            auto_candidates.extend(run_folder.rglob("*.safetensors"))
+        auto_candidates = [
+            f for f in auto_candidates
+            if "moss_image" not in f.name.lower() and "qwen" not in f.name.lower() and "flux2" not in f.name.lower()
+        ]
+        if auto_candidates:
+            auto_candidates.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+            chosen_sf = auto_candidates[0]
+
+    if not chosen_sf or not chosen_sf.exists():
+        raise FileNotFoundError(
+            f"未找到可用于继续训练 (init_from) 的已有 LoRA 权重文件！请确认路径或先选择一个已训练的 .safetensors 文件。"
+        )
+
+    stage_dir = workspace_dir / "init_from_stage" / lora_name
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    target_trainable = stage_dir / "trainable.safetensors"
+    if target_trainable.exists():
+        target_trainable.unlink()
+    shutil.copy2(str(chosen_sf), str(target_trainable))
+
+    info = inspect_safetensors_lora(chosen_sf)
+    info["source_file"] = str(chosen_sf)
+    return stage_dir, info
+
+
+def export_and_sync_weights(
+    trainer_dir: Path,
+    lora_name: str,
+    lora_dedicated_folder: Path,
+    comfy_models_dir: str = None,
+    copy_to_comfy: bool = False,
+    quiet: bool = False
+) -> tuple:
+    """
+    智能扫描当前 LoRA 运行目录下的所有阶段性与最终权重：
+    1. 将每个阶段 checkpoint (step_XXXXXXXX) 导出的权重归档至 output/<lora_name>/checkpoints/ 下留存；
+    2. 严格按步数与修改时间顺序，将最新一步的权重同步至 output/<lora_name>/<lora_name>-comfy.safetensors；
+    3. 若勾选了同步至 ComfyUI，实时更新 ComfyUI models/loras/<lora_name>/。
+    返回 (exported_main_files, latest_step_num)。
+    """
+    run_dir = trainer_dir / "runs" / "moss" / lora_name
+    if not run_dir.exists():
+        return [], 0
+
+    lora_dedicated_folder.mkdir(parents=True, exist_ok=True)
+    ckpt_archive_dir = lora_dedicated_folder / "checkpoints"
+
+    # 1. 收集所有阶段性 checkpoints 并按步数排序
+    step_records = []  # (step_num, mtime, comfy_file, lycoris_file, trainable_file)
+    ckpts_root = run_dir / "checkpoints"
+    if ckpts_root.exists():
+        for step_dir in ckpts_root.glob("step_*"):
+            if not step_dir.is_dir() or step_dir.name.endswith(".partial"):
+                continue
+            step_num = 0
+            st_file = step_dir / "state.json"
+            if st_file.exists():
+                try:
+                    step_num = int(json.loads(st_file.read_text(encoding="utf-8")).get("step", 0))
+                except Exception:
+                    pass
+            if step_num == 0:
+                m = re.search(r"step_(\d+)", step_dir.name)
+                step_num = int(m.group(1)) if m else 0
+
+            exp_dir = step_dir / "export"
+            comfy_f = None
+            lyco_f = None
+            if exp_dir.exists():
+                for sf in exp_dir.glob("*.safetensors"):
+                    if "-comfy" in sf.name.lower() or sf.stem.endswith("_comfy"):
+                        comfy_f = sf
+                    elif "-lycoris" in sf.name.lower() or sf.stem.endswith("_lycoris"):
+                        lyco_f = sf
+            train_f = step_dir / "trainable.safetensors"
+            if not train_f.exists():
+                train_f = None
+
+            if comfy_f or lyco_f or train_f:
+                ref_f = comfy_f or lyco_f or train_f
+                step_records.append((step_num, ref_f.stat().st_mtime, comfy_f, lyco_f, train_f))
+
+                # 同步阶段性权重到 output/<lora_name>/checkpoints/
+                ckpt_archive_dir.mkdir(parents=True, exist_ok=True)
+                if comfy_f:
+                    step_dst = ckpt_archive_dir / f"{lora_name}_step{step_num:06d}-comfy.safetensors"
+                    if not step_dst.exists() or comfy_f.stat().st_mtime > step_dst.stat().st_mtime + 1:
+                        shutil.copy2(str(comfy_f), str(step_dst))
+                if lyco_f:
+                    step_dst_ly = ckpt_archive_dir / f"{lora_name}_step{step_num:06d}-lycoris.safetensors"
+                    if not step_dst_ly.exists() or lyco_f.stat().st_mtime > step_dst_ly.stat().st_mtime + 1:
+                        shutil.copy2(str(lyco_f), str(step_dst_ly))
+
+    # 2. 检查顶层最终 export/ 目录
+    final_exp_dir = run_dir / "export"
+    if final_exp_dir.exists():
+        comfy_f = None
+        lyco_f = None
+        step_num = 0
+        for sf in final_exp_dir.glob("*.safetensors"):
+            info = inspect_safetensors_lora(sf)
+            if info.get("step"):
+                step_num = max(step_num, int(info["step"]))
+            if "-comfy" in sf.name.lower() or sf.stem.endswith("_comfy"):
+                comfy_f = sf
+            elif "-lycoris" in sf.name.lower() or sf.stem.endswith("_lycoris"):
+                lyco_f = sf
+        if comfy_f or lyco_f:
+            ref_f = comfy_f or lyco_f
+            step_records.append((step_num, ref_f.stat().st_mtime, comfy_f, lyco_f, None))
+
+    if not step_records:
+        return [], 0
+
+    # 按 (step_num, mtime) 升序排列，取最后一个即为最新最完整的版本
+    step_records.sort(key=lambda x: (x[0], x[1]))
+    latest_step, _, latest_comfy, latest_lyco, latest_trainable = step_records[-1]
+
+    # 如果顶层 export 没有 trainable_f，从最后一个含 trainable 的记录中取
+    if latest_trainable is None:
+        for rec in reversed(step_records):
+            if rec[4] is not None:
+                latest_trainable = rec[4]
+                break
+
+    exported_files = []
+    for src_f, suffix in [
+        (latest_comfy, f"{lora_name}-comfy.safetensors"),
+        (latest_lyco, f"{lora_name}-lycoris.safetensors"),
+        (latest_trainable, f"{lora_name}-trainable.safetensors")
+    ]:
+        if src_f and src_f.exists():
+            dst = lora_dedicated_folder / suffix
+            if not dst.exists() or src_f.stat().st_mtime > dst.stat().st_mtime + 0.5 or src_f.stat().st_size != dst.stat().st_size:
+                shutil.copy2(str(src_f), str(dst))
+                if not quiet:
+                    print(f" [Exported Step {latest_step}] {src_f.name} -> {dst}")
+            exported_files.append(dst)
+
+    if copy_to_comfy and comfy_models_dir and os.path.exists(comfy_models_dir):
+        comfy_loras_dir = Path(comfy_models_dir) / "loras"
+        if comfy_loras_dir.exists():
+            target_comfy_sub = comfy_loras_dir / lora_name
+            target_comfy_sub.mkdir(parents=True, exist_ok=True)
+            for ef in exported_files:
+                if ef.name.endswith("-trainable.safetensors"):
+                    continue
+                target_comfy_dst = target_comfy_sub / ef.name
+                if not target_comfy_dst.exists() or ef.stat().st_mtime > target_comfy_dst.stat().st_mtime + 0.5:
+                    shutil.copy2(str(ef), str(target_comfy_dst))
+                    if not quiet:
+                        print(f" [ComfyUI Synced] {ef.name} -> {target_comfy_dst}")
+
+    return exported_files, latest_step
+
 def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, repeats: int, lora_name: str, trigger_word: str = "") -> Path:
     """
     将散装图集自动标准化为 Kohya 规范的 <repeats>_<name> 结构。
@@ -371,6 +669,14 @@ def main():
                         help="Target image resolution area for training (e.g. 1024, 768, 512)")
     parser.add_argument("--variant", type=str, default="auto", choices=["auto", "base", "sft"],
                         help="Model architecture variant ('auto', 'base', 'sft'). Auto-detected from weights filename by default.")
+    parser.add_argument("--train_mode", type=str, default="fresh", choices=["fresh", "resume", "init_from"],
+                        help="Training mode: 'fresh' (from scratch), 'resume' (continue from checkpoint), 'init_from' (continue training from an existing .safetensors LoRA)")
+    parser.add_argument("--resume_from", type=str, default="latest",
+                        help="Checkpoint directory path to resume from, or 'latest' (used when --train_mode=resume)")
+    parser.add_argument("--init_from", type=str, default="",
+                        help="Path to an existing .safetensors LoRA file or folder to continue training from (used when --train_mode=init_from)")
+    parser.add_argument("--save_every", type=int, default=100,
+                        help="Save an intermediate checkpoint every N steps (default: 100)")
     parser.add_argument("--text_device", type=str, default="cpu", choices=["cpu", "cuda"],
                         help="Device for offline text encoder embedding extraction (cpu recommended for 8GB cards to prevent OOM)")
     parser.add_argument("--vae_device", type=str, default="cuda", choices=["cpu", "cuda"],
@@ -568,6 +874,76 @@ def main():
 
     base_prec_str = 'BASE_PRECISION = "int8"' if is_int8_transformer else ""
 
+    # 5.5 处理训练模式: 全新训练 (fresh) / 断点续炼 (resume) / 基于已有 LoRA 继续训练 (init_from)
+    train_mode = args.train_mode.lower()
+    resume_cfg_str = ""
+    init_from_cfg_str = ""
+    effective_steps = args.steps
+    resumed_step = 0
+    resume_source_info = "(Fresh training from step 0)"
+
+    run_ckpts_dir = trainer_dir / "runs" / "moss" / args.lora_name / "checkpoints"
+
+    if train_mode == "resume":
+        custom_resume = args.resume_from if (args.resume_from and args.resume_from.lower() not in ("auto", "latest")) else ""
+        ckpts = list_lora_checkpoints(trainer_dir, args.lora_name, custom_resume)
+        if ckpts:
+            resumed_step, latest_ckpt_dir = ckpts[-1]
+            # 自动探测断点中的真实 Rank 与 Alpha，防止恢复时维度冲突
+            t_sf = latest_ckpt_dir / "trainable.safetensors"
+            if t_sf.exists():
+                l_info = inspect_safetensors_lora(t_sf)
+                if l_info.get("rank") and l_info["rank"] != args.rank:
+                    print(f" [Resume Auto-Align] Aligned Rank from {args.rank} -> {l_info['rank']} (matching checkpoint {latest_ckpt_dir.name})")
+                    args.rank = l_info["rank"]
+                    if l_info.get("alpha"):
+                        args.alpha = l_info["alpha"]
+            resume_cfg_str = f'RESUME = "{sanitize_path(latest_ckpt_dir)}"'
+            if args.steps <= resumed_step:
+                effective_steps = resumed_step + args.steps
+                print(
+                    f" [Resume Auto-Extend] Checkpoint '{latest_ckpt_dir.name}' is already at step {resumed_step} (>= input steps {args.steps}). "
+                    f"Treating {args.steps} as additional steps -> new target total STEPS = {effective_steps}!"
+                )
+            else:
+                effective_steps = args.steps
+                print(f" [Resume] Resuming from '{latest_ckpt_dir.name}' (step {resumed_step}) -> target step {effective_steps} (remaining: {effective_steps - resumed_step} steps).")
+            resume_source_info = f"Resumed from {latest_ckpt_dir.name} (step {resumed_step} -> {effective_steps})"
+        else:
+            print(f" [Resume Fallback] No checkpoint directory found for '{args.lora_name}'. Checking for exported .safetensors to continue via INIT_FROM...")
+            train_mode = "init_from"
+
+    if train_mode == "init_from":
+        # 清理或归档同名 run 下的旧 step_* 目录，确保 INIT_FROM 作为全新周期 (step 0 -> steps) 运行而不误触旧进度
+        if run_ckpts_dir.exists():
+            backup_root = trainer_dir / "runs" / "moss" / args.lora_name / f"checkpoints_bak_{int(time.time())}"
+            try:
+                shutil.move(str(run_ckpts_dir), str(backup_root))
+                print(f" [Init-From] Archived previous checkpoint states to: {backup_root.name}")
+            except Exception:
+                pass
+        staged_init_dir, l_info = prepare_init_from_checkpoint(
+            args.init_from, workspace_dir, args.lora_name, base_output_dir, trainer_dir
+        )
+        if l_info.get("rank") and l_info["rank"] != args.rank:
+            print(f" [Init-From Auto-Align] Aligned Rank from {args.rank} -> {l_info['rank']} (matching existing LoRA '{Path(l_info['source_file']).name}')")
+            args.rank = l_info["rank"]
+            if l_info.get("alpha"):
+                args.alpha = l_info["alpha"]
+        init_from_cfg_str = f'INIT_FROM = "{sanitize_path(staged_init_dir)}"'
+        resume_source_info = f"Continued training (INIT_FROM) based on '{Path(l_info['source_file']).name}' (Rank={args.rank}, Alpha={args.alpha})"
+        print(f" [Init-From] Loaded base LoRA weights from: {l_info['source_file']} (training {effective_steps} new steps)")
+
+    elif train_mode == "fresh":
+        # 全新训练：若同名 run_ckpts_dir 下有历史高步数断点，将其移入备份目录，防止新训练 latest() 指针混淆
+        if run_ckpts_dir.exists() and any(run_ckpts_dir.glob("step_*")):
+            backup_root = trainer_dir / "runs" / "moss" / args.lora_name / f"checkpoints_bak_{int(time.time())}"
+            try:
+                shutil.move(str(run_ckpts_dir), str(backup_root))
+                print(f" [Fresh Start] Backed up previous run checkpoints to: {backup_root.name}")
+            except Exception:
+                pass
+
     data_cfg_code = f"""
 data_root = "{sanitized_data_root}"
 WEIGHTS = "{sanitized_weights_dir}"
@@ -601,7 +977,8 @@ IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
 VAE_ENCODE = {{"compile": "off"}}
 """
 
-    warmup_steps = min(30, max(1, int(args.steps * 0.05))) if args.steps > 5 else 0
+    warmup_steps = min(30, max(1, int(effective_steps * 0.05))) if effective_steps > 5 else 0
+    save_every_val = max(0, int(args.save_every))
 
     train_cfg_code = f"""
 from kohakuengine import use_config
@@ -614,6 +991,8 @@ RUN_NAME = "{args.lora_name}"
 TRANSFORMER = "{transformer_filename}"
 {base_prec_str}
 {memory_profile_str}
+{resume_cfg_str}
+{init_from_cfg_str}
 SAMPLE_EVERY = 0
 VALIDATE_EVERY = 0
 TUNE = "off"
@@ -621,9 +1000,11 @@ FP16_FIX = "none"
 PRECISION = "{args.precision}"
 DIM = {args.rank}
 ALPHA = {args.alpha}
-STEPS = {args.steps}
+STEPS = {effective_steps}
 LR = {args.lr}
+SAVE_EVERY = {save_every_val}
 SAVE_MINUTES = 20
+KEEP_LAST = 5
 SAVE_FORMAT = "both"
 SCHEDULE = {{
     "mode": "cosine",
@@ -668,56 +1049,88 @@ SCHEDULE = {{
     data_cfg_file.write_text(sanitized_cfg.strip() + "\n", encoding="utf-8")
     print(" [OK] Knobs TEXT_ENCODER_KWARGS and IMAGE_ENCODER_KWARGS cleanly sanitized.")
 
-    # 8. 启动主训练循环
-    print_banner(f"Starting {args.steps}-step Local LoRA Training: '{args.lora_name}' (Precision: {args.precision.upper()})")
+    # 8. 配置优雅暂停信号文件 & 后台实时同步守护线程
+    pause_flag_file = workspace_dir / ".pause_request"
+    if pause_flag_file.exists():
+        try:
+            pause_flag_file.unlink()
+        except Exception:
+            pass
+    os.environ["KOHAKUMOSS_PAUSE_FILE"] = str(pause_flag_file)
+
+    import threading
+    stop_sync_event = threading.Event()
+
+    def _realtime_checkpoint_sync_loop():
+        while not stop_sync_event.wait(10.0):
+            try:
+                export_and_sync_weights(
+                    trainer_dir,
+                    args.lora_name,
+                    lora_dedicated_folder,
+                    args.comfy_models_dir,
+                    args.copy_to_comfy_loras,
+                    quiet=True
+                )
+            except Exception:
+                pass
+
+    sync_thread = threading.Thread(target=_realtime_checkpoint_sync_loop, daemon=True)
+    sync_thread.start()
+
+    # 8.5 启动主训练循环
+    print_banner(f"Starting Local LoRA Training: '{args.lora_name}' (Mode: {train_mode.upper()}, Target Steps: {effective_steps})")
     start_time = time.time()
     train_cmd = [
         kogine_cmd, "run", "scripts/train/moss.py",
         "--config", f"configs/user/{args.lora_name}_local.py"
     ]
     print(f"Executing: {' '.join(train_cmd)}")
-    subprocess.run(train_cmd, cwd=str(trainer_dir), env=os.environ, check=True)
+    try:
+        subprocess.run(train_cmd, cwd=str(trainer_dir), env=os.environ, check=True)
+    finally:
+        stop_sync_event.set()
+
     elapsed = time.time() - start_time
-    print(f" [OK] Core training completed in {elapsed / 60:.2f} minutes ({elapsed / args.steps:.2f} s/step)!")
+    ran_steps = max(1, effective_steps - resumed_steps if (resumed_steps := resumed_step) < effective_steps else args.steps)
+    print(f" [OK] Training session finished in {elapsed / 60:.2f} minutes (~{elapsed / ran_steps:.2f} s/step)!")
 
-    # 9. 智能检索导出的 LoRA 权重，规范重命名并归档至专属子文件夹
-    print_banner(f"Locating and Exporting LoRA Weights to '{lora_dedicated_folder}'")
-    search_paths = list(trainer_dir.glob("runs/**/*.safetensors")) + list(trainer_dir.glob("checkpoints/**/*.safetensors"))
-    exported_files = []
-    
-    for sf in set(search_paths):
-        sf_str = sf.as_posix().lower()
-        if "moss_image" in sf_str or "qwen" in sf_str or "flux2" in sf_str:
-            continue
-        
-        # 匹配 ComfyUI 原生权重与 LyCORIS 标准权重并对齐用户自定义名称
-        dest_filename = sf.name
-        if "-comfy" in sf_str or sf.stem.endswith("_comfy"):
-            dest_filename = f"{args.lora_name}-comfy.safetensors"
-        elif "-lycoris" in sf_str or sf.stem.endswith("_lycoris"):
-            dest_filename = f"{args.lora_name}-lycoris.safetensors"
-        else:
-            dest_filename = f"{args.lora_name}-{sf.name}"
+    # 9. 智能检索并按最新步数同步导出的 LoRA 权重至专属子文件夹與 ComfyUI
+    print_banner(f"Locating and Exporting Latest LoRA Weights to '{lora_dedicated_folder}'")
+    exported_files, actual_final_step = export_and_sync_weights(
+        trainer_dir,
+        args.lora_name,
+        lora_dedicated_folder,
+        args.comfy_models_dir,
+        args.copy_to_comfy_loras,
+        quiet=False
+    )
 
-        dst = lora_dedicated_folder / dest_filename
-        shutil.copy2(str(sf), str(dst))
-        exported_files.append(dst)
-        print(f" Exported: {sf.name} -> {dst}")
+    is_paused_early = (actual_final_step > 0 and actual_final_step < effective_steps)
+    status_label = f"paused_at_step_{actual_final_step}" if is_paused_early else "completed"
 
     # 生成训练摘要与触发词元数据文件
     summary_file = lora_dedicated_folder / "training_summary.json"
     summary_data = {
         "lora_name": args.lora_name,
+        "status": status_label,
+        "train_mode": train_mode,
+        "resume_info": resume_source_info,
+        "completed_step": actual_final_step if actual_final_step > 0 else effective_steps,
+        "target_steps": effective_steps,
         "trigger_word": args.trigger_word if args.trigger_word else "(None)",
         "output_folder": str(lora_dedicated_folder),
-        "steps": args.steps,
         "repeats": args.repeats,
         "epochs": args.epochs,
         "rank": args.rank,
         "alpha": args.alpha,
         "learning_rate": args.lr,
         "precision": args.precision,
+        "vram_preset": effective_preset,
+        "resolution": args.resolution,
+        "model_variant": model_variant,
         "text_device": args.text_device,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "comfyui_prompt_example": (
             f"A high quality digital painting of {args.trigger_word}, in the style of {args.lora_name}, masterpiece, cinematic lighting"
             if args.trigger_word else
@@ -725,23 +1138,15 @@ SCHEDULE = {{
         )
     }
     summary_file.write_text(json.dumps(summary_data, indent=4, ensure_ascii=False), encoding="utf-8")
-    print(f" [OK] Saved training summary & trigger metadata to: {summary_file}")
+    print(f" [OK] Saved training summary & checkpoint metadata to: {summary_file}")
 
-    # 可选：直接复制到 ComfyUI 的 loras 目录 (支持专属子文件夹或扁平文件)
-    if args.copy_to_comfy_loras:
-        comfy_loras_dir = Path(args.comfy_models_dir) / "loras"
-        if comfy_loras_dir.exists():
-            print_banner(f"Deploying Weights to ComfyUI Loras Folder: {comfy_loras_dir}")
-            # 同时在 ComfyUI loras 下建立专属子目录
-            target_comfy_sub = comfy_loras_dir / args.lora_name
-            target_comfy_sub.mkdir(parents=True, exist_ok=True)
-            for ef in exported_files:
-                target_comfy_dst = target_comfy_sub / ef.name
-                shutil.copy2(str(ef), str(target_comfy_dst))
-                print(f" [ComfyUI Ready] Copied {ef.name} -> {target_comfy_dst}")
-
-    print_banner("Training Pipeline Completed Successfully!")
-    print(f"Trained weights are available in: {lora_dedicated_folder}")
+    if is_paused_early:
+        print_banner(f"Training Safely Paused & Saved at Step {actual_final_step} / {effective_steps}!")
+        print(f"Current weights exported to: {lora_dedicated_folder}")
+        print("You can test the current LoRA in ComfyUI now, or resume training anytime using '--train_mode resume'!")
+    else:
+        print_banner("Training Pipeline Completed Successfully!")
+        print(f"Trained weights are available in: {lora_dedicated_folder}")
 
 if __name__ == "__main__":
     main()

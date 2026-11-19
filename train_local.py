@@ -601,13 +601,25 @@ def prepare_dataset_structure(source_data_dir: Path, workspace_data_dir: Path, r
         print(f" [Trigger Injection] Active Trigger Word: '{trigger_clean}' (will be prepended to captions)")
 
     linked_count = 0
+    replaced_imgs = 0
     for img in raw_images:
         dest_img = target_folder / img.name
         dest_txt = target_folder / f"{img.stem}.txt"
         src_txt = source_data_dir / f"{img.stem}.txt"
 
-        # 4. 复制或硬链接图像文件
-        if not dest_img.exists():
+        # 4. 复制或硬链接图像文件（同时检测同名替换的新图片，避免旧图残留）
+        need_update_img = not dest_img.exists()
+        if not need_update_img:
+            try:
+                src_st = img.stat()
+                dst_st = dest_img.stat()
+                if src_st.st_size != dst_st.st_size or src_st.st_mtime > dst_st.st_mtime + 1.0:
+                    need_update_img = True
+                    dest_img.unlink()
+                    replaced_imgs += 1
+            except Exception:
+                pass
+        if need_update_img:
             try:
                 os.link(str(img), str(dest_img))
             except Exception:
@@ -707,7 +719,11 @@ def main():
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
             total_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            print(f"GPU: {gpu_name} | VRAM: {total_vram:.2f} GB")
+            bf16_ok = torch.cuda.is_bf16_supported()
+            print(f"GPU: {gpu_name} | VRAM: {total_vram:.2f} GB | BF16 Supported: {bf16_ok}")
+            if args.precision == "bf16" and not bf16_ok:
+                print(">>> NOTICE: Current GPU does not support native BF16 (e.g. Turing/Pascal). Falling back to FP16 automatically!")
+                args.precision = "fp16"
             if total_vram < 10.0 and args.text_device == "cuda":
                 print(">>> NOTICE: GPU VRAM is under 10GB. Switching text_device to CPU to prevent OOM!")
                 args.text_device = "cpu"
@@ -979,6 +995,16 @@ VAE_ENCODE = {{"compile": "off"}}
 
     warmup_steps = min(30, max(1, int(effective_steps * 0.05))) if effective_steps > 5 else 0
     save_every_val = max(0, int(args.save_every))
+    is_healed_backbone = "heal" in transformer_filename.lower()
+    fp16_fix_val = "online" if (args.precision == "fp16" and not is_healed_backbone) else "none"
+    if fp16_fix_val == "online":
+        print(f" [FP16 Guard] Non-heal backbone '{transformer_filename}' under FP16 detected -> enabled FP16_FIX='online' to prevent overflow!")
+
+    effective_comfy_models = args.comfy_models_dir
+    if not effective_comfy_models:
+        broad_m, _ = find_broad_comfy_paths()
+        if broad_m:
+            effective_comfy_models = str(broad_m[0])
 
     train_cfg_code = f"""
 from kohakuengine import use_config
@@ -996,7 +1022,7 @@ TRANSFORMER = "{transformer_filename}"
 SAMPLE_EVERY = 0
 VALIDATE_EVERY = 0
 TUNE = "off"
-FP16_FIX = "none"
+FP16_FIX = "{fp16_fix_val}"
 PRECISION = "{args.precision}"
 DIM = {args.rank}
 ALPHA = {args.alpha}
@@ -1068,7 +1094,7 @@ SCHEDULE = {{
                     trainer_dir,
                     args.lora_name,
                     lora_dedicated_folder,
-                    args.comfy_models_dir,
+                    effective_comfy_models,
                     args.copy_to_comfy_loras,
                     quiet=True
                 )
@@ -1092,19 +1118,20 @@ SCHEDULE = {{
         stop_sync_event.set()
 
     elapsed = time.time() - start_time
-    ran_steps = max(1, effective_steps - resumed_steps if (resumed_steps := resumed_step) < effective_steps else args.steps)
-    print(f" [OK] Training session finished in {elapsed / 60:.2f} minutes (~{elapsed / ran_steps:.2f} s/step)!")
 
-    # 9. 智能检索并按最新步数同步导出的 LoRA 权重至专属子文件夹與 ComfyUI
+    # 9. 智能检索并按最新步数同步导出的 LoRA 权重至专属子文件夹与 ComfyUI
     print_banner(f"Locating and Exporting Latest LoRA Weights to '{lora_dedicated_folder}'")
     exported_files, actual_final_step = export_and_sync_weights(
         trainer_dir,
         args.lora_name,
         lora_dedicated_folder,
-        args.comfy_models_dir,
+        effective_comfy_models,
         args.copy_to_comfy_loras,
         quiet=False
     )
+
+    actual_ran_steps = max(1, (actual_final_step - resumed_step) if actual_final_step > resumed_step else (effective_steps - resumed_step))
+    print(f" [OK] Training session ran {actual_ran_steps} steps in {elapsed / 60:.2f} minutes (~{elapsed / actual_ran_steps:.2f} s/step)!")
 
     is_paused_early = (actual_final_step > 0 and actual_final_step < effective_steps)
     status_label = f"paused_at_step_{actual_final_step}" if is_paused_early else "completed"

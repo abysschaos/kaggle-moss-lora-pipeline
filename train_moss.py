@@ -59,6 +59,8 @@ parser.add_argument("--save_every", type=int, default=int(os.environ.get("SAVE_E
                     help="Save intermediate checkpoint every N steps (default: 100)")
 parser.add_argument("--dataset_dir", type=str, default=os.environ.get("DATASET_DIR", ""),
                     help="Path to training dataset folder or archive")
+parser.add_argument("--dataset_url", type=str, default=os.environ.get("DATASET_URL", ""),
+                    help="Optional direct download URL for a dataset .zip archive if not mounted under /kaggle/input")
 args, _ = parser.parse_known_args()
 
 print("=" * 75)
@@ -251,43 +253,45 @@ if source_dir and os.path.isdir(source_dir):
         with open(dest_txt, "w", encoding="utf-8") as tf:
             tf.write(caption)
 else:
-    # 备用：若未挂载自定义数据集，尝试本地 zip 或镜像拉取
+    # 备用：若未挂载自定义数据集目录，尝试本地 zip 或用户指定的 --dataset_url 拉取
     local_zip = "/tmp/dataset.zip"
-    dataset_mirrors = [
-        "https://trystocare.com/u6ueup1457",
-        "https://filebin.net/ness_dataset_2026/dataset.zip"
-    ]
     chosen_zip = None
     found_zips = glob.glob("/kaggle/**/dataset.zip", recursive=True) + glob.glob("**/dataset.zip", recursive=True)
-    if found_zips and os.path.getsize(found_zips[0]) > 10 * 1024 * 1024:
+    if found_zips and os.path.getsize(found_zips[0]) > 1024:
         chosen_zip = found_zips[0]
-        print(f"Found local dataset candidate: {chosen_zip}")
-    else:
-        for mirror_url in dataset_mirrors:
-            print(f"Fetching fallback dataset via curl from: {mirror_url}...")
-            try:
-                curl_cmd = [
-                    "curl", "-s", "-L",
-                    "--retry", "3",
-                    "--retry-delay", "2",
-                    "--retry-all-errors",
-                    mirror_url,
-                    "-o", local_zip
-                ]
-                subprocess.run(curl_cmd, check=True)
-                if os.path.exists(local_zip) and os.path.getsize(local_zip) > 10 * 1024 * 1024:
-                    chosen_zip = local_zip
-                    print(f"Downloaded dataset archive: {chosen_zip} ({os.path.getsize(chosen_zip) / (1024**2):.2f} MB)")
-                    break
-            except Exception as dl_err:
-                print(f"Mirror failed ({dl_err}), trying next mirror...")
+        print(f"Found local dataset archive candidate: {chosen_zip}")
+    elif args.dataset_url:
+        print(f"Fetching dataset archive via curl from --dataset_url: {args.dataset_url}...")
+        curl_cmd = [
+            "curl", "-s", "-L",
+            "--retry", "3",
+            "--retry-delay", "2",
+            "--retry-all-errors",
+            args.dataset_url,
+            "-o", local_zip
+        ]
+        subprocess.run(curl_cmd, check=True)
+        if os.path.exists(local_zip) and os.path.getsize(local_zip) > 1024:
+            chosen_zip = local_zip
+            print(f"Downloaded dataset archive: {chosen_zip} ({os.path.getsize(chosen_zip) / (1024**2):.2f} MB)")
 
-    if not chosen_zip or not os.path.exists(chosen_zip) or os.path.getsize(chosen_zip) < 10 * 1024 * 1024:
-        raise RuntimeError("No dataset found in /kaggle/input and all fallback mirrors failed.")
+    if not chosen_zip or not os.path.exists(chosen_zip):
+        raise RuntimeError(
+            "No dataset found! Please mount your Kaggle Private Dataset under /kaggle/input/, "
+            "pass --dataset_dir <path>, or pass --dataset_url <zip_url>."
+        )
 
     print(f"Unpacking {chosen_zip} -> {target_data_dir}...")
     with zipfile.ZipFile(chosen_zip, 'r') as zf:
         zf.extractall(target_data_dir)
+    if trigger_clean:
+        for txt_f in glob.glob(os.path.join(target_data_dir, "*.txt")):
+            with open(txt_f, "r", encoding="utf-8", errors="ignore") as tf:
+                cap = tf.read().strip()
+            if not cap.lower().startswith(trigger_clean.lower()):
+                cap = f"{trigger_clean}, {cap}" if cap else trigger_clean
+                with open(txt_f, "w", encoding="utf-8") as tf:
+                    tf.write(cap)
 
 img_count = len([f for f in os.listdir(target_data_dir) if os.path.splitext(f)[1].lower() in valid_img_exts])
 txt_count = len([f for f in os.listdir(target_data_dir) if f.lower().endswith(".txt")])

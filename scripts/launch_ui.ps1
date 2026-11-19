@@ -6,5 +6,21 @@
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location (Join-Path $scriptDir "..")
 
-Write-Host "Launching OpenMOSS Local LoRA Trainer GUI..." -ForegroundColor Green
-python gui_local.py
+$pythonExe = ""
+if (Test-Path ".\venv\Scripts\python.exe") {
+    $pythonExe = (Resolve-Path ".\venv\Scripts\python.exe").Path
+} elseif ($env:COMFYUI_PYTHON -and (Test-Path $env:COMFYUI_PYTHON)) {
+    $pythonExe = $env:COMFYUI_PYTHON
+} else {
+    $detectedPy = (python ".\scripts\detect_env.py" 2>$null | Select-Object -First 1)
+    if ($detectedPy -and (Test-Path $detectedPy)) {
+        $pythonExe = $detectedPy
+    }
+}
+
+if (-not $pythonExe) {
+    $pythonExe = "python"
+}
+
+Write-Host "Launching OpenMOSS Local LoRA Trainer GUI with: $pythonExe" -ForegroundColor Green
+& $pythonExe gui_local.py

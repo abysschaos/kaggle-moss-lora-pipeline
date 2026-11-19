@@ -1,6 +1,6 @@
 {
-  "id": "norrisgavincortni/ness-style-lora-training",
-  "title": "Ness Style LoRA Training",
+  "id": "YOUR_KAGGLE_USERNAME/moss-image-lora-training",
+  "title": "MOSS-Image LoRA Training",
   "code_file": "train_moss.py",
   "language": "python",
   "kernel_type": "script",

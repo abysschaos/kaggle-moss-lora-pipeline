@@ -128,6 +128,53 @@ class ModernLocalTrainerGUI:
         self.var_lora_name.trace_add("write", lambda *args: (self.update_output_preview(), self.refresh_resume_status()))
         self.var_resume_path.trace_add("write", lambda *args: self.refresh_resume_status())
 
+        # 拦截窗口右上角关闭按钮事件，彻底杜绝训练中途直接关窗导致的后台僵尸 GPU 进程
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def on_closing(self):
+        """安全退出拦截器：若后台仍在训练，引导用户优雅保存暂停或级联强杀释放 GPU。"""
+        if self.is_training and self.current_process:
+            ans = messagebox.askyesnocancel(
+                "训练正在进行中",
+                "当前后台仍有 LoRA 训练进程正在占用 GPU！\n\n"
+                "• 点击【是 (Yes)】：发送【保存当前进度并暂停】指令，等待当前步保存完毕（不强制退出）；\n"
+                "• 点击【否 (No)】：立即强制终止训练进程树、回收已有断点并关闭窗口；\n"
+                "• 点击【取消 (Cancel)】：返回继续训练。"
+            )
+            if ans is None:
+                return
+            elif ans is True:
+                self.pause_and_save_training()
+                return
+            else:
+                try:
+                    pid = self.current_process.pid
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False
+                    )
+                    self.current_process.kill()
+                except Exception:
+                    pass
+                try:
+                    import train_local
+                    lora_name = self.var_lora_name.get().strip() or "my_lora"
+                    dest_dir = Path(self.var_output_dir.get()) / lora_name
+                    train_local.export_and_sync_weights(
+                        Path("./KohakuMossTrainer").resolve(),
+                        lora_name,
+                        dest_dir,
+                        self.var_comfy_models.get(),
+                        self.var_copy_comfy.get(),
+                        quiet=True
+                    )
+                except Exception:
+                    pass
+        self.save_local_config()
+        self.root.destroy()
+
     def load_local_config(self) -> dict:
         """从本地私有配置文件读取用户历史偏好路径（该文件不入 Git）。"""
         if self.config_file.exists():
@@ -1005,21 +1052,27 @@ class ModernLocalTrainerGUI:
         img_count = 0
         if dpath.exists():
             img_count = len([f for f in dpath.iterdir() if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]])
-        
-        rep = self.var_repeats.get()
-        ep = self.var_epochs.get()
+        try:
+            rep = self.var_repeats.get()
+            ep = self.var_epochs.get()
+        except tk.TclError:
+            self.var_calc_stat.set("换算：请输入有效的正整数重复次数与轮数")
+            return
         total_exposures = img_count * rep * ep
         recommended_steps = max(1, total_exposures // 4)
-        
         self.var_calc_stat.set(f"换算：{img_count}图 × {rep}重复 × {ep}轮 = {total_exposures}次曝光 (等效推荐约 {recommended_steps} 步)")
 
     def align_steps_by_formula(self):
         dpath = Path(self.var_data_dir.get())
         if not dpath.exists():
             return
+        try:
+            rep = self.var_repeats.get()
+            ep = self.var_epochs.get()
+        except tk.TclError:
+            messagebox.showwarning("参数输入提示", "请先填写有效的正整数【单图重复】和【训练轮数】。")
+            return
         img_count = len([f for f in dpath.iterdir() if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]])
-        rep = self.var_repeats.get()
-        ep = self.var_epochs.get()
         recommended = max(1, (img_count * rep * ep) // 4)
         self.var_steps.set(recommended)
         self.log(f"[提示] 步数已根据换算公式对齐为: {recommended} 步\n")
@@ -1072,12 +1125,44 @@ class ModernLocalTrainerGUI:
             messagebox.showerror("错误", f"训练数据集路径不存在: {dpath}")
             return
 
+        # 数值型超参数合法性校验，防御空输入引发 TclError 崩溃
+        try:
+            repeats_val = int(self.var_repeats.get())
+            epochs_val = int(self.var_epochs.get())
+            steps_val = int(self.var_steps.get())
+            rank_val = int(self.var_rank.get())
+            alpha_val = float(self.var_alpha.get())
+            lr_val = float(self.var_lr.get().strip())
+            save_every_val = int(self.var_save_every.get())
+            if repeats_val < 1 or epochs_val < 1 or steps_val < 1 or rank_val < 1 or lr_val <= 0:
+                raise ValueError("超参数必须为正数")
+        except Exception as e:
+            messagebox.showerror("参数格式错误", f"请检查核心超参数是否填写了合法数字：\n{e}")
+            return
+
         lora_name_clean = self.var_lora_name.get().strip()
         if not lora_name_clean:
             lora_name_clean = "my_lora"
 
         mode_code = self.train_mode_map.get(self.var_train_mode_label.get(), "fresh")
         custom_resume_p = self.var_resume_path.get().strip()
+
+        # init_from 模式前置校验：确保确实存在可用的基底 LoRA 文件，避免空跑环境检查后报错
+        if mode_code == "init_from":
+            has_valid_init = bool(custom_resume_p and os.path.exists(custom_resume_p))
+            if not has_valid_init:
+                out_folder = Path(self.var_output_dir.get()) / lora_name_clean
+                if out_folder.exists() and any(out_folder.glob("*.safetensors")):
+                    has_valid_init = True
+                elif (trainer_dir / "runs" / "moss" / lora_name_clean).exists() and any((trainer_dir / "runs" / "moss" / lora_name_clean).rglob("*.safetensors")):
+                    has_valid_init = True
+            if not has_valid_init:
+                messagebox.showerror(
+                    "缺少基底 LoRA 文件",
+                    "当前处于【基于已有 LoRA 继续训练】模式，但未检测到可用的 .safetensors 文件！\n\n"
+                    "请点击【📁 选已训 LoRA (.safetensors)】手动选择一个已训练完成的权重文件，或切换回【全新训练】。"
+                )
+                return
 
         # 若用户在 fresh 模式下发现已有历史断点，友好询问是要全新覆盖还是断点续炼
         if mode_code == "fresh":

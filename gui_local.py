@@ -134,8 +134,8 @@ class ModernLocalTrainerGUI:
         self.var_models_status = tk.StringVar(value="点击【🔍 自动扫描】或手动点选文件")
         self.var_trainer_status = tk.StringVar(value="检查中...")
 
-        self.var_repeats = tk.IntVar(value=10)
-        self.var_epochs = tk.IntVar(value=6)
+        self.var_repeats = tk.IntVar(value=3)
+        self.var_epochs = tk.IntVar(value=5)
         self.var_steps = tk.IntVar(value=600)
         self.var_rank = tk.IntVar(value=32)
         self.var_alpha = tk.DoubleVar(value=32.0)
@@ -2022,7 +2022,7 @@ class ModernLocalTrainerGUI:
         est_tokens_per_img = (res // 16) ** 2 + 160
         imgs_per_pack = max(1, max_tokens // est_tokens_per_img)
         eff_batch = imgs_per_pack * grad_acc
-        divisor = max(4, eff_batch) if mu <= -0.3 else max(2, eff_batch)
+        divisor = max(1, eff_batch)
         return eff_batch, imgs_per_pack, grad_acc, mu, divisor
 
     def _compute_exposure_summary(self):
@@ -2058,7 +2058,7 @@ class ModernLocalTrainerGUI:
             self.var_calc_stat.set(msg)
             return
 
-        tp_info = f"等效Batch={eff_batch}({pack}图/包×Acc{acc}), Mu={mu:.2f}, 除数/{div}"
+        tp_info = f"等效Batch={eff_batch} ({pack}图/包×Acc{acc}), Mu={mu:.2f}"
         if is_multi:
             self.var_calc_stat.set(
                 f"多子集：{len(self.subsets)}子集 ({count}图, 单轮{factor}曝光) × {ep}轮 = {total_exp}曝光 [{tp_info}] → 推荐 {rec} 步"
@@ -2080,21 +2080,21 @@ class ModernLocalTrainerGUI:
                 return
             self.var_steps.set(rec)
             self.recalculate_math()
-            self.log(f"[提示] 步数已按动态吞吐公式(Batch={eff_batch}, Mu={mu:.2f}, /{div})对齐为: {rec} 步\n")
+            self.log(f"[提示] 步数已按动态吞吐公式(等效Batch={eff_batch}, Mu={mu:.2f})对齐为: {rec} 步\n")
             return
 
         if not Path(self.var_data_dir.get()).exists():
             return
         self.var_steps.set(rec)
         self.recalculate_math()
-        self.log(f"[提示] 步数已按动态吞吐公式(Batch={eff_batch}, Mu={mu:.2f}, /{div})对齐为: {rec} 步\n")
+        self.log(f"[提示] 步数已按动态吞吐公式(等效Batch={eff_batch}, Mu={mu:.2f})对齐为: {rec} 步\n")
 
     # 预设模板应用
     def apply_style_preset(self):
         self.var_multi_subset.set(False)
         self._apply_subset_panel_visibility()
-        self.var_repeats.set(10)
-        self.var_epochs.set(6)
+        self.var_repeats.set(3)
+        self.var_epochs.set(5)
         self.var_rank.set(32)
         self.var_alpha.set(32.0)
         self.var_algo.set("lora")
@@ -2114,8 +2114,8 @@ class ModernLocalTrainerGUI:
             "模板切换",
             "已成功加载【艺术画风模板】(极速画风黄金配比)：\n"
             "LoRA名称: my_art_style | 算法: LoRA (attn-mlp) | LoRA+=1.0\n"
-            "Repeats=10, Epochs=6, Rank=32, Alpha=32.0, LR=1e-4\n"
-            "GradAcc=1, Mu=-1.09 (高噪构图笔触聚焦，保持极限收敛速度)"
+            "Repeats=3, Epochs=5, Rank=32, Alpha=32.0, LR=1e-4\n"
+            "GradAcc=1, Mu=-1.09 (按真实等效Batch计步，40图约600步)"
         )
 
     def apply_character_preset(self):
@@ -2203,7 +2203,7 @@ class ModernLocalTrainerGUI:
     def apply_concept_preset(self):
         self.var_multi_subset.set(False)
         self._apply_subset_panel_visibility()
-        self.var_repeats.set(8)
+        self.var_repeats.set(5)
         self.var_epochs.set(4)
         self.var_rank.set(32)
         self.var_alpha.set(32.0)

@@ -73,9 +73,9 @@
 LORA_NAME = "my_character"          # 您的 LoRA 英文名称 (如 makima, genshin_style)
 TRIGGER_WORD = "my_character_char"  # 触发词 (例如: makima_char；留空 "" 则使用原标注)
 
-REPEATS = 6                         # 单图重复次数 (人物推荐 4~6，画风推荐 8~12)
-EPOCHS = 4                          # 训练轮数 (人物推荐 3~5，画风推荐 6~10)
-STEPS = 400                         # 核心步数 (公式: 图片数 * REPEATS * EPOCHS // 4)
+REPEATS = 6                         # 单图重复次数 (人物推荐 4~6，画风推荐 3~5)
+EPOCHS = 4                          # 训练轮数 (人物推荐 3~5，画风推荐 4~6)
+STEPS = 400                         # 核心步数 (公式: 图片数 * REPEATS * EPOCHS // 等效Batch)
 
 RANK = 32                           # LoRA 矩阵秩 (单概念推荐 32，多人物/多画风推荐 48~64)
 ALPHA = 32.0                        # 缩放系数 (建议与 Rank 对齐 = 32.0 避免 5B 先验稀释)
@@ -219,12 +219,12 @@ subprocess.run(cmd, check=True)
 
 | 场景目标 | Repeats / Epochs / Steps | Rank / Alpha | 推荐适配器配置 | 触发词与多子集建议 |
 | :--- | :--- | :--- | :--- | :--- |
-| **二次元 / 艺术画风** | `10` / `6` / `600` | `32` / `32.0` | `lora` + `attn-mlp` + `GradAcc=1` + `Mu=-1.09` | 填风格词，如 `in the style of my_style` |
+| **二次元 / 艺术画风** | `3` / `5` / `600` (双卡 `300~340`) | `32` / `32.0` | `lora` + `attn-mlp` + `GradAcc=1` + `Mu=-1.09` | 填风格词，如 `in the style of my_style` |
 | **特定动漫 / 游戏人物** | `6` / `4` / `360~400` | `32` / `32.0` | `lora` + `dora` + `loraplus=2.0` + `GradAcc=2` + `Mu=0.35` | 必须填独特专有词，如 `makima_char` |
 | **多人物 / 多画风融合** | 按各子集图数反比配平 / `4~5` | `48` / `48.0` | `lora` + `dora` + `loraplus=2.0` + `GradAcc=2` + (`Mu=0.35`人物/`-0.60`画风) | 启用 `SUBSETS_JSON` 为每角色/每画风绑定独立子目录与触发词 |
-| **特定动作 / 服饰概念** | `8` / `4` / `400~500` | `32` / `32.0` | `lora` + `dora` + `attn-mlp+text-refiner` + `GradAcc=2` + `Mu=0.0` | 填具体动作/物体名词，确保主体人物环境分散 |
+| **特定动作 / 服饰概念** | `5` / `4` / `400` | `32` / `32.0` | `lora` + `dora` + `attn-mlp+text-refiner` + `GradAcc=2` + `Mu=0.0` | 填具体动作/物体名词，确保主体人物环境分散 |
 
 > **动态步数对齐公式**：
-> 当您拥有 $N$ 张图片，有效 Token 打包与梯度累积等效批大小为 $B_{\text{eff}} = \lfloor \frac{\text{MAX\_TOKENS}}{(\text{res}/16)^2+160} \rfloor \times \text{GRAD\_ACC}$ 时，GUI 会按时间步重心划分推荐除数（画风 $\mu \le -0.3$ 时基础除数 `4`，人物/概念 $\mu > -0.3$ 时基础除数 `2`）：
-> $$\text{Steps} = \frac{N \times \text{Repeats} \times \text{Epochs}}{\max(\text{基础除数},\ B_{\text{eff}})}$$
-> 在保持 `GradAcc=1, Mu=-1.09` 的标准画风训练下即自动沿用 $\div 4$ 极速节奏。
+> 当您拥有 $N$ 张图片，有效 Token 打包与梯度累积等效批大小为 $B_{\text{eff}} = \lfloor \frac{\text{MAX\_TOKENS}}{(\text{res}/16)^2+160} \rfloor \times \text{GRAD\_ACC}$ 时（若开启 Kaggle Dual-T4 DDP 则再乘以双卡系数 2），推荐优化步数严格按真实等效批大小计算：
+> $$\text{Steps} = \frac{N \times \text{Repeats} \times \text{Epochs}}{\max(1,\ B_{\text{eff}})}$$
+> 在 `1024px, GradAcc=1`（单卡 $B_{\text{eff}}=1$）下建议 `Repeats=3, Epochs=5` 跑满约 600 步；在 Dual-T4 DDP (`MAX_TOKENS=9216`, 全局 $B_{\text{eff}}=4$) 下对应约 300~340 步高效率收敛。

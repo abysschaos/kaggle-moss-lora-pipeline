@@ -19,10 +19,10 @@ OpenMOSS MOSS-Image 采用了基于 50 亿参数（5B）的单流扩散变换器
 - **$\mu = -1.09$（默认画风配方）**：约 **89%** 梯度更新落在高噪构图与色域笔触阶段（$\sigma > 0.5$），这也是画风任务仅用 600 步即显著超越传统局部低噪配方的理论根因；
 - **$\mu = 0.0$ / $0.35$（动作概念与单人角色配方）**：显著拉升中低噪精细雕刻权重，确保面部五官、服饰纽扣与轮廓边缘收敛充分。
 
-GUI 推荐步数公式会结合有效吞吐与时间步重心动态调整：
-$$\text{推荐训练步数 (Steps)} = \frac{\text{图集总数} \times \text{Repeats} \times \text{Epochs}}{\max(\text{基础除数},\ B_{\text{eff}})},\quad \text{基础除数} = \begin{cases} 4, & \mu \le -0.3 \\ 2, & \mu > -0.3 \end{cases}$$
+GUI 推荐步数公式严格按照真实有效批大小计算，不做虚假除数下限截断：
+$$\text{推荐训练步数 (Steps)} = \frac{\text{图集总数} \times \text{Repeats} \times \text{Epochs}}{\max(1,\ B_{\text{eff}})}$$
 
-以 40 张画风图集为例（默认 `Mu=-1.09, GradAcc=1`）：$40 \times 10 \times 6 \div 4 = \mathbf{600 \text{ 步}}$，完整保留约 1.3 小时极速深度收敛节奏；若以 `int8_convrot + bf16` 对比 `bf16 + fp8_compute`（`sm89+` 专属且必须配对 `FP8_DGRAD="16bit"`），前者显存占用约 5.4 GB 且兼容全系 RTX 显卡，后者需 RTX 40 系+ Tensor Core 才可获得计算增益。
+以 40 张画风图集为例（`1024px`, `GradAcc=1`, `Mu=-1.09`, 真实 `B_eff=1`）：`Repeats = 3`、`Epochs = 5` 共 15 个真实数据遍历轮次，即 $40 \times 3 \times 5 \div 1 = \mathbf{600 \text{ 步}}$，完整保留约 1.3 小时极速深度收敛节奏；若切为 `896px` + `16g`（包内 2 图、`B_eff=2`）或开启 `GradAcc=2`，推荐步数会自动同步按真实等效 Batch 缩放。若以 `int8_convrot + bf16` 对比 `bf16 + fp8_compute`（`sm89+` 专属且必须配对 `FP8_DGRAD="16bit"`），前者显存占用约 5.4 GB 且兼容全系 RTX 显卡，后者需 RTX 40 系+ Tensor Core 才可获得计算增益。
 
 ---
 

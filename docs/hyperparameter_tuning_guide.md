@@ -16,15 +16,15 @@ OVERLONG = "drop_tokens"  # 仅截断超限文本尾部，绝不静默丢图
 - **`896` 黄金甜点分辨率**：单图仅约 `3296` Token，在 `16g (8192)` 档位下可稳定打包 **2 张/步**，兼顾精细度与双倍吞吐！
 - **`768` 分辨率**：单图约 `2464` Token，在 `12g (6144)` 下打包 **2 张/步**，在 `16g (8192)` 下打包 **3 张/步**。
 
-### 1.2 动态步数联动公式（兼容 `GradAcc` 与 `TIMESTEP_MU`）
+### 1.2 真实有效批大小联动公式（严格消除虚假 `/ 4` 除数）
 $$\text{总图文曝光次数 (Total Exposures)} = \text{原始图片数 (Images)} \times \text{单图重复 (Repeats)} \times \text{训练轮数 (Epochs)}$$
 $$\text{等效 Batch (Effective Batch)} = \lfloor \frac{\text{MAX\_TOKENS}}{(\text{res}/16)^2 + 160} \rfloor \times \text{GRAD\_ACC}$$
-$$\text{GUI 推荐核心步数 (Steps)} = \frac{\text{总图文曝光次数}}{\max(\text{基础除数},\ \text{Effective Batch})},\quad \text{其中基础除数} = \begin{cases} 4, & \mu \le -0.3 \text{（画风偏高噪）} \\ 2, & \mu > -0.3 \text{（人物/概念精细对齐）} \end{cases}$$
+$$\text{GUI 推荐核心步数 (Steps)} = \frac{\text{总图文曝光次数}}{\max(1,\ \text{Effective Batch})}$$
 
 #### 实例推演（以默认画风工作流为例）
-- **场景**：现有 40 张画风图像，`MAX_TOKENS=8192`（或 `16384`），`GradAcc=1`，`TIMESTEP_MU=-1.09`；
-- **设置**：`Repeats = 10`，`Epochs = 6`，总曝光 $= 40 \times 10 \times 6 = 2400$ 次；
-- **优化器步数**：因为 $\mu = -1.09 \le -0.3$，GUI 以除数 `4` 对齐为 **$2400 \div 4 = 600$ 步**，完整保留“约 1.3 小时 600 步画风极速收敛”的黄金节奏；当您开启 `GradAcc=4` 或切换 `768`/`512` 大打包、或切换 `Mu=0.35` 炼制角色时，GUI 会自动按新吞吐与重心动态重新计算推荐步数。
+- **场景**：现有 40 张画风图像，`1024px` 真实打包 1 图/包，`GradAcc=1`（真实等效 `Effective Batch = 1`），`TIMESTEP_MU=-1.09`；
+- **设置**：`Repeats = 3`，`Epochs = 5`（共 15 个真实遍历轮次），总曝光 $= 40 \times 3 \times 5 = 600$ 次；
+- **优化器步数**：严格按真实吞吐计算为 **$600 \div 1 = 600$ 步**，既彻底去掉了不真实的固定 `/ 4` 虚高重复，又完整保留了约 1.3 小时 600 步的黄金节奏；当你将分辨率切至 `896px`（`16g` 档位下打包 2 图/步）或设置 `GradAcc=2`、`GradAcc=4` 时，推荐步数会自动按真实等效 Batch 倍率实时缩放。
 
 在调整参数时，必须保持 Repeats、Epochs 与 Steps 三者在数值上的逻辑闭环。若手动指定了 `--steps`，优化器会在达到该步数时强制截断训练。
 
@@ -115,11 +115,11 @@ $$\text{GUI 推荐核心步数 (Steps)} = \frac{\text{总图文曝光次数}}{\m
 
 | 预设模板 | Repeats / Epochs | Rank / Alpha | 算法与注入层 | LoRA+ | GradAcc | Timestep Mu | 学习率 (LR) |
 | :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: |
-| **🎨 艺术画风 (`style`)** | `10` / `6` | `32` / `32.0` | `lora` + `attn-mlp` | `1.0` | **`1`** | **`-1.09`** | `1e-4` |
+| **🎨 艺术画风 (`style`)** | `3` / `5` | `32` / `32.0` | `lora` + `attn-mlp` | `1.0` | **`1`** | **`-1.09`** | `1e-4` |
 | **👤 单人角色 (`character`)** | `6` / `4` | `32` / `32.0` | `lora` + `DoRA` + `attn-mlp` | `2.0` | **`2`** | **`0.35`** | `8e-5` |
 | **👥 多人物配比 (`multi_char`)** | 按图数反比配平 / `4` | `48` / `48.0` | `lora` + `DoRA` + `attn-mlp+text-refiner` | `2.0` | **`2`** | **`0.35`** | `8e-5` |
 | **🎭 多画风配比 (`multi_style`)** | 按图数反比配平 / `5` | `48` / `48.0` | `lora` + `DoRA` + `attn-mlp+modulation` | `2.0` | **`2`** | **`-0.60`** | `1e-4` |
-| **💡 概念与动作 (`concept`)** | `8` / `4` | `32` / `32.0` | `lora` + `DoRA` + `attn-mlp+text-refiner` | `2.0` | **`2`** | **`0.0`** | `1e-4` |
+| **💡 概念与动作 (`concept`)** | `5` / `4` | `32` / `32.0` | `lora` + `DoRA` + `attn-mlp+text-refiner` | `2.0` | **`2`** | **`0.0`** | `1e-4` |
 
 ---
 
@@ -152,15 +152,15 @@ python train_local.py `
     --copy_to_comfy_loras
 ```
 
-### 6.2 艺术画风训练模板 (以 40~50 张图为例 + 极速 Mu=-1.09)
+### 6.2 艺术画风训练模板 (以 40 张图为例 + 极速 Mu=-1.09)
 ```powershell
 python train_local.py `
     --data_dir "./dataset/my_art_style" `
     --output_dir "./output" `
     --lora_name "my_style" `
     --trigger_word "in the style of my_style" `
-    --repeats 10 `
-    --epochs 6 `
+    --repeats 3 `
+    --epochs 5 `
     --steps 600 `
     --rank 32 `
     --alpha 32.0 `

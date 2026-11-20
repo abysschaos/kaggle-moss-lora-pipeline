@@ -89,6 +89,14 @@ parser.add_argument("--text_device", type=str, default=os.environ.get("TEXT_DEVI
 parser.add_argument("--vae_device", type=str, default=os.environ.get("VAE_DEVICE", "cuda"),
                     choices=["cuda", "cpu"],
                     help="Device for offline VAE latents extraction (default: cuda)")
+parser.add_argument("--gpus", type=str, default=os.environ.get("GPUS", "auto"),
+                    choices=["auto", "1", "2"],
+                    help="Active GPU count: auto (2 on Linux with >=2 GPUs), 1, or 2 (default: auto)")
+parser.add_argument("--parallel", type=str, default=os.environ.get("PARALLEL_MODE", "auto"),
+                    choices=["auto", "none", "ddp", "pipeline"],
+                    help="Multi-GPU parallelism mode on Linux: auto (DDP when 2 GPUs), none, ddp, pipeline")
+parser.add_argument("--max_tokens", type=int, default=int(os.environ.get("MAX_TOKENS", "0")),
+                    help="Override MAX_TOKENS per GPU pack (0 = auto; Dual-T4 DDP uses 9216 for 2x1024px packing)")
 parser.add_argument("--train_mode", type=str, default=os.environ.get("TRAIN_MODE", "fresh"),
                     choices=["fresh", "resume", "init_from"],
                     help="Training mode: 'fresh' (from scratch), 'resume' (continue from checkpoint), 'init_from' (continue training from an existing .safetensors LoRA)")
@@ -111,13 +119,16 @@ print(f">>> Hyperparameters: Repeats={args.repeats}, Epochs={args.epochs}, Steps
 print(f">>> Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, Preset={args.target_preset}, LoRA+={args.loraplus_ratio} <<<")
 print(f">>> Dimensions: Rank={args.rank}, Alpha={args.alpha}, LR={args.lr}, GradAcc={max(1, int(args.grad_acc))} <<<")
 print(f">>> Dynamics: TimestepMu={args.timestep_mu}, BasePrec={args.base_precision}, Tune={args.tune}, Overlong={args.overlong} <<<")
-print(f">>> Cloud Options: Variant={args.variant}, VRAM={args.vram_preset}, Res={args.resolution}, Quant={args.base_quant}, Prec={args.precision} <<<")
+print(f">>> Cloud Options: Variant={args.variant}, VRAM={args.vram_preset}, Res={args.resolution}, Quant={args.base_quant}, Prec={args.precision}, GPUs={args.gpus}, Parallel={args.parallel} <<<")
 print("=" * 75)
 
 # 1. 验证 GPU 与宿主机 PyTorch / TorchVision 原生驱动
 vram_gb = 16.0
 sm_major, sm_minor = 0, 0
 bf16_supported = False
+gpu_count = 1
+active_gpus = 1
+effective_parallel = "none"
 try:
     import torch
     import torchvision
@@ -126,13 +137,33 @@ try:
     print(f"TorchVision Version: {torchvision.__version__}")
     print(f"CUDA Available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
+        gpu_count = max(1, int(torch.cuda.device_count()))
+        for gi in range(gpu_count):
+            g_name = torch.cuda.get_device_name(gi)
+            g_props = torch.cuda.get_device_properties(gi)
+            print(f"GPU[{gi}]: {g_name} (sm{int(g_props.major)}{int(g_props.minor)}, {g_props.total_memory / (1024**3):.2f} GB)")
         gpu_name = torch.cuda.get_device_name(0)
         props = torch.cuda.get_device_properties(0)
         vram_gb = props.total_memory / (1024**3)
         sm_major, sm_minor = int(props.major), int(props.minor)
         bf16_supported = torch.cuda.is_bf16_supported()
-        print(f"GPU Device: {gpu_name} (sm{sm_major}{sm_minor})")
-        print(f"Total VRAM: {vram_gb:.2f} GB | Native BF16 Supported: {bf16_supported}")
+        print(f"Primary GPU: {gpu_name} (sm{sm_major}{sm_minor}) | Native BF16 Supported: {bf16_supported}")
+        if args.gpus == "auto":
+            active_gpus = 2 if (sys.platform.startswith("linux") and gpu_count >= 2) else 1
+        else:
+            active_gpus = max(1, min(int(args.gpus), gpu_count))
+        if active_gpus >= 2 and sys.platform.startswith("linux"):
+            if args.parallel in ("auto", "ddp"):
+                effective_parallel = "ddp"
+            elif args.parallel == "pipeline":
+                effective_parallel = "pipeline"
+            else:
+                effective_parallel = "none"
+                active_gpus = 1
+        else:
+            effective_parallel = "none"
+            active_gpus = 1
+        print(f" [Multi-GPU] Detected={gpu_count} GPU(s) | Active={active_gpus} | Parallel={effective_parallel.upper()}")
         boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0]], device="cuda")
         scores = torch.tensor([0.9], device="cuda")
         _ = torchvision.ops.nms(boxes, scores, 0.5)
@@ -191,16 +222,41 @@ else:
 print(f" [Precision] Compute Precision: {effective_precision.upper()} {prec_note}")
 
 if args.base_quant == "auto":
-    use_int8_backbone = effective_preset in ("6g", "8g")
+    use_int8_backbone = (effective_preset in ("6g", "8g")) or (effective_parallel == "ddp")
 else:
     use_int8_backbone = (args.base_quant == "int8")
+
+parallel_cfg_str = ""
+if effective_parallel == "ddp":
+    if effective_preset == "16g" and use_int8_backbone:
+        memory_profile_str = 'MEMORY_PROFILE = "ckpt-resident"'
+        max_tokens_val = 9216
+        print(" [Dual-GPU DDP] 2x T4 16GB: Enabled int8 backbone resident mode (MEMORY_PROFILE='ckpt-resident', MAX_TOKENS=9216 -> 2x 1024px/GPU = 4 imgs/step).")
+    parallel_cfg_str = (
+        'PARALLEL = "ddp"\n'
+        'DEVICES = (0, 1)\n'
+        'DIST_BACKEND = "auto"\n'
+        'DDP_REDUCE_DTYPE = "fp32"\n'
+        'DDP_BUCKET_MB = 25'
+    )
+elif effective_parallel == "pipeline":
+    use_int8_backbone = False
+    args.base_precision = "compute"
+    memory_profile_str = 'MEMORY_PROFILE = "ckpt-resident"'
+    recipe_import += '\nuse_config("../moss/parallel/parallel_pipeline.py")'
+    parallel_cfg_str = 'DEVICES = (0, 1)'
+    print(" [Dual-GPU Pipeline] Enabled 1F1B stage split across GPU(0, 1) with full-precision resident weights.")
+
+if int(args.max_tokens) > 0:
+    max_tokens_val = int(args.max_tokens)
+    print(f" [Token Packing Override] MAX_TOKENS={max_tokens_val}")
 
 if args.text_device == "auto":
     effective_text_device = "cpu" if (vram_gb <= 10.0 or effective_preset == "6g") else "cuda"
 else:
     effective_text_device = args.text_device.lower()
 print(f" [Devices] Text Encoder: {effective_text_device.upper()} | VAE: {args.vae_device.upper()}")
-print(f" [Resolution] Target Area: {args.resolution}x{args.resolution} ({args.resolution * args.resolution} px)")
+print(f" [Resolution] Target Area: {args.resolution}x{args.resolution} ({args.resolution * args.resolution} px) | MAX_TOKENS={max_tokens_val}")
 
 # 2. 鉴权与环境变量设置
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
@@ -275,7 +331,7 @@ if parsed_cloud_subsets:
             if os.path.exists(src_txt):
                 with open(src_txt, "r", encoding="utf-8", errors="ignore") as tf:
                     cap = tf.read().strip()
-            if s_trig and not cap.lower().startswith(s_trig.lower()):
+            if s_trig and s_trig.lower() not in cap.lower():
                 cap = f"{s_trig}, {cap}" if cap else s_trig
             with open(os.path.join(dst_sub, base_name + ".txt"), "w", encoding="utf-8") as tf:
                 tf.write(cap)
@@ -354,7 +410,7 @@ else:
                 with open(src_txt, "r", encoding="utf-8", errors="ignore") as tf:
                     caption = tf.read().strip()
 
-            if trigger_clean and not caption.lower().startswith(trigger_clean.lower()):
+            if trigger_clean and trigger_clean.lower() not in caption.lower():
                 caption = f"{trigger_clean}, {caption}" if caption else trigger_clean
 
             with open(dest_txt, "w", encoding="utf-8") as tf:
@@ -394,7 +450,7 @@ else:
             for txt_f in glob.glob(os.path.join(target_data_dir, "*.txt")):
                 with open(txt_f, "r", encoding="utf-8", errors="ignore") as tf:
                     cap = tf.read().strip()
-                if not cap.lower().startswith(trigger_clean.lower()):
+                if trigger_clean and trigger_clean.lower() not in cap.lower():
                     cap = f"{trigger_clean}, {cap}" if cap else trigger_clean
                     with open(txt_f, "w", encoding="utf-8") as tf:
                         tf.write(cap)
@@ -877,6 +933,7 @@ use_config("{args.lora_name}_data.py")
 VARIANT = "{arch_variant}"
 RUN_NAME = "{args.lora_name}"
 TRANSFORMER = "{transformer_filename}"
+{parallel_cfg_str}
 {base_prec_str}
 {memory_profile_str}
 {resume_cfg_str}
@@ -1034,6 +1091,9 @@ summary_data = {
     "timestep_mu": timestep_mu_val,
     "tune": args.tune,
     "overlong": args.overlong,
+    "active_gpus": active_gpus,
+    "parallel": effective_parallel,
+    "max_tokens": max_tokens_val,
     "fp16_fix": fp16_fix_val,
     "text_device": effective_text_device,
     "vae_device": args.vae_device,

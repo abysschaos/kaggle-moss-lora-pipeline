@@ -1027,8 +1027,8 @@ def main():
             props = torch.cuda.get_device_properties(0)
             total_vram = props.total_memory / (1024**3)
             sm_major, sm_minor = int(props.major), int(props.minor)
-            bf16_ok = torch.cuda.is_bf16_supported()
-            print(f"GPU: {gpu_name} (sm{sm_major}{sm_minor}) | VRAM: {total_vram:.2f} GB | Host RAM: {total_ram_gb:.1f} GB | BF16 Supported: {bf16_ok}")
+            bf16_ok = (sm_major >= 8)
+            print(f"GPU: {gpu_name} (sm{sm_major}{sm_minor}) | VRAM: {total_vram:.2f} GB | Host RAM: {total_ram_gb:.1f} GB | Native BF16 (sm>=80): {bf16_ok}")
             if args.precision == "bf16" and not bf16_ok:
                 print(">>> NOTICE: Current GPU does not support native BF16 (e.g. Turing/Pascal). Falling back to FP16 automatically!")
                 args.precision = "fp16"

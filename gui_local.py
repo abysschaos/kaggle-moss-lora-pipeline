@@ -423,9 +423,10 @@ class ModernLocalTrainerGUI:
             import torch
             if torch.cuda.is_available():
                 name = torch.cuda.get_device_name(0)
-                vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                props = torch.cuda.get_device_properties(0)
+                vram = props.total_memory / (1024**3)
                 self.detected_vram_gb = vram
-                bf16 = "支持 BF16" if torch.cuda.is_bf16_supported() else "仅 FP16"
+                bf16 = "支持原生 BF16" if int(props.major) >= 8 else "仅 FP16"
                 return f"{name} ({vram:.1f} GB, {bf16})"
             return "仅 CPU (未检测到 CUDA)"
         except Exception:

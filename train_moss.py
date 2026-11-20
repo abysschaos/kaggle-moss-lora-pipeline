@@ -19,7 +19,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.2.2"
+    return "1.3.0"
 
 
 APP_VERSION = _load_app_version()
@@ -146,8 +146,8 @@ try:
         props = torch.cuda.get_device_properties(0)
         vram_gb = props.total_memory / (1024**3)
         sm_major, sm_minor = int(props.major), int(props.minor)
-        bf16_supported = torch.cuda.is_bf16_supported()
-        print(f"Primary GPU: {gpu_name} (sm{sm_major}{sm_minor}) | Native BF16 Supported: {bf16_supported}")
+        bf16_supported = (sm_major >= 8)
+        print(f"Primary GPU: {gpu_name} (sm{sm_major}{sm_minor}) | Native BF16 Supported (sm>=80): {bf16_supported}")
         if args.gpus == "auto":
             active_gpus = 2 if (sys.platform.startswith("linux") and gpu_count >= 2) else 1
         else:
@@ -163,7 +163,9 @@ try:
         else:
             effective_parallel = "none"
             active_gpus = 1
-        print(f" [Multi-GPU] Detected={gpu_count} GPU(s) | Active={active_gpus} | Parallel={effective_parallel.upper()}")
+        # KohakuMossTrainer 强制要求全部参与训练的 GPU 原生具备 sm >= 80 (Ampere+) 才允许 BF16
+        bf16_supported = all(int(torch.cuda.get_device_properties(i).major) >= 8 for i in range(active_gpus))
+        print(f" [Multi-GPU] Detected={gpu_count} GPU(s) | Active={active_gpus} | Parallel={effective_parallel.upper()} | Cluster Native BF16={bf16_supported}")
         boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0]], device="cuda")
         scores = torch.tensor([0.9], device="cuda")
         _ = torchvision.ops.nms(boxes, scores, 0.5)

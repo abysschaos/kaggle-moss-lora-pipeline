@@ -20,7 +20,11 @@ if (-not $kernelId -or $kernelId -match "YOUR_KAGGLE_USERNAME") {
     exit 1
 }
 
-kaggle kernels push -p "$KernelPath"
+if ($meta.machine_shape -and $meta.machine_shape.ToString().Trim()) {
+    kaggle kernels push -p "$KernelPath" --accelerator $meta.machine_shape.ToString().Trim()
+} else {
+    kaggle kernels push -p "$KernelPath"
+}
 if ($LASTEXITCODE -eq 0) {
     Write-Host "`nKernel ($kernelId) successfully pushed! Monitoring status..." -ForegroundColor Green
     kaggle kernels status $kernelId

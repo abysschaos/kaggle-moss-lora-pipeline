@@ -25,6 +25,7 @@
 | **15** | `400 Client Error: Bad Request for url: .../SaveKernel` | Kaggle 脚本体积超限 | Version 23 | 放弃 Base64 嵌入，保持 Python 脚本体积在 16KB 轻量级别 |
 | **16** | 画面完全无变化、基本没有收敛 (欠拟合与坐标系失真) | 底模量化与轮次不足 | Version 24 | 底模升级为无损修复版 `MOSS-Image-heal`，步数拉升至 600 步 (60 Epoch)，Alpha 提升至 32 |
 | **17** | ComfyUI 中 native 版本无效，而 comfy/lycoris 有效 | 键名自动桥接失配 | Version 25 | 深入 ComfyUI 源码查明 `lora_unet_` 自动桥接机制，彻底移除错误的前缀替换逻辑 |
+| **18** | `PRECISION='bf16' on cuda:0 (sm75, no bf16): use PRECISION='fp16'` | PyTorch 2.11+ BF16 模拟误报 | v1.4.0 | 弃用 `torch.cuda.is_bf16_supported()`（含模拟判断），改为严格核验全部参与 GPU 的计算能力 `sm_major >= 8` |
 
 ---
 

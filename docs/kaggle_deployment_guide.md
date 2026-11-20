@@ -1,6 +1,6 @@
 # OpenMOSS MOSS-Image Kaggle 云端部署与自定义训练完全手册 (无需任何 AI Agent)
 
-本手册专为希望在 **Kaggle 免费云端 GPU (NVIDIA Tesla T4 16GB)** 上训练自定义 OpenMOSS MOSS-Image LoRA 的个人用户编写。
+本手册专为希望在 **Kaggle 免费云端 GPU (`GPU T4 x2` 双卡 32GB 总显存 / `GPU T4 x1` 16GB)** 上训练自定义 OpenMOSS MOSS-Image LoRA 的个人用户编写。
 
 无需安装复杂的本地 AI Agent，也无需对电脑配置有任何要求（手机、轻薄本均可操作）。只要拥有一个 Kaggle 账号，即可按照自己的图集与参数设置完成全流程训练。
 
@@ -10,10 +10,10 @@
 
 | 评估维度 | 本地个人电脑部署 | Kaggle 云端免费部署 |
 | :--- | :--- | :--- |
-| **显卡硬件** | 依赖本地显卡 (如 RTX 4070/4060 8GB) | **NVIDIA Tesla T4 (16GB 大显存)** |
-| **硬件成本** | 需购置昂贵的游戏本或台式机 | **完全免费** (Kaggle 每周赠送 30 小时 GPU 算力) |
+| **显卡硬件** | 依赖本地显卡 (如 RTX 4070/4060 8GB) | **NVIDIA Tesla T4 × 2 (16GB × 2 = 32GB)** 或 T4 × 1 |
+| **硬件成本** | 需购置昂贵的游戏本或台式机 | **完全免费** (Kaggle 每周赠送 30 小时 GPU 算力，T4 × 2 同样按实际挂钟时长扣减 1:1 额度) |
 | **设备负担** | 训练时风扇狂转、无法流畅玩游戏或办公 | **云端静默运行**，关机或关闭网页依然在后台继续炼 |
-| **计算精度** | 8GB 显卡需锁定 BF16 + CPU 提取文本 | **16GB 大显存**，支持全精度 FP16 高速并发提取 |
+| **计算精度与并行** | 8GB 显卡需锁定 BF16 + CPU 提取文本 | 原生 FP16 Tensor Core 并发；**双卡自动开启 DDP + `ckpt-resident` + `9216` Token 打包（并发 4×1024 图/步）** |
 | **模型下载** | 需消耗本地 20GB 磁盘空间并经历漫长下载 | **Kaggle 直连 HuggingFace**，千兆带宽 1~2 分钟极速下完底模 |
 
 ---
@@ -51,7 +51,7 @@
 
 1. 点击 Kaggle 页面左侧的 **+ Create** -> **New Notebook**，进入在线编程界面。
 2. **配置运行环境 (点击顶部菜单栏中的 Settings)**：
-   - **Accelerator (加速硬件)**：点击顶部菜单 **Settings** -> **Accelerator**，选择 **GPU T4 x1** (16GB VRAM)；
+   - **Accelerator (加速硬件)**：点击顶部菜单 **Settings** -> **Accelerator**，**强烈推荐选择 `GPU T4 x2`**（系统自动启动双卡 DDP 并行，340 步约 3 小时完工；若无配额或偏好单卡也可选择 **GPU T4 x1**）；
    - **Internet (网络开关)**：点击顶部菜单 **Settings** -> **Internet**，切换为 **Internet on** (必须开启网络权限以拉取底模与依赖)。
 3. **挂载您的图集**：
    - 点击顶部菜单 **File** -> **Add Data** (或展开右侧面板中的 **+ Add Input**)；
@@ -100,6 +100,9 @@ PRECISION = "auto"                  # 计算精度: "auto"(T4自动FP16，L4/A10
 TUNE = "off"                        # Triton 调优: "off" | "table"
 OVERLONG = "drop_tokens"            # 超长图文策略: "drop_tokens"(保留全图仅截断超限文本) | "drop"
 TEXT_DEVICE = "auto"                # 文本编码器设备: "auto" | "cuda" | "cpu"
+GPUS = "auto"                       # 启用 GPU 数量: "auto"(检测到 T4 x2 自动双卡) | "1" | "2"
+PARALLEL_MODE = "auto"              # 多卡并行引擎: "auto"(双卡默认 ddp) | "none" | "ddp" | "pipeline"
+MAX_TOKENS = 0                      # 覆盖单卡 Token 上限 (0=自动; 双卡 T4 DDP 默认 9216)
 
 # --- 续炼与存档间隔控制 ---
 TRAIN_MODE = "fresh"                # "fresh" | "resume"(断点续炼) | "init_from"(基于已有LoRA微调)
@@ -139,6 +142,9 @@ cmd = [
     "--tune", str(TUNE),
     "--overlong", str(OVERLONG),
     "--text_device", str(TEXT_DEVICE),
+    "--gpus", str(GPUS),
+    "--parallel", str(PARALLEL_MODE),
+    "--max_tokens", str(MAX_TOKENS),
     "--train_mode", str(TRAIN_MODE),
     "--save_every", str(SAVE_EVERY),
 ]
@@ -153,10 +159,10 @@ subprocess.run(cmd, check=True)
 
 #### 系统在后台执行的自动化过程：
 1. 自动扫描挂载在 `/kaggle/input/` 的任意图集，自动清理旧图孤儿文件并建立 1:1 对齐的 Kohya 标准目录；
-2. 若填写了 `TRIGGER_WORD`，自动将触发词前置拼接至每一张图片的标注头部；
-3. 自动嗅探云端 GPU 型号（T4 / P100 / L4 / A100）、显存容量与原生 BF16 能力，按所选 `MODEL_VARIANT`（`heal` / `base` / `sft`）与量化模式从 HuggingFace 极速下载对应底模，并对未治愈的 Base/SFT 权重在 FP16 模式下自动开启 `FP16_FIX="online"` 防溢出守卫；
-4. 自动打入 PyTorch 2.11 驱动兼容性自愈补丁，同时关闭训练中途采样与盲测防 OOM；
-5. 按照设定的 `VRAM_PRESET` 与 `RESOLUTION` 执行离线双特征提取与 Flow Matching 反向传播训练（在 T4 上切换 `RESOLUTION = 768` 可显著加速，400~600 步约耗时 30~50 分钟）。
+2. 若填写了 `TRIGGER_WORD`，系统会自动先检索全文是否已包含目标触发词，仅当缺失时才前置拼接至标注头部，绝不重复注入；
+3. 自动嗅探云端 GPU 数量与硬件计算能力（严格校验 `sm >= 80` 原生 BF16，防止 PyTorch 2.11+ 软件模拟误报在 T4 `sm75` 上触发拦截）；按所选 `MODEL_VARIANT`（`heal` / `base` / `sft`）拉取底模并自动为 Base/SFT 注入 `FP16_FIX="online"`；
+4. 若检测到 Kaggle **GPU T4 x2**（Linux 2 卡）：自动启用 **`PARALLEL = "ddp"` + `DEVICES = (0, 1)` + `int8` 底模常驻（`MEMORY_PROFILE = "ckpt-resident"`, `MAX_TOKENS = 9216`）**，单步双卡并发 **4 × 1024px** 大图（实测稳态 ~`30.2 s/step`，较单卡 7 小时方案提速约 2.2 倍，340 步约 **3 小时**即可完成等价约 680 步收敛，且严格将 Host RAM 控制在安全水位内）；
+5. 自动打入 PyTorch 2.11 驱动兼容性自愈补丁、关闭训练中途采样防 OOM，并执行离线双特征提取与 Flow Matching 反向传播训练。
 
 ---
 

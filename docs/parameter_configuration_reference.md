@@ -52,6 +52,9 @@
 | **超长样本策略 (`OVERLONG`)** | 当单图视觉 + `.txt` 总 Token 超出 `MAX_TOKENS` 时的处理策略 | `drop_tokens`（仅截断超限文本保留图像）/ `drop` | `--overlong`（默认 `"drop_tokens"`） | `--overlong` / `OVERLONG`（默认 `"drop_tokens"`） |
 | **文本提取设备** | Qwen3.5-9B 离线文本特征提取宿主设备 | 本地 `cpu`/`cuda`；云端 `auto`/`cuda`/`cpu` | `--text_device`（默认 `"cpu"`） | `--text_device` / `TEXT_DEVICE`（默认 `"auto"`） |
 | **VAE 提取设备** | FLUX.2 VAE 潜空间压缩设备 | `cuda` / `cpu` | `--vae_device`（默认 `"cuda"`） | `--vae_device` / `VAE_DEVICE`（默认 `"cuda"`） |
+| **云端 GPU 数量** | 控制并发训练使用的 CUDA 设备数（检测到 T4 x2 且在 Linux 下默认 `2`） | `auto` / `1` / `2` | — | `--gpus` / `GPUS`（默认 `"auto"`） |
+| **多卡并行模式** | 控制云端双卡引擎（DDP 自动启用 `int8`+`ckpt-resident`+`9216` 常驻；Pipeline 为 1F1B 切层） | `auto` / `none` / `ddp` / `pipeline` | — | `--parallel` / `PARALLEL_MODE`（默认 `"auto"`） |
+| **Token 打包上限** | 覆盖单卡单步允许打包的最大图文 Token 预算（`0` 为自动；双卡 DDP 默认 `9216`） | 正整数 (`0` / `4352` / `6144` / `8192` / `9216`) | — | `--max_tokens` / `MAX_TOKENS`（默认 `0`） |
 
 ### 1.5 续炼恢复、存档与本地资产覆盖
 

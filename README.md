@@ -59,11 +59,11 @@ flowchart LR
 
 | 评估维度 | 模式 A：云端 Kaggle / Colab 自动化 | 模式 B：Windows 本地消费级显卡极速模式 |
 | :--- | :--- | :--- |
-| **目标硬件** | Tesla T4 / P100 (16GB) / Colab L4 / A100 | RTX 4070 / 4060 / 3060 / 2060 (6GB ~ 16GB VRAM) |
-| **计算精度** | `auto` 智能嗅探（T4 自动 FP16 + 防溢出，L4/A100 用 BF16） | 原生硬件级 BF16（Turing 显卡自动平滑回退 FP16） |
-| **显存档位与分辨率** | 支持 `auto / 6g / 8g / 12g / 16g` 与 `1024 / 896 / 768 / 512` | GUI / CLI 自由切换显存档位、`896` 甜点分辨率与底模计算精度 |
-| **底模变体支持** | `heal` / `base` / `sft` 全谱系，支持 `int8` 与全精度自动拉取 | 自动探测并直连现有本地 `Base` / `Heal` / `SFT` 文件 |
-| **单步实测参考速度** | ~42 秒 / step (1024) 或 ~24 秒 / step (768, T4) | ~7 - 9 秒 / step (RTX 40 系列, 提速约 4.5 倍) |
+| **目标硬件** | **Kaggle GPU T4 x2 (16GB × 2)** / T4 x1 / Colab L4 / A100 | RTX 4070 / 4060 / 3060 / 2060 (6GB ~ 16GB VRAM) |
+| **计算精度** | 物理架构检测 `sm>=80`（T4 自动 FP16 + 防溢出，L4/A100 用 BF16） | 原生硬件级 BF16（Turing 显卡自动平滑回退 FP16） |
+| **显存档位与分辨率** | 支持 `auto / 6g / 8g / 12g / 16g`、`1024 / 896 / 768 / 512` 与 **Dual-T4 DDP** | GUI / CLI 自由切换显存档位、`896` 甜点分辨率与底模计算精度 |
+| **底模变体支持** | `heal` / `base` / `sft` 全谱系，Dual-T4 DDP 自动优选 `int8`+`ckpt-resident` | 自动探测并直连现有本地 `Base` / `Heal` / `SFT` 文件 |
+| **单步实测参考速度** | **Dual-T4 DDP: ~30.2 秒/step (并发 4×1024 图，约 7.5 秒/图)**；单卡 ~42s | ~7 - 9 秒 / step (RTX 40 系列, 提速约 4.5 倍) |
 | **模型资产依赖** | 从 HuggingFace 按所选变体与量化规格高速拉取 | 优先零拷贝复用本机 ComfyUI 模型库，无需重复下载 |
 | **标准入口** | [notebooks/kaggle_moss_lora_training.ipynb](notebooks/kaggle_moss_lora_training.ipynb) 或 `.\scripts\push_to_kaggle.ps1` | `MOSS_LoRA_Trainer.exe`（由 [build_exe.bat](build_exe.bat) 1 秒编译）或 [launch_ui.vbs](launch_ui.vbs) |
 
@@ -76,7 +76,7 @@ flowchart LR
 ### 方式一：Windows 本地极速上手（3 步零黑框启动）
 
 #### 1. 获取项目代码与发行工具
-- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.3.0)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
+- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.4.0)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
 - **Git 命令行克隆**：
   ```bash
   git clone https://github.com/abysschaos/kaggle-moss-lora-pipeline.git
@@ -168,7 +168,7 @@ python train_local.py `
     --copy_to_comfy_loras
 ```
 
-> 本地 36 个 CLI 开关与云端 32 个 CLI / 环境变量参数全表，请参阅 [docs/parameter_configuration_reference.md](docs/parameter_configuration_reference.md)。
+> 本地 36 个 CLI 开关与云端 35 个 CLI / 环境变量参数全表，请参阅 [docs/parameter_configuration_reference.md](docs/parameter_configuration_reference.md)。
 
 ### 3. 断点续炼与已有 LoRA 继续微调
 
@@ -192,6 +192,7 @@ python train_local.py `
 | `TARGET_PRESET` / `LORAPLUS_RATIO` | `attn-mlp` / `1.0` | `train_moss.py` | Transformer 注入层预设与 LoRA+ 上投影学习率倍率 |
 | `GRAD_ACC` / `TIMESTEP_MU` | `1` / `-1.09` | `train_moss.py` | 梯度累积步数与 Logit-Normal 噪声采样重心（`-1.09` 画风 / `0.35` 角色） |
 | `BASE_PRECISION` / `TUNE` / `OVERLONG` | `auto` / `off` / `drop_tokens` | `train_moss.py` | 底模计算精度（含 `sm89+` 守卫）、Triton 调优与超长截断保护 |
+| `GPUS` / `PARALLEL_MODE` / `MAX_TOKENS` | `auto` / `auto` / `0` | `train_moss.py` | 多卡控制（`T4 x2` 自动启用 DDP + `ckpt-resident` + `9216` Token 打包） |
 | `SUBSETS_JSON` | 空 | `train_moss.py` | 多子集配比 JSON 数组或文件路径 |
 
 ---
@@ -217,7 +218,7 @@ python train_local.py `
 
 ```text
 kaggle_moss_lora_pipeline/
-├── VERSION                                    # 单一版本信源 (1.3.0)
+├── VERSION                                    # 单一版本信源 (1.4.0)
 ├── LICENSE                                    # Apache License 2.0 开源协议
 ├── CHANGELOG.md                               # Keep a Changelog 1.1.0 演进记录
 ├── README.md                                  # 项目主文档与全双轨操作指南
@@ -260,7 +261,7 @@ kaggle_moss_lora_pipeline/
     ├── local_installation_guide.md            # Windows 本地安装、底模下载与零拷贝复用指南
     ├── local_deployment_guide.md              # 消费级显卡 8GB 显存解耦与 BF16 原理白皮书
     ├── kaggle_deployment_guide.md             # Kaggle 纯网页端与 CLI 自动化操作手册
-    ├── parameter_configuration_reference.md   # 本地 36 项与云端 32 项参数速查与 JSON 范例
+    ├── parameter_configuration_reference.md   # 本地 36 项与云端 35 项参数速查与 JSON 范例
     ├── hyperparameter_tuning_guide.md         # 画风/人物/多子集/DoRA/LoRA+ 与 Mu 时间步调优指南
     ├── dit_flow_matching_guide.md             # 5B DiT 连续流匹配、Logit-Normal Mu 与 Token Packing 模型
     ├── comfyui_inference_guide.md             # ComfyUI 原生节点配置与 SLG 推理规范

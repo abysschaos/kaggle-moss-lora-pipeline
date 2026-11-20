@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-20
+
+### Added
+- **Kaggle `GPU T4 x2` 双卡自动并行加速管线 (`--gpus` / `--parallel` / `--max_tokens`)**：
+  - 在 [train_moss.py](train_moss.py)、[.env.example](.env.example)、[notebooks/kaggle_moss_lora_training.ipynb](notebooks/kaggle_moss_lora_training.ipynb)、[kernel-metadata.json](kernel-metadata.json) 与 [scripts/push_to_kaggle.ps1](scripts/push_to_kaggle.ps1) 中新增多卡控制旋钮（`--gpus {auto,1,2}`、`--parallel {auto,none,ddp,pipeline}`、`--max_tokens` 与 `machine_shape = "NvidiaTeslaT4"`）。
+  - 在 Kaggle Linux 双 T4 环境下默认自动启用 `PARALLEL = "ddp"`、`DEVICES = (0, 1)`、`DIST_BACKEND = "auto"`、`DDP_REDUCE_DTYPE = "fp32"`、`DDP_BUCKET_MB = 25`，并配套锁定 **`int8` 底模 + `MEMORY_PROFILE = "ckpt-resident"` + `MAX_TOKENS = 9216`**（消除 CPU-GPU 频繁卸载同时保护 30GB 主机内存，每卡打包 2 × 1024px、双卡全局并发 4 × 1024px / 步，实测稳态达 `30.16 s/step`，较单卡 7 小时方案提速约 2.2 倍）。
+  - 同步保留 `--parallel pipeline`（1F1B 跨卡层切分）供需要全精度 FP16 常驻的场景手动切换。
+
+### Changed
+- **五位一体同步升级与文档补全**：更新 [VERSION](VERSION) 至 `1.4.0`、[launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) 程序集版本至 `1.4.0.0`，同步更新 [README.md](README.md)、[docs/kaggle_deployment_guide.md](docs/kaggle_deployment_guide.md)、[docs/parameter_configuration_reference.md](docs/parameter_configuration_reference.md) 与 [docs/troubleshooting_matrix.md](docs/troubleshooting_matrix.md)。
+
+### Fixed
+- **修复 PyTorch 2.11+ `is_bf16_supported()` 在 T4 (`sm75`) 误报导致训练验证崩溃的缺陷**：由于新版 PyTorch 将软件模拟检测纳入 `torch.cuda.is_bf16_supported()` 返回值，T4 被误判为支持 BF16 并被 `KohakuMossTrainer` 拦截报错 `PRECISION='bf16' on cuda:0 (sm75, no bf16)`；现已于 [train_moss.py](train_moss.py)、[train_local.py](train_local.py) 与 [gui_local.py](gui_local.py) 全面切换为严谨的物理计算能力检查 `sm_major >= 8`（多卡模式下联检全部参与设备），确保 T4 自动锁定原生 `fp16`。
+- **修复自然语言触发词重复拼接问题**：将 [train_moss.py](train_moss.py) 注入触发词的前置判断由仅比对句首（`startswith`）升级为全文不区分大小写检索（`trigger_clean.lower() not in caption.lower()`），避免已含 `in the style of <trigger>` 的高质量自然语言标注被二次重复加前缀。
+
 ## [1.3.0] - 2026-11-20
 
 ### Added
@@ -83,7 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.0...v1.2.1

@@ -10,7 +10,7 @@ SUPPORTED_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VRAM_MAX_TOKENS = {"6g": 4352, "8g": 4352, "12g": 6144, "16g": 8192}
 
 
-def load_app_version(fallback: str = "1.5.1") -> str:
+def load_app_version(fallback: str = "1.5.2") -> str:
     """读取项目根目录 VERSION 单一版本信源，缺失时安全回退。"""
     ver_file = PROJECT_ROOT / "VERSION"
     try:
@@ -20,6 +20,11 @@ def load_app_version(fallback: str = "1.5.1") -> str:
     except Exception:
         pass
     return fallback
+
+
+def is_trainer_ready(trainer_dir: Path) -> bool:
+    """核验 KohakuMossTrainer 引擎目录是否完整（必须同时具备 pyproject.toml 与 src/kohakumoss）。"""
+    return (trainer_dir / "pyproject.toml").is_file() and (trainer_dir / "src" / "kohakumoss").is_dir()
 
 
 def resolve_cli_python() -> str:

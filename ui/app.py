@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -27,6 +28,7 @@ from core import (
     discover_default_comfy_models,
     force_kill_process_tree,
     get_preset_by_id,
+    is_trainer_ready,
     load_app_version,
     load_local_config,
     open_in_explorer,
@@ -508,11 +510,10 @@ class ModernLocalTrainerGUI:
     # ==================== 引擎管理、底模扫描与输出预览 ====================
     def check_trainer_status(self):
         trainer_dir = PROJECT_ROOT / "KohakuMossTrainer"
-        core_file = trainer_dir / "scripts" / "train_moss_lora.py"
-        if core_file.exists():
+        if is_trainer_ready(trainer_dir):
             self.var_trainer_status.set("✅ 已就绪：KohakuMossTrainer 引擎完整存在（可直接启动）")
         elif trainer_dir.exists():
-            self.var_trainer_status.set("⚠️ 目录存在但核心脚本缺失，请点击右方【一键安装 / 同步引擎】修复")
+            self.var_trainer_status.set("⚠️ 目录存在但未发现 pyproject.toml / src/kohakumoss，请点击右方【一键安装 / 同步引擎】修复")
         else:
             self.var_trainer_status.set("❌ 未安装：尚未下载 KohakuMossTrainer 引擎，请点击右方按钮自动拉取")
 
@@ -527,94 +528,170 @@ class ModernLocalTrainerGUI:
 
     def patch_trainer_manually(self):
         trainer_dir = PROJECT_ROOT / "KohakuMossTrainer"
-        if not trainer_dir.exists():
-            messagebox.showwarning("引擎未找到", "请先点击【一键安装 / 同步引擎】下载 KohakuMossTrainer。")
+        if not is_trainer_ready(trainer_dir):
+            messagebox.showwarning("引擎未找到", "未发现完整的 KohakuMossTrainer（缺少 pyproject.toml 或 src/kohakumoss），请先点击【一键安装 / 同步引擎】。")
             return
         try:
             import train_local
 
             train_local.apply_compatibility_patches(trainer_dir)
+            self.check_trainer_status()
             self.monitor.log("[系统] 已完成 KohakuMossTrainer 全套兼容补丁修复。\n")
             messagebox.showinfo("修复完成", "已注入 PyTorch 兼容补丁与调度器防护！")
         except Exception as err:
             messagebox.showerror("修补失败", str(err))
 
+    @staticmethod
+    def _force_rmtree(target: Path):
+        """清除只读属性后安全删除临时或残缺目录（兼容 Windows .git pack 只读文件）。"""
+        if not target.exists():
+            return
+        for item in target.rglob("*"):
+            try:
+                os.chmod(item, stat.S_IWRITE)
+            except Exception:
+                pass
+        try:
+            os.chmod(target, stat.S_IWRITE)
+        except Exception:
+            pass
+        shutil.rmtree(target, ignore_errors=True)
+
+    @staticmethod
+    def _backup_trainer_user_data(trainer_dir: Path, backup_dir: Path):
+        """在替换损坏目录前备份用户训练产物与自定义配置，防止历史 runs/ 丢失。"""
+        if backup_dir.exists():
+            ModernLocalTrainerGUI._force_rmtree(backup_dir)
+        for rel in ("runs", os.path.join("configs", "user")):
+            src = trainer_dir / rel
+            if src.exists():
+                dst = backup_dir / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+
+    @staticmethod
+    def _restore_trainer_user_data(backup_dir: Path, trainer_dir: Path):
+        """恢复之前备份的 runs/ 与 configs/user/ 目录。"""
+        if not backup_dir.exists():
+            return
+        for rel in ("runs", os.path.join("configs", "user")):
+            src = backup_dir / rel
+            if src.exists():
+                dst = trainer_dir / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+
     def download_or_clone_trainer(self):
-        """后台线程下载或同步 KohakuMossTrainer（支持 git 镜像回退与 ZIP 解压 + 自动打补丁）。"""
+        """无损下载或同步 KohakuMossTrainer（先拉取到临时暂存区验真再切换，绝不误删现有完整引擎）。"""
+        trainer_dir = PROJECT_ROOT / "KohakuMossTrainer"
+        already_ready = is_trainer_ready(trainer_dir)
+        if already_ready:
+            proceed = messagebox.askyesno(
+                "引擎已就绪",
+                "检测到 KohakuMossTrainer 已完整安装！\n"
+                "是否尝试在线拉取最新更新？（全程无损更新，绝不会删除 runs/ 断点与 configs/user/ 配置）",
+            )
+            if not proceed:
+                return
+
         def _worker():
-            trainer_dir = PROJECT_ROOT / "KohakuMossTrainer"
-            core_file = trainer_dir / "scripts" / "train_moss_lora.py"
-            self.root.after(0, lambda: self.var_trainer_status.set("⏳ 正在安装/同步 KohakuMossTrainer，请稍候..."))
-            self.root.after(0, lambda: self.monitor.log("[引擎] 开始拉取 KohakuMossTrainer 仓库...\n"))
+            self.root.after(0, lambda: self.var_trainer_status.set("⏳ 正在无损安装/同步 KohakuMossTrainer，请稍候..."))
+            self.root.after(0, lambda: self.monitor.log("[引擎] 开始执行无损检查与 KohakuMossTrainer 同步...\n"))
 
-            success = False
+            # 若现有目录已就绪且具备 .git，仅执行安全快进更新，不删除现有目录
+            if is_trainer_ready(trainer_dir) and (trainer_dir / ".git").exists() and shutil.which("git"):
+                res = subprocess.run(
+                    ["git", "-C", str(trainer_dir), "pull", "--ff-only"],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
+                )
+                if res.returncode == 0 and is_trainer_ready(trainer_dir):
+                    try:
+                        import train_local
+
+                        train_local.apply_compatibility_patches(trainer_dir)
+                    except Exception:
+                        pass
+                    self.root.after(0, self.check_trainer_status)
+                    self.root.after(0, lambda: self.monitor.log("[引擎] KohakuMossTrainer 已无损拉取更新并完成兼容修补。\n"))
+                    self.root.after(0, lambda: messagebox.showinfo("同步成功", "KohakuMossTrainer 已更新并完成兼容修补（现有数据完全保留）！"))
+                    return
+                self.root.after(0, self.check_trainer_status)
+                self.root.after(0, lambda: self.monitor.log("⚠️ [引擎] 在线 git pull 未成功，已完整保留本地现有引擎不做任何删除。\n"))
+                self.root.after(0, lambda: messagebox.showwarning("更新未完成", "在线拉取超时或存在本地修改，现有 KohakuMossTrainer 引擎已完整保留不受影响。"))
+                return
+
+            stage_dir = PROJECT_ROOT / "workspace" / "_trainer_stage"
+            backup_dir = PROJECT_ROOT / "workspace" / "_trainer_preserve"
+            self._force_rmtree(stage_dir)
+            stage_dir.parent.mkdir(parents=True, exist_ok=True)
+            staged_ok = False
+
             if shutil.which("git"):
-                urls = [
-                    "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git",
-                    "https://ghfast.top/https://github.com/KohakuBlueleaf/KohakuMossTrainer.git",
+                git_cmds = [
+                    ["git", "clone", "--depth", "1", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(stage_dir)],
+                    ["git", "-c", "http.proxy=http://127.0.0.1:7890", "clone", "--depth", "1", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(stage_dir)],
+                    ["git", "clone", "--depth", "1", "https://ghfast.top/https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(stage_dir)],
                 ]
-                if (trainer_dir / ".git").exists():
+                for gcmd in git_cmds:
+                    self._force_rmtree(stage_dir)
                     res = subprocess.run(
-                        ["git", "-C", str(trainer_dir), "pull", "--ff-only"],
-                        capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
+                        gcmd, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
                     )
-                    if res.returncode == 0 and core_file.exists():
-                        success = True
-                if not success:
-                    for url in urls:
-                        if trainer_dir.exists() and not core_file.exists():
-                            shutil.rmtree(trainer_dir, ignore_errors=True)
-                        if not trainer_dir.exists():
-                            res = subprocess.run(
-                                ["git", "clone", "--depth", "1", url, str(trainer_dir)],
-                                capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
-                            )
-                            if res.returncode == 0 and core_file.exists():
-                                success = True
-                                break
+                    if res.returncode == 0 and is_trainer_ready(stage_dir):
+                        staged_ok = True
+                        break
 
-            if not success:
+            if not staged_ok:
                 zip_urls = [
                     "https://github.com/KohakuBlueleaf/KohakuMossTrainer/archive/refs/heads/main.zip",
                     "https://ghfast.top/https://github.com/KohakuBlueleaf/KohakuMossTrainer/archive/refs/heads/main.zip",
                 ]
                 tmp_zip = PROJECT_ROOT / "workspace" / "trainer_main.zip"
-                tmp_zip.parent.mkdir(parents=True, exist_ok=True)
+                extract_tmp = PROJECT_ROOT / "workspace" / "_trainer_extract"
                 for zurl in zip_urls:
                     try:
+                        self._force_rmtree(extract_tmp)
+                        self._force_rmtree(stage_dir)
                         req = urllib.request.Request(zurl, headers={"User-Agent": "Mozilla/5.0"})
                         with urllib.request.urlopen(req, timeout=45) as resp, open(tmp_zip, "wb") as out_f:
                             out_f.write(resp.read())
-                        extract_tmp = PROJECT_ROOT / "workspace" / "_trainer_extract"
-                        shutil.rmtree(extract_tmp, ignore_errors=True)
                         with zipfile.ZipFile(tmp_zip, "r") as zf:
                             zf.extractall(extract_tmp)
                         sub = extract_tmp / "KohakuMossTrainer-main"
                         if sub.is_dir():
-                            shutil.rmtree(trainer_dir, ignore_errors=True)
-                            shutil.move(str(sub), str(trainer_dir))
-                        shutil.rmtree(extract_tmp, ignore_errors=True)
-                        tmp_zip.unlink(missing_ok=True)
-                        if core_file.exists():
-                            success = True
+                            shutil.move(str(sub), str(stage_dir))
+                        if is_trainer_ready(stage_dir):
+                            staged_ok = True
                             break
                     except Exception:
                         pass
+                    finally:
+                        self._force_rmtree(extract_tmp)
+                        tmp_zip.unlink(missing_ok=True)
 
-            if success:
+            if staged_ok:
                 try:
+                    self._backup_trainer_user_data(trainer_dir, backup_dir)
+                    self._force_rmtree(trainer_dir)
+                    shutil.move(str(stage_dir), str(trainer_dir))
+                    self._restore_trainer_user_data(backup_dir, trainer_dir)
+                    self._force_rmtree(backup_dir)
                     import train_local
 
                     train_local.apply_compatibility_patches(trainer_dir)
-                except Exception:
-                    pass
+                except Exception as err:
+                    self.root.after(0, self.check_trainer_status)
+                    self.root.after(0, lambda e=err: self.monitor.log(f"❌ [引擎] 切换目录或修补异常: {e}\n"))
+                    self.root.after(0, lambda e=err: messagebox.showerror("安装异常", f"切换目录或写入补丁失败：{e}"))
+                    return
                 self.root.after(0, self.check_trainer_status)
-                self.root.after(0, lambda: self.monitor.log("[引擎] KohakuMossTrainer 安装同步与兼容补丁已就绪！\n"))
+                self.root.after(0, lambda: self.monitor.log("[引擎] KohakuMossTrainer 无损安装/修复与兼容补丁已就绪！\n"))
                 self.root.after(0, lambda: messagebox.showinfo("同步成功", "KohakuMossTrainer 核心引擎已安装并完成兼容修补！"))
             else:
+                self._force_rmtree(stage_dir)
                 self.root.after(0, self.check_trainer_status)
-                self.root.after(0, lambda: self.monitor.log("❌ [引擎] 无法自动下载，请检查网络或手动克隆到项目根目录。\n"))
-                self.root.after(0, lambda: messagebox.showerror("同步失败", "GitHub 与镜像通道均超时，请检查网络连接或手动下载。"))
+                self.root.after(0, lambda: self.monitor.log("❌ [引擎] 全部通道下载均未成功，原有目录保持原样未删。\n"))
+                self.root.after(0, lambda: messagebox.showerror("同步失败", "GitHub 与镜像通道均超时，原有文件未作删除。请检查网络后重试。"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1107,7 +1184,7 @@ class ModernLocalTrainerGUI:
 
         py_exe = resolve_cli_python()
         gpu_text, vram_gb = probe_gpu_quick()
-        trainer_ok = (PROJECT_ROOT / "KohakuMossTrainer" / "scripts" / "train_moss_lora.py").exists()
+        trainer_ok = is_trainer_ready(PROJECT_ROOT / "KohakuMossTrainer")
         torch_info = "未知"
         try:
             import torch
@@ -1134,8 +1211,8 @@ class ModernLocalTrainerGUI:
         if self.is_training:
             return
 
-        if not (PROJECT_ROOT / "KohakuMossTrainer" / "scripts" / "train_moss_lora.py").exists():
-            messagebox.showerror("引擎未安装", "请先切换到【📦 底模与框架】选项卡并点击【一键安装 / 同步引擎】！")
+        if not is_trainer_ready(PROJECT_ROOT / "KohakuMossTrainer"):
+            messagebox.showerror("引擎未安装", "未发现完整的 KohakuMossTrainer（缺少 pyproject.toml 或 src/kohakumoss），请先切换到【📦 底模与框架】选项卡并点击【一键安装 / 同步引擎】！")
             self.select_tab(2)
             return
 

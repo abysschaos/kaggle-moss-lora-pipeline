@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持一键传图、远程拉起 `train_moss.py` 与日志流式回传、本地看板实时渲染远端 Loss 曲线；
     - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 等平台的一键启停机与费用告警适配器接口。
 
+## [1.5.2] - 2026-11-22
+
+### Fixed
+- **紧急修复 v1.5.1 `KohakuMossTrainer` 引擎就绪校验哨兵错判并误清目录的严重缺陷**：
+  - 将 [core/config_store.py](core/config_store.py) 与 [ui/app.py](ui/app.py) 中所有引擎校验统一抽取为 `is_trainer_ready(trainer_dir)`（对齐 `v1.5.0` 正确哨兵 `pyproject.toml` + `src/kohakumoss/`），彻底修复 `v1.5.1` 误判 `scripts/train_moss_lora.py` 不存在导致误报引擎缺失的问题；
+  - 将 `download_or_clone_trainer()` 全面升级为**无损原子同步架构**：若本地已完整安装，仅支持先确认后 `git pull --ff-only`，拉取失败时绝不删除原目录；全新安装或修复残缺目录时，强制先拉取到临时暂存区（`workspace/_trainer_stage`）并验证通过后再迁移覆盖，同时自动备份并还原 `runs/` 训练断点/日志与 `configs/user/` 自定义配置，并在清理残缺 `.git` 时自动解除 Windows 只读属性保护；
+  - 补充 `http://127.0.0.1:7890` 本地代理与 `ghfast.top` 镜像自动回退。
+
+### Changed
+- **五位一体热修复同步**：更新 [VERSION](VERSION) 至 `1.5.2`、[launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) 程序集版本至 `1.5.2.0`，同步更新 [CHANGELOG.md](CHANGELOG.md)、[README.md](README.md) 与全局技能 `kohaku`，并重新编译 `MOSS_LoRA_Trainer.exe` 与 `SHA256SUMS.txt`。
+
 ## [1.5.1] - 2026-11-22
 
 ### Added
@@ -145,7 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.3.0...v1.4.0

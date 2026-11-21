@@ -34,7 +34,7 @@
 
 - **全谱系底模与显存弹性档位**：本地与云端双轨同步支持 `MOSS-Image-Base`、`MOSS-Image-heal` 与 `MOSS-Image-SFT` 三大变体自动探测，提供 `auto / 6g / 8g / 12g / 16g` 五档精准校准显存配置（`MAX_TOKENS = 4352 / 6144 / 8192`）与 `1024 / 896 / 768 / 512` 动态分桶分辨率；支持 `--base_precision`（含 RTX 40 系+ `fp8_compute` + `FP8_DGRAD="16bit"` 守卫）与非 Heal 底模 `FP16_FIX="online"` 防溢出保护。
 - **三阶时序解耦与零重复消费下载**：支持全盘宽域扫描并零拷贝复用现有 ComfyUI 模型库，按需路由 Qwen3.5-9B 至主机内存执行 CPU 离线文本特征提取（当主机内存 ≥22GB 或 GPU ≥15GB 时智能优先选用全精度 BF16 文本编码器），随后由 GPU 提取 FLUX.2 VAE 潜向量并释放，最终在仅载入 5B DiT 与轻量适配器的状态下完成高精度微调。
-- **原生零黑框 Windows 桌面控制台与实时监控看板**：内建开源可审计 C# 启动器 [MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs)，1 秒无第三方依赖编译为原生 `MOSS_LoRA_Trainer.exe`；配备深色宽屏界面、纯原生 `tk.Canvas` 实时 Loss / EMA 折线图、4 枚 KPI 卡片、**【🩺 一键体检图集】预检工具**以及两排 **8 套实战预设模板**（含 LoKr 高还原画风、小图集防过拟合角色、Muon 画风加速）。
+- **原生零黑框 Windows 桌面控制台与 5-Tab 分区看板**：内建开源可审计 C# 启动器 [MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs)，1 秒无第三方依赖编译为原生 `MOSS_LoRA_Trainer.exe`；采用 `core/` + `ui/` 解耦架构与深色 `5-Tab` 选项卡工作区（`🚀 快速训练 / 📂 数据与续炼 / 📦 底模与框架 / ☁️ 云端遥控 / 📖 指南与工具`），右侧常驻纯原生 `tk.Canvas` 实时 Loss / EMA 折线图与 4 枚 KPI 卡片，内置 **【🩺 一键体检图集】预检工具**、**8 套实战预设模板**以及离线手册直读器。
 - **全场景断点续炼与中途暂停存盘**：支持 `fresh / resume / init_from` 三大训练模式、双轨同步解析 `safetensors` 头部自动对齐已有架构（含 LoKr 因子与 `TRAIN_NORMS`）、训练中途随时点击【暂停并存盘】安全退出并保留权重，以及每 10 秒后台增量同步导出产物到专属目录与 ComfyUI `models/loras/`。
 - **高阶适配器防过拟合、多优化器与自适应调度体系**：双轨开放 LoKr 全参数（`--lokr_factor / --lokr_full_matrix / --lokr_decompose_both`）、`--train_norms`、三层 `DROPOUT`（含 DoRA `input_dropout` 强置 0 防护）、`AdamW / AdamW8bit Kernel / Muon` 优化器与 GPU 安全显存档位自动重映射、`Cosine / Constant` 调度、可配 `Warmup` 与 `EMA` 平滑、多种时间步分布（`moss / uniform / logit_normal`）、`--text_drop / --flip / --seed / --save_format`，以及默认折叠的 GUI 进阶抽屉兼顾小白零门槛与高阶精细微调。
 
@@ -78,7 +78,7 @@ flowchart LR
 ### 方式一：Windows 本地极速上手（3 步零黑框启动）
 
 #### 1. 获取项目代码与发行工具
-- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.5.0)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
+- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.5.1)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
 - **Git 命令行克隆**：
   ```bash
   git clone https://github.com/abysschaos/kaggle-moss-lora-pipeline.git
@@ -99,7 +99,7 @@ flowchart LR
 | [launch_ui.bat](launch_ui.bat) | 批处理兼容入口 | 用于双击习惯或快捷脚本中转，自动转交 `launch_ui.vbs` 后立即关闭窗口 | 极短闪关 / 否 |
 | [scripts/run_local.ps1](scripts/run_local.ps1) | 交互式 PowerShell CLI | **终端/无人值守调试**：快速检测显卡与默认图集后直接敲回车或输入 `custom` 跑 CLI | 是（终端模式） |
 
-打开图形控制台后，选择图集文件夹（先点一次【🩺 一键体检图集】排查缺失/糊图/超长文本，或在卡片内启用【多子集配比模式】）、在顶部一键套用 8 套实战模板（`艺术画风 / 单人角色 / 多人物配比 / 多画风配比 / 概念与动作 / LoKr 高还原画风 / 小图集防过拟合角色 / Muon 画风加速`），点击【🚀 启动本地极速训练】即可在右侧实时看板观察 Loss / EMA 曲线，训练完成后权重将自动存入 `output/<lora_name>/` 并可一键推送至 `ComfyUI/models/loras/`。
+打开图形控制台后，界面按任务划分为左侧 **5 大选项卡**与右侧**实时监控看板**：在【📂 数据与续炼】选择图集并点一次【🩺 一键体检图集】（或启用多子集配平），在【🚀 快速训练】顶部一键套用 8 套实战模板（`艺术画风 / 单人角色 / 多人物配比 / 多画风配比 / 概念与动作 / LoKr 高还原画风 / 小图集防过拟合角色 / Muon 画风加速`）并点击【📐 一键对齐推荐步数】，随后点击【🚀 启动本地极速训练】即可在右侧实时观察 Loss / EMA 曲线，训练完成后权重自动归档到 `output/<lora_name>/` 并可同步至 `ComfyUI/models/loras/`。
 
 ---
 
@@ -223,7 +223,7 @@ python train_local.py `
 
 ```text
 kaggle_moss_lora_pipeline/
-├── VERSION                                    # 单一版本信源 (1.5.0)
+├── VERSION                                    # 单一版本信源 (1.5.1)
 ├── LICENSE                                    # Apache License 2.0 开源协议
 ├── CHANGELOG.md                               # Keep a Changelog 1.1.0 演进记录
 ├── README.md                                  # 项目主文档与全双轨操作指南
@@ -238,7 +238,23 @@ kaggle_moss_lora_pipeline/
 ├── build_exe.bat                              # 1 秒本地编译 MOSS_LoRA_Trainer.exe 批处理入口
 ├── launch_ui.vbs                              # 免编译 Windows 零黑框原生桌面启动器
 ├── launch_ui.bat                              # Windows 启动兼容入口 (转交 launch_ui.vbs 后秒关)
-├── gui_local.py                               # 深色宽屏本地控制台 (8预设 / 一键图集体检 / 进阶抽屉 / Loss曲线)
+├── gui_local.py                               # 桌面控制台轻量兼容入口 (向下兼容 exe / vbs / bat)
+├── core/                                      # GUI 无界面业务逻辑内核包
+│   ├── __init__.py
+│   ├── config_store.py                        # 配置持久化、ComfyUI 宽域探测与曝光步数计算
+│   ├── presets.py                             # 8 套声明式场景预设与默认高阶参数字典
+│   └── trainer_runner.py                      # 参数校验、54 参数 CLI 构建、优雅暂停与进程树强杀
+├── ui/                                        # 5-Tab 桌面表现层组件包
+│   ├── __init__.py
+│   ├── theme.py                               # Catppuccin Mocha 暗色主题与 TNotebook/Treeview 样式
+│   ├── widgets.py                             # 自适应折叠 ScrollableFrame、选择器与只读阅读弹窗
+│   ├── monitor_panel.py                       # 右侧常驻 KPI 卡片、Loss/EMA 画布与终端控制台
+│   ├── tab_train.py                           # Tab 1: 🚀 快速训练（8 预设 + 核心/高阶参数）
+│   ├── tab_dataset.py                         # Tab 2: 📂 数据与续炼（单/多子集配平 + 体检 + Resume）
+│   ├── tab_models.py                          # Tab 3: 📦 底模与框架（三核心底模探测 + 引擎同步）
+│   ├── tab_cloud.py                           # Tab 4: ☁️ 云端遥控（v1.6.0 规划与 Kaggle 资产入口）
+│   ├── tab_help.py                            # Tab 5: 📖 指南与工具（离线文档阅读器与一键体检）
+│   └── app.py                                 # 主窗口编排控制器 (ModernLocalTrainerGUI)
 ├── train_local.py                             # Windows 消费级显卡本地训练执行引擎与图集体检器
 ├── train_moss.py                              # Kaggle / Colab 云端自动化训练执行引擎
 ├── .github/
@@ -294,7 +310,7 @@ kaggle_moss_lora_pipeline/
 
 ## 更新计划 (Roadmap)
 
-以下规划项已列入项目迭代路线图（尚未合入当前 `v1.5.0` 代码，将在后续版本逐步交付）：
+以下规划项已列入项目迭代路线图（尚未合入当前 `v1.5.1` 代码，将在后续版本逐步交付）：
 
 ### 1. v1.5.x 训练体验增强候选
 - **训练期定时样图预览 (`SAMPLE_EVERY` / `SAMPLE_PROMPTS`)**：配套显存安全守卫，在训练中途定期生成验证图以便直观评估收敛质量。

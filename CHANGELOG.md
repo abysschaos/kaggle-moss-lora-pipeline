@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持一键传图、远程拉起 `train_moss.py` 与日志流式回传、本地看板实时渲染远端 Loss 曲线；
     - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 等平台的一键启停机与费用告警适配器接口。
 
+## [1.5.1] - 2026-11-22
+
+### Added
+- **GUI 多标签页（5-Tab Notebook）清爽工作区重构与模块化解耦（`core/` + `ui/`）**：
+  - 将原先单栏长达三千余行的 `gui_local.py` 拆分为清晰的逻辑内核包 [core/](core/__init__.py)（`config_store.py` 路径/GPU/配置持久化与曝光计算、`presets.py` 8 套声明式预设数据、`trainer_runner.py` 参数校验/CLI 构建/优雅暂停/进程树清理/权重抢救）与表现层包 [ui/](ui/__init__.py)（`theme.py`、`widgets.py`、`monitor_panel.py`、`app.py` 及 5 个独立选项卡模块）；
+  - 左侧配置区升级为 `ttk.Notebook` 暗色无边框 5 大选项卡：**`🚀 快速训练`**（8 套预设 + 命名状态摘要条 + 核心超参 & 默认折叠的 18 项高阶抽屉 + 一键公式对齐）、**`📂 数据与续炼`**（单目录/多子集配比 Treeview 与一键配平 + 图集体检 + `fresh / resume / init_from` 规格自动对齐）、**`📦 底模与框架`**（ComfyUI/本地三核心底模探测 + `KohakuMossTrainer` 下载同步与补丁修复）、**`☁️ 云端遥控`**（`v1.6.0` 云端遥控架构规划展示及现有 Kaggle Notebook / `kernel-metadata.json` / `.env.example` / 部署指南快捷入口）、**`📖 指南与工具`**（五大离线指南弹窗直读器、本机运行环境一键自检、常用目录直达）；
+  - 右侧常驻 [MonitorPanel](ui/monitor_panel.py)（4 枚 KPI 卡片、实时进度条、Loss/EMA 原生画布折线图、终端控制台与启动/暂停存盘/强制终止控制条），在任意选项卡下均可实时监控收敛情况。
+
+### Changed
+- **全入口零破坏兼容与主题细节优化**：[gui_local.py](gui_local.py) 保留为轻量兼容入口，无缝对接 `MOSS_LoRA_Trainer.exe`、`launch_ui.vbs`、`launch_ui.bat` 与 `scripts/silent_launcher.pyw`，完整向后兼容既有的 `local_config.json` 与 `train_local.py` 全部 54 个 CLI 参数；切换选项卡时自动清理滚轮监听并刷新滚动区避免漂移。
+- **版本与文档同步**：更新 [VERSION](VERSION) 至 `1.5.1`、[launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) 程序集版本至 `1.5.1.0`，同步更新 [README.md](README.md)、[docs/beginner_guide.md](docs/beginner_guide.md) 及全局技能 `kohaku`，重新编译 `MOSS_LoRA_Trainer.exe` 与 `SHA256SUMS.txt`。
+
 ## [1.5.0] - 2026-11-22
 
 ### Added
@@ -133,7 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.2...v1.3.0

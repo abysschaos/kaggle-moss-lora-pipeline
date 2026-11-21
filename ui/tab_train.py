@@ -1,0 +1,406 @@
+"""Tab 1 (🚀 快速训练): 8 presets, task naming/quick status bar, core hyperparameters & collapsible drawer."""
+
+import tkinter as tk
+from tkinter import ttk
+
+from core.presets import PRESETS
+from .theme import PALETTE
+from .widgets import ScrollableFrame
+
+
+def _add_labeled_entry(parent, row: int, col_base: int, label_text: str, var: tk.Variable, pady: int = 3):
+    """在网格中创建统一风格的标签 + 输入框组合。"""
+    c = PALETTE
+    ttk.Label(parent, text=label_text).grid(row=row, column=col_base, sticky="w", padx=4, pady=pady)
+    entry = tk.Entry(
+        parent,
+        textvariable=var,
+        bg=c["input_bg"],
+        fg=c["text_main"],
+        insertbackground=c["text_main"],
+        relief=tk.FLAT,
+        font=("Consolas", 9),
+        width=18,
+    )
+    entry.grid(row=row, column=col_base + 1, sticky="ew", padx=(4, 10), pady=pady)
+    return entry
+
+
+def _add_labeled_combo(
+    parent,
+    row: int,
+    col_base: int,
+    label_text: str,
+    var: tk.Variable,
+    values: list,
+    state: str = "readonly",
+    pady: int = 3,
+):
+    """在网格中创建统一风格的标签 + 下拉框组合。"""
+    ttk.Label(parent, text=label_text).grid(row=row, column=col_base, sticky="w", padx=4, pady=pady)
+    cb = ttk.Combobox(parent, textvariable=var, values=values, state=state, width=16)
+    cb.grid(row=row, column=col_base + 1, sticky="ew", padx=(4, 10), pady=pady)
+    return cb
+
+
+def build_train_tab(parent, app) -> ScrollableFrame:
+    """构建 Tab 1【🚀 快速训练】面板并返回其 ScrollableFrame。"""
+    c = PALETTE
+    scroll = ScrollableFrame(parent, bg=c["card_bg"])
+    scroll.pack(fill=tk.BOTH, expand=True)
+    body = scroll.content
+
+    # ==================== 1. 黄金场景模板预设区 ====================
+    preset_card = tk.Frame(body, bg=c["bg_dark"], highlightbackground=c["input_bg"], highlightthickness=1, padx=10, pady=8)
+    preset_card.pack(fill=tk.X, pady=(0, 8))
+
+    tk.Label(
+        preset_card,
+        text="💡 一键载入黄金调参场景模板 (8 套预设即点即用)",
+        bg=c["bg_dark"],
+        fg=c["accent_blue"],
+        font=(c["font_family"], 9, "bold"),
+        anchor="w",
+    ).pack(fill=tk.X, pady=(0, 6))
+
+    row1 = tk.Frame(preset_card, bg=c["bg_dark"])
+    row1.pack(fill=tk.X, pady=(0, 4))
+    row2 = tk.Frame(preset_card, bg=c["bg_dark"])
+    row2.pack(fill=tk.X)
+
+    for preset in PRESETS:
+        target_row = row1 if preset["row"] == 1 else row2
+        fg_color = c.get(preset["fg_key"], c["text_main"])
+        active_bg = c.get(preset["active_bg_key"], c["accent_blue"])
+        tk.Button(
+            target_row,
+            text=preset["label"],
+            bg=preset["bg"],
+            fg=fg_color,
+            activebackground=active_bg,
+            activeforeground="#11111b",
+            relief=tk.FLAT,
+            font=(c["font_family"], 8, "bold"),
+            cursor="hand2",
+            pady=4,
+            command=lambda pid=preset["id"]: app.apply_preset(pid),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+    preset_note = tk.Label(
+        preset_card,
+        text="提示：多子集配比预设会自动开启【多子集配比模式】，请到【📂 数据与续炼】选项卡添加各目录并一键配平 Repeat。",
+        bg=c["bg_dark"],
+        fg=c["text_sub"],
+        font=(c["font_family"], 8),
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=560,
+    )
+    preset_note.pack(fill=tk.X, pady=(5, 0))
+    scroll.register_wrap_label(preset_note)
+
+    # ==================== 2. 任务命名、触发词与状态摘要卡 ====================
+    name_card = tk.Frame(body, bg=c["bg_dark"], highlightbackground=c["input_bg"], highlightthickness=1, padx=10, pady=8)
+    name_card.pack(fill=tk.X, pady=(0, 8))
+
+    tk.Label(
+        name_card,
+        text="🏷️ 任务命名与触发词",
+        bg=c["bg_dark"],
+        fg=c["accent_blue"],
+        font=(c["font_family"], 9, "bold"),
+        anchor="w",
+    ).pack(fill=tk.X, pady=(0, 4))
+
+    name_grid = tk.Frame(name_card, bg=c["bg_dark"])
+    name_grid.pack(fill=tk.X)
+    name_grid.columnconfigure(1, weight=1)
+    name_grid.columnconfigure(3, weight=1)
+
+    _add_labeled_entry(name_grid, 0, 0, "LoRA 权重名称:", app.var_lora_name)
+    _add_labeled_entry(name_grid, 0, 2, "触发词 (可选注入):", app.var_trigger)
+
+    preview_lbl = tk.Label(
+        name_card,
+        textvariable=app.var_output_preview,
+        bg=c["bg_dark"],
+        fg=c["accent_green"],
+        font=("Consolas", 8),
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=560,
+    )
+    preview_lbl.pack(fill=tk.X, pady=(4, 4))
+    scroll.register_wrap_label(preview_lbl)
+
+    status_strip = tk.Frame(name_card, bg=c["card_bg"], padx=8, pady=5)
+    status_strip.pack(fill=tk.X)
+
+    tk.Button(
+        status_strip,
+        text="📂 数据/续炼 ↗",
+        bg=c["input_bg"],
+        fg=c["accent_blue"],
+        relief=tk.FLAT,
+        font=(c["font_family"], 8, "bold"),
+        cursor="hand2",
+        padx=8,
+        pady=2,
+        command=lambda: app.select_tab(1),
+    ).pack(side=tk.RIGHT, padx=(4, 0))
+
+    tk.Button(
+        status_strip,
+        text="🩺 体检图集",
+        bg=c["input_bg"],
+        fg=c["accent_peach"],
+        relief=tk.FLAT,
+        font=(c["font_family"], 8, "bold"),
+        cursor="hand2",
+        padx=8,
+        pady=2,
+        command=app.run_dataset_health_audit,
+    ).pack(side=tk.RIGHT)
+
+    quick_stat_lbl = tk.Label(
+        status_strip,
+        textvariable=app.var_quick_status_summary,
+        bg=c["card_bg"],
+        fg=c["accent_yellow"],
+        font=(c["font_family"], 8),
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=420,
+    )
+    quick_stat_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    scroll.register_wrap_label(quick_stat_lbl)
+
+    # ==================== 3. 硬件与超参数配置卡 ====================
+    hp_card = tk.Frame(body, bg=c["bg_dark"], highlightbackground=c["input_bg"], highlightthickness=1, padx=10, pady=8)
+    hp_card.pack(fill=tk.X, pady=(0, 6))
+
+    hp_hdr = tk.Frame(hp_card, bg=c["bg_dark"])
+    hp_hdr.pack(fill=tk.X, pady=(0, 6))
+    tk.Label(
+        hp_hdr,
+        text="⚙️ 硬件与核心超参数配置",
+        bg=c["bg_dark"],
+        fg=c["accent_blue"],
+        font=(c["font_family"], 9, "bold"),
+    ).pack(side=tk.LEFT)
+
+    tk.Button(
+        hp_hdr,
+        text="📐 一键对齐推荐步数",
+        bg="#45475a",
+        fg=c["accent_blue"],
+        relief=tk.FLAT,
+        font=(c["font_family"], 8, "bold"),
+        cursor="hand2",
+        padx=8,
+        pady=2,
+        command=app.align_steps_by_formula,
+    ).pack(side=tk.RIGHT)
+
+    hp_grid = tk.Frame(hp_card, bg=c["bg_dark"])
+    hp_grid.pack(fill=tk.X)
+    hp_grid.columnconfigure(1, weight=1)
+    hp_grid.columnconfigure(3, weight=1)
+
+    _add_labeled_combo(hp_grid, 0, 0, "训练精度 (Precision):", app.var_precision, ["bf16", "fp16"])
+    _add_labeled_combo(
+        hp_grid, 0, 2, "底座量化 (Base Prec):", app.var_base_precision,
+        ["auto", "int8", "fp8", "fp8_compute", "compute"],
+    )
+
+    cb_vram = _add_labeled_combo(
+        hp_grid, 1, 0, "显存档位 (VRAM):", app.var_vram_preset, ["auto", "6g", "8g", "12g", "16g"]
+    )
+    cb_vram.bind("<<ComboboxSelected>>", lambda _e: app.recalculate_math())
+    cb_res = _add_labeled_combo(
+        hp_grid, 1, 2, "训练分辨率 (Res):", app.var_resolution, ["512", "768", "896", "1024"]
+    )
+    cb_res.bind("<<ComboboxSelected>>", lambda _e: app.recalculate_math())
+
+    _add_labeled_combo(hp_grid, 2, 0, "TextEnc 运行设备:", app.var_text_device, ["cpu", "cuda"])
+    _add_labeled_combo(hp_grid, 2, 2, "VAE 编码设备:", app.var_vae_device, ["cuda", "cpu"])
+
+    cb_algo = _add_labeled_combo(hp_grid, 3, 0, "微调算法 (Algo):", app.var_algo, ["lora", "loha", "lokr"])
+    cb_algo.bind("<<ComboboxSelected>>", lambda _e: app.on_dynamic_controls_changed())
+    _add_labeled_entry(hp_grid, 3, 2, "LoRA Rank (维度秩):", app.var_rank)
+
+    _add_labeled_entry(hp_grid, 4, 0, "LoRA Alpha (缩放):", app.var_alpha)
+    tk.Checkbutton(
+        hp_grid,
+        text="✅ 开启 DoRA 权重分解 (细节更稳)",
+        variable=app.var_dora,
+        bg=c["bg_dark"],
+        fg=c["accent_purple"],
+        selectcolor=c["input_bg"],
+        activebackground=c["bg_dark"],
+        font=(c["font_family"], 8, "bold"),
+        command=app.on_dynamic_controls_changed,
+    ).grid(row=4, column=2, columnspan=2, sticky="w", padx=4, pady=3)
+
+    _add_labeled_combo(
+        hp_grid, 5, 0, "作用层预设 (Target):", app.var_target_preset,
+        ["attn", "attn-mlp", "attn-mlp+modulation", "attn-mlp+text-refiner", "full-block", "all"],
+    )
+    _add_labeled_combo(
+        hp_grid, 5, 2, "LoRA+ 速率倍增:", app.var_loraplus_ratio, ["1.0", "1.5", "2.0", "3.0", "4.0"], state="normal"
+    )
+
+    _add_labeled_combo(
+        hp_grid, 6, 0, "学习率 (LR):", app.var_lr, ["1e-4", "8e-5", "6e-5", "5e-5", "1.5e-4", "2e-4"], state="normal"
+    )
+    ent_rep = _add_labeled_entry(hp_grid, 6, 2, "每图重复 (Repeats):", app.var_repeats)
+    ent_rep.bind("<KeyRelease>", lambda _e: app.recalculate_math())
+
+    ent_ep = _add_labeled_entry(hp_grid, 7, 0, "训练轮数 (Epochs):", app.var_epochs)
+    ent_ep.bind("<KeyRelease>", lambda _e: app.recalculate_math())
+    _add_labeled_entry(hp_grid, 7, 2, "总步数 (Max Steps):", app.var_steps)
+
+    cb_acc = _add_labeled_combo(hp_grid, 8, 0, "梯度累积 (GradAcc):", app.var_grad_acc, ["1", "2", "4", "8"], state="normal")
+    cb_acc.bind("<<ComboboxSelected>>", lambda _e: app.recalculate_math())
+    cb_acc.bind("<KeyRelease>", lambda _e: app.recalculate_math())
+
+    app.cb_mu = _add_labeled_combo(
+        hp_grid, 8, 2, "时间步重心 (Mu):", app.var_timestep_mu, ["-1.09", "-0.60", "0.0", "0.35", "0.50"], state="normal"
+    )
+    app.cb_mu.bind("<<ComboboxSelected>>", lambda _e: app.recalculate_math())
+    app.cb_mu.bind("<KeyRelease>", lambda _e: app.recalculate_math())
+
+    _add_labeled_entry(hp_grid, 9, 0, "每 N 步存盘:", app.var_save_every)
+    _add_labeled_combo(hp_grid, 9, 2, "导出格式 (Format):", app.var_save_format, ["both", "comfy", "lycoris"])
+
+    tk.Checkbutton(
+        hp_grid,
+        text="训练结束后自动复制一份到 ComfyUI/models/loras",
+        variable=app.var_copy_comfy,
+        bg=c["bg_dark"],
+        fg=c["accent_green"],
+        selectcolor=c["input_bg"],
+        activebackground=c["bg_dark"],
+        font=(c["font_family"], 8),
+    ).grid(row=10, column=0, columnspan=4, sticky="w", padx=4, pady=(4, 2))
+
+    math_lbl = tk.Label(
+        hp_card,
+        textvariable=app.var_math_info,
+        bg=c["card_bg"],
+        fg=c["accent_green"],
+        font=(c["font_family"], 8),
+        anchor="w",
+        justify=tk.LEFT,
+        padx=8,
+        pady=5,
+        wraplength=560,
+    )
+    math_lbl.pack(fill=tk.X, pady=(4, 6))
+    scroll.register_wrap_label(math_lbl)
+
+    # ==================== 可折叠高阶算法/防过拟合/优化器抽屉 ====================
+    app.btn_adv_toggle = tk.Button(
+        hp_card,
+        text="▸ 展开高阶算法 / 防过拟合 / 优化器调优区 (18项专业参数)",
+        bg=c["input_bg"],
+        fg=c["accent_purple"],
+        relief=tk.FLAT,
+        font=(c["font_family"], 8, "bold"),
+        anchor="w",
+        padx=8,
+        pady=5,
+        cursor="hand2",
+        command=app.toggle_advanced_drawer,
+    )
+    app.btn_adv_toggle.pack(fill=tk.X)
+
+    app.adv_drawer_frame = tk.Frame(hp_card, bg=c["card_bg"], padx=8, pady=8)
+
+    # LoKr 专属参数行 (仅 algo == "lokr" 显示)
+    app.lokr_row = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
+    tk.Label(app.lokr_row, text="LoKr Factor:", bg=c["card_bg"], fg=c["accent_peach"], font=(c["font_family"], 8, "bold")).pack(side=tk.LEFT)
+    ttk.Combobox(app.lokr_row, textvariable=app.var_lokr_factor, values=["-1", "4", "8", "16"], width=6).pack(side=tk.LEFT, padx=(4, 10))
+    tk.Checkbutton(
+        app.lokr_row, text="Full Matrix", variable=app.var_lokr_full_matrix,
+        bg=c["card_bg"], fg=c["text_main"], selectcolor=c["input_bg"], font=(c["font_family"], 8),
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Checkbutton(
+        app.lokr_row, text="Decompose Both", variable=app.var_lokr_decompose_both,
+        bg=c["card_bg"], fg=c["text_main"], selectcolor=c["input_bg"], font=(c["font_family"], 8),
+    ).pack(side=tk.LEFT)
+
+    # 归一化层微调 & 正则化行 (固定在 drop_row 之前)
+    app.reg_row = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
+    app.reg_row.pack(fill=tk.X, pady=(0, 4))
+    tk.Checkbutton(
+        app.reg_row, text="Train Norms (归一化层微调)", variable=app.var_train_norms,
+        bg=c["card_bg"], fg=c["accent_yellow"], selectcolor=c["input_bg"], font=(c["font_family"], 8),
+    ).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(app.reg_row, text="RankDrop:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(app.reg_row, textvariable=app.var_rank_dropout, values=["0.0", "0.05", "0.1", "0.2"], width=6).pack(side=tk.LEFT, padx=(3, 10))
+    tk.Label(app.reg_row, text="ModDrop:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(app.reg_row, textvariable=app.var_module_dropout, values=["0.0", "0.05", "0.1", "0.2"], width=6).pack(side=tk.LEFT, padx=(3, 0))
+
+    # InputDropout & TextDropout 行
+    drop_row = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
+    drop_row.pack(fill=tk.X, pady=(0, 4))
+    tk.Label(drop_row, text="InDrop:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    app.cb_input_dropout = ttk.Combobox(
+        drop_row, textvariable=app.var_input_dropout, values=["0.0", "0.05", "0.1", "0.15", "0.2"], width=6
+    )
+    app.cb_input_dropout.pack(side=tk.LEFT, padx=(3, 6))
+    app.lbl_dora_drop_lock = tk.Label(
+        drop_row, text="", bg=c["card_bg"], fg=c["accent_yellow"], font=(c["font_family"], 8)
+    )
+    app.lbl_dora_drop_lock.pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(drop_row, text="TextDrop (无字丢弃):", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(drop_row, textvariable=app.var_text_drop, values=["0.0", "0.05", "0.1", "0.15", "0.2"], width=6).pack(side=tk.LEFT, padx=(3, 0))
+
+    # 优化器与学习率调度行 1
+    opt_row1 = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
+    opt_row1.pack(fill=tk.X, pady=(0, 4))
+    tk.Label(opt_row1, text="优化器:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(opt_row1, textvariable=app.var_optimizer, values=["adamw", "adamw8bit_kernel", "muon"], state="readonly", width=16).pack(side=tk.LEFT, padx=(3, 8))
+    tk.Label(opt_row1, text="LR调度:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(opt_row1, textvariable=app.var_lr_scheduler, values=["cosine", "constant"], state="readonly", width=9).pack(side=tk.LEFT, padx=(3, 8))
+    tk.Label(opt_row1, text="Warmup(-1自动):", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    tk.Entry(
+        opt_row1, textvariable=app.var_warmup_steps, bg=c["input_bg"], fg=c["text_main"],
+        insertbackground=c["text_main"], relief=tk.FLAT, font=("Consolas", 8), width=6,
+    ).pack(side=tk.LEFT, padx=(3, 8))
+    tk.Label(opt_row1, text="WD:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    tk.Entry(
+        opt_row1, textvariable=app.var_weight_decay, bg=c["input_bg"], fg=c["text_main"],
+        insertbackground=c["text_main"], relief=tk.FLAT, font=("Consolas", 8), width=6,
+    ).pack(side=tk.LEFT, padx=(3, 0))
+
+    # 优化器行 2 (WD规则 / EMA / 时间步模式)
+    opt_row2 = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
+    opt_row2.pack(fill=tk.X, pady=(0, 4))
+    tk.Label(opt_row2, text="WD规则:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(opt_row2, textvariable=app.var_wd_rules, values=["moss", "none", "all"], state="readonly", width=7).pack(side=tk.LEFT, padx=(3, 8))
+    tk.Label(opt_row2, text="EMA平滑:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(opt_row2, textvariable=app.var_ema, values=["0.0", "0.95", "0.99", "0.995"], width=7).pack(side=tk.LEFT, padx=(3, 8))
+    tk.Label(opt_row2, text="时间步采样:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    cb_ts = ttk.Combobox(opt_row2, textvariable=app.var_timestep, values=["moss", "uniform", "logit_normal"], state="readonly", width=12)
+    cb_ts.pack(side=tk.LEFT, padx=(3, 0))
+    cb_ts.bind("<<ComboboxSelected>>", lambda _e: app.on_dynamic_controls_changed())
+
+    # 增强与种子行
+    aug_row = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
+    aug_row.pack(fill=tk.X)
+    tk.Checkbutton(
+        aug_row, text="随机水平翻转 (Flip)", variable=app.var_flip,
+        bg=c["card_bg"], fg=c["text_main"], selectcolor=c["input_bg"], font=(c["font_family"], 8),
+    ).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(aug_row, text="Seed:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    tk.Entry(
+        aug_row, textvariable=app.var_seed, bg=c["input_bg"], fg=c["text_main"],
+        insertbackground=c["text_main"], relief=tk.FLAT, font=("Consolas", 8), width=7,
+    ).pack(side=tk.LEFT, padx=(3, 10))
+    tk.Label(aug_row, text="Tune表:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(aug_row, textvariable=app.var_tune, values=["off", "table"], state="readonly", width=7).pack(side=tk.LEFT, padx=(3, 0))
+
+    app.on_dynamic_controls_changed()
+    return scroll

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planned (Roadmap)
+- **体验增强候选 (v1.5.x)**：
+  - 训练期定时样图预览（`SAMPLE_EVERY` / `SAMPLE_PROMPTS` + 显存守卫）；
+  - 更多冷门/专项适配器算法接入（`tlora` / `oft`）；
+  - 可选 `tags` 词表打标模式（暴露 `shuffle` 与 `keep_first` 控制，兼容常规标签图集）。
+- **云端平台远程控制专项 (v1.6.0 Cloud Remote Control)**：
+  - 在本地 GUI 内直接远程驱动云端训练，大幅降低个人用户使用云卡的门槛：
+    - **Kaggle 无头一键流水线**：本地图集自动打包 ZIP 并调用 Kaggle CLI 推送私有 Dataset、`kernels push` 投递作业、定时轮询状态并自动拉回最终与阶段权重；
+    - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持一键传图、远程拉起 `train_moss.py` 与日志流式回传、本地看板实时渲染远端 Loss 曲线；
+    - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 等平台的一键启停机与费用告警适配器接口。
+
+## [1.5.0] - 2026-11-22
+
+### Added
+- **Phase 1 — 高阶适配器与数据复现旋钮双轨透出（`train_local.py` / `train_moss.py` / `.env.example` / Kaggle Notebook）**：
+  - 开放 LoKr 精细结构控制：`--lokr_factor`（`-1 / 4 / 8 / 16`，默认 `8`）、`--lokr_full_matrix`、`--lokr_decompose_both`，并在 GUI 中绑定随 `algo == "lokr"` 自动显隐；
+  - 新增 `--train_norms`（`TRAIN_NORMS`，允许协同微调 AdaLN / RMS / LayerNorm 权重）；
+  - 新增三层级防过拟合 Dropout（`--input_dropout`、`--rank_dropout`、`--module_dropout` -> `DROPOUT = {...}`），内置与 `adapters/build/config.py` 对齐的 **DoRA 冲突强制守卫**：开启 DoRA 时界面锁定禁用并强制后端将 `input_dropout` 置 `0.0`（保留 `rank_dropout` 与 `module_dropout` 正常生效）；
+  - 新增 `--seed`（随机种子复现）、`--save_format`（`both / comfy / hf / lycoris`，自动将 `lycoris` 别名合规映射至上游 `hf` 导出键名）、`--text_drop`（空提示词概率，默认 `0.05`）与 `--flip`（水平镜像增强，默认 `False` 并附非对称服饰与文字严禁提示）。
+- **Phase 2 — 多优化器、学习率调度、EMA 与多时间步分布控制**：
+  - 新增 `--optimizer {adamw, adamw8bit_kernel, muon}`：针对非 `adamw` 优化器注入 **GPU 优化器安全流式显存档位自动重映射**（`6g/8g -> ckpt-ring2-actoff`、`12g -> ckpt-ring4-actoff`、`16g -> ckpt-ring8-actoff`），严格满足 `optim_state="gpu"` 与 `fused_step=False` 验证门禁；
+  - 新增 `--lr_scheduler {cosine, constant}` 与 `--warmup_steps`（`-1` 为自动 5% 裁剪 `[5, 100]`，并对显式数值实施 `< STEPS` 边界保护防止 `schedule_problems` 报错）；
+  - 新增 `--weight_decay`、`--wd_rules {moss, none, all}` 与 `--ema`（如 `0.99 ~ 0.995`）；
+  - 新增 `--timestep {moss, uniform, logit_normal}`，严格按不同分布生成合规 `TIMESTEP_KWARGS`（训练 `shift` 恒定锁定 `1.0`），GUI 醒目提示 `logit_normal` 与 `moss` 在 `mu` 正负号上的反转差异并在 `uniform` 下禁用 `mu`。
+- **训练前【🩺 一键体检图集】与 3 套特色实战预设 (`gui_local.py` / `train_local.py`)**：
+  - 在 `train_local.py` 实现纯 Python 零像素解码消耗的 `audit_dataset_directories()` 检查器（支持 PIL 与纯 `struct` PNG/JPEG/WEBP/BMP 头读取兜底），在 GUI 数据集卡片顶部新增 **【🩺 一键体检图集】** 按钮（支持单图集与多子集）：精准检出缺/空 `.txt`、低分辨率 `<768px`、极端长宽比 `>3:1`、按当前 `MAX_TOKENS` + 分辨率预算估算超限的超长 `.txt` 以及疑似 Danbooru 纯逗号标签堆砌并输出诊断报告窗；
+  - 超参数卡片采用**默认折叠的【🧪 进阶微调、防过拟合与优化器设置】抽屉**保持主界面简洁；预设栏扩展为两行 8 套，新增 **【💎 LoKr 高还原画风】**、**【🛡️ 小图集防过拟合角色】** 与 **【⚡ Muon 画风加速】**，并统一通过 `_reset_advanced_defaults()` 防预设切换串味。
+- **小白傻瓜式使用手册与全文档同步**：
+  - 新增完全面向零基础用户的大白话完全指引 [docs/beginner_guide.md](docs/beginner_guide.md)，涵盖 30 秒上手三步走、8 大预设挑选表、全量 v1.4.0 + v1.5.0 界面按钮字典、翻车速查表与 ComfyUI 推理对齐规范；
+  - 同步更新 [README.md](README.md)、[docs/parameter_configuration_reference.md](docs/parameter_configuration_reference.md)、[docs/hyperparameter_tuning_guide.md](docs/hyperparameter_tuning_guide.md) 及全局技能 `kohaku`。
+
+### Changed
+- **断点与继续训练自动结构对齐增强 (`inspect_safetensors_lora` / `_inspect_safetensors`)**：续炼与 `init_from` 时支持额外探测并自动对齐 `train_norms` 与 LoKr 参数（`factor`、`full_matrix`、`decompose_both`）。
+- **单版本信源同步更新**：更新 [VERSION](VERSION) 至 `1.5.0`、[launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) 程序集版本至 `1.5.0.0`，重新编译 `MOSS_LoRA_Trainer.exe` 并更新 `SHA256SUMS.txt`。
+
 ## [1.4.0] - 2026-11-20
 
 ### Added
@@ -98,7 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.2.1...v1.2.2

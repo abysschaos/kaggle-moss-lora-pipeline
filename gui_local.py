@@ -40,7 +40,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.2.2"
+    return "1.5.0"
 
 
 APP_VERSION = _load_app_version()
@@ -143,17 +143,40 @@ class ModernLocalTrainerGUI:
         self.var_dora = tk.BooleanVar(value=bool(local_cfg.get("dora", False)))
         self.var_target_preset = tk.StringVar(value=local_cfg.get("target_preset", "attn-mlp"))
         self.var_loraplus = tk.StringVar(value=str(local_cfg.get("loraplus_ratio", "1.0")))
-        self.var_lr = tk.StringVar(value="1e-4")
+        self.var_lr = tk.StringVar(value=str(local_cfg.get("lr", "1e-4")))
         self.var_precision = tk.StringVar(value="bf16")
         self.var_vram_preset = tk.StringVar(value=local_cfg.get("vram_preset", "auto"))
         self.var_resolution = tk.StringVar(value=str(local_cfg.get("resolution", "1024")))
         self.var_grad_acc = tk.StringVar(value=str(local_cfg.get("grad_acc", "1")))
+        self.var_timestep = tk.StringVar(value=local_cfg.get("timestep", "moss"))
         self.var_timestep_mu = tk.StringVar(value=str(local_cfg.get("timestep_mu", "-1.09")))
         self.var_base_precision = tk.StringVar(value=local_cfg.get("base_precision", "auto"))
         self.var_tune = tk.StringVar(value=local_cfg.get("tune", "off"))
         self.var_text_device = tk.StringVar(value="cpu")
         self.var_vae_device = tk.StringVar(value="cuda")
         self.detected_vram_gb = 16.0
+
+        # v1.5.0 进阶微调、防过拟合、优化器与数据增强变量
+        self.var_lokr_factor = tk.StringVar(value=str(local_cfg.get("lokr_factor", "8")))
+        self.var_lokr_full_matrix = tk.BooleanVar(value=bool(local_cfg.get("lokr_full_matrix", False)))
+        self.var_lokr_decompose_both = tk.BooleanVar(value=bool(local_cfg.get("lokr_decompose_both", False)))
+        self.var_train_norms = tk.BooleanVar(value=bool(local_cfg.get("train_norms", False)))
+        self.var_rank_dropout = tk.StringVar(value=str(local_cfg.get("rank_dropout", "0.0")))
+        self.var_module_dropout = tk.StringVar(value=str(local_cfg.get("module_dropout", "0.0")))
+        self.var_input_dropout = tk.StringVar(value=str(local_cfg.get("input_dropout", "0.0")))
+        self.var_optimizer = tk.StringVar(value=local_cfg.get("optimizer", "adamw"))
+        self.var_lr_scheduler = tk.StringVar(value=local_cfg.get("lr_scheduler", "cosine"))
+        self.var_warmup_steps = tk.StringVar(value=str(local_cfg.get("warmup_steps", "-1")))
+        self.var_weight_decay = tk.StringVar(value=str(local_cfg.get("weight_decay", "0.01")))
+        self.var_wd_rules = tk.StringVar(value=local_cfg.get("wd_rules", "moss"))
+        self.var_ema = tk.StringVar(value=str(local_cfg.get("ema", "0.0")))
+        self.var_text_drop = tk.StringVar(value=str(local_cfg.get("text_drop", "0.05")))
+        self.var_flip = tk.BooleanVar(value=bool(local_cfg.get("flip", False)))
+        self.var_seed = tk.StringVar(value=str(local_cfg.get("seed", "0")))
+        self.var_save_format = tk.StringVar(value=local_cfg.get("save_format", "both"))
+        self.var_adv_expanded = tk.BooleanVar(value=False)
+        self.var_opt_hint = tk.StringVar(value="")
+        self.var_timestep_hint = tk.StringVar(value="")
 
         # 多子集配比管理器状态（支持多人物 / 多画风 / 多概念独立触发词与独立 Repeat 配平）
         self.var_multi_subset = tk.BooleanVar(value=bool(local_cfg.get("multi_subset_enabled", False)))
@@ -286,6 +309,7 @@ class ModernLocalTrainerGUI:
                 "vram_preset": self.var_vram_preset.get(),
                 "resolution": self.var_resolution.get(),
                 "grad_acc": self.var_grad_acc.get(),
+                "timestep": self.var_timestep.get(),
                 "timestep_mu": self.var_timestep_mu.get(),
                 "base_precision": self.var_base_precision.get(),
                 "tune": self.var_tune.get(),
@@ -296,6 +320,24 @@ class ModernLocalTrainerGUI:
                 "dora": bool(self.var_dora.get()),
                 "target_preset": self.var_target_preset.get(),
                 "loraplus_ratio": self.var_loraplus.get(),
+                "lr": self.var_lr.get(),
+                "lokr_factor": self.var_lokr_factor.get(),
+                "lokr_full_matrix": bool(self.var_lokr_full_matrix.get()),
+                "lokr_decompose_both": bool(self.var_lokr_decompose_both.get()),
+                "train_norms": bool(self.var_train_norms.get()),
+                "rank_dropout": self.var_rank_dropout.get(),
+                "module_dropout": self.var_module_dropout.get(),
+                "input_dropout": self.var_input_dropout.get(),
+                "optimizer": self.var_optimizer.get(),
+                "lr_scheduler": self.var_lr_scheduler.get(),
+                "warmup_steps": self.var_warmup_steps.get(),
+                "weight_decay": self.var_weight_decay.get(),
+                "wd_rules": self.var_wd_rules.get(),
+                "ema": self.var_ema.get(),
+                "text_drop": self.var_text_drop.get(),
+                "flip": bool(self.var_flip.get()),
+                "seed": self.var_seed.get(),
+                "save_format": self.var_save_format.get(),
                 "multi_subset_enabled": bool(self.var_multi_subset.get()),
                 "subsets": self.subsets
             }
@@ -487,7 +529,7 @@ class ModernLocalTrainerGUI:
         self.build_left_controls(scrollable_frame)
 
     def build_left_controls(self, parent):
-        # 1. 快捷预设按钮栏 (覆盖单画风/单人物/多人物/多画风/概念动作五大实战预设)
+        # 1. 快捷预设按钮栏 (两行整齐布局：5套基础模板 + 3套高阶实战预设)
         preset_card = tk.Frame(parent, bg=self.card_bg)
         preset_card.pack(fill=tk.X, pady=(0, 6))
 
@@ -519,6 +561,25 @@ class ModernLocalTrainerGUI:
                                 activebackground=self.accent_green, font=(self.font_family, 8, "bold"),
                                 relief=tk.FLAT, padx=8, pady=3, cursor="hand2", command=self.apply_concept_preset)
         btn_concept.pack(side=tk.LEFT, padx=3)
+
+        preset_row2 = tk.Frame(preset_card, bg=self.card_bg)
+        preset_row2.pack(fill=tk.X, pady=(0, 2))
+        tk.Label(preset_row2, text="特色实战预设：", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8, "bold")).pack(side=tk.LEFT, padx=(4, 4))
+
+        btn_lokr = tk.Button(preset_row2, text="💎 LoKr 高还原画风", bg="#313244", fg=self.accent_peach,
+                             activebackground=self.accent_peach, font=(self.font_family, 8, "bold"),
+                             relief=tk.FLAT, padx=8, pady=2, cursor="hand2", command=self.apply_lokr_style_preset)
+        btn_lokr.pack(side=tk.LEFT, padx=3)
+
+        btn_antifit = tk.Button(preset_row2, text="🛡️ 小图集防过拟合角色", bg="#313244", fg=self.accent_yellow,
+                                activebackground=self.accent_yellow, font=(self.font_family, 8, "bold"),
+                                relief=tk.FLAT, padx=8, pady=2, cursor="hand2", command=self.apply_antifit_char_preset)
+        btn_antifit.pack(side=tk.LEFT, padx=3)
+
+        btn_muon = tk.Button(preset_row2, text="⚡ Muon 画风加速", bg="#313244", fg=self.accent_green,
+                             activebackground=self.accent_green, font=(self.font_family, 8, "bold"),
+                             relief=tk.FLAT, padx=8, pady=2, cursor="hand2", command=self.apply_muon_style_preset)
+        btn_muon.pack(side=tk.LEFT, padx=3)
 
         # 2. 命名与触发词卡片
         name_card = tk.LabelFrame(parent, text=" 🏷️ 自定义 LoRA 命名与触发词 ", bg=self.card_bg, fg=self.accent_blue,
@@ -688,22 +749,31 @@ class ModernLocalTrainerGUI:
         lbl_trainer_note.pack(fill=tk.X, pady=(2, 0))
         self._wrap_labels.append(lbl_trainer_note)
 
-        # 5. 数据集与产出目录卡片（支持单图集与多子集配比无缝切换）
+        # 5. 数据集与产出目录卡片（支持单图集与多子集配比无缝切换 + 训练前体检）
         path_card = tk.LabelFrame(parent, text=" 📂 数据集配比与产出目录 (支持单图集 / 多人物多画风多子集) ", bg=self.card_bg, fg=self.accent_blue,
                                   font=(self.font_family, 9, "bold"), padx=10, pady=6)
         path_card.pack(fill=tk.X, pady=(0, 6))
 
+        path_top_bar = tk.Frame(path_card, bg=self.card_bg)
+        path_top_bar.pack(fill=tk.X, pady=(0, 4))
+        btn_audit = tk.Button(
+            path_top_bar, text="🩺 一键体检图集", bg="#313244", fg=self.accent_yellow,
+            activebackground=self.accent_yellow, activeforeground="#11111b",
+            relief=tk.FLAT, font=(self.font_family, 8, "bold"), cursor="hand2", padx=9, pady=2,
+            command=self.run_dataset_health_audit
+        )
+        btn_audit.pack(side=tk.RIGHT, padx=(6, 0))
+
         chk_multi = tk.Checkbutton(
-            path_card,
-            text="启用多子集配比模式 (多人物 / 多画风 / 多概念独立目录、专属触发词与 Repeat 配平)",
+            path_top_bar,
+            text="启用多子集配比模式 (多人物 / 多画风 / 独立触发词与 Repeat 配平)",
             variable=self.var_multi_subset,
             bg=self.card_bg, fg=self.accent_purple,
             selectcolor=self.input_bg, activebackground=self.card_bg, activeforeground=self.accent_purple,
-            font=(self.font_family, 8, "bold"), anchor="w", justify=tk.LEFT, wraplength=560,
+            font=(self.font_family, 8, "bold"), anchor="w", justify=tk.LEFT, wraplength=430,
             command=self.toggle_multi_subset_mode
         )
-        chk_multi.pack(fill=tk.X, pady=(0, 4))
-        self._wrap_labels.append(chk_multi)
+        chk_multi.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # (5A) 单图集选择容器
         self.single_data_frame = tk.Frame(path_card, bg=self.card_bg)
@@ -841,13 +911,14 @@ class ModernLocalTrainerGUI:
         tk.Label(alg_f, text="适配器算法 (Algo):", bg=self.card_bg, fg=self.text_main, width=17, anchor="w").pack(side=tk.LEFT)
         cb_algo = ttk.Combobox(alg_f, textvariable=self.var_algo, values=["lora", "loha", "lokr"], width=7, state="readonly")
         cb_algo.pack(side=tk.LEFT, padx=(0, 10))
-        cb_algo.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        cb_algo.bind("<<ComboboxSelected>>", lambda e: (self._sync_adapter_dynamic_controls(), self.save_local_config()))
 
         chk_dora = tk.Checkbutton(
             alg_f, text="启用 DoRA (权重分解)", variable=self.var_dora,
             bg=self.card_bg, fg=self.accent_green, selectcolor=self.input_bg,
             activebackground=self.card_bg, activeforeground=self.accent_green,
-            font=(self.font_family, 8, "bold"), command=self.save_local_config
+            font=(self.font_family, 8, "bold"),
+            command=lambda: (self._sync_adapter_dynamic_controls(), self.save_local_config())
         )
         chk_dora.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -907,11 +978,11 @@ class ModernLocalTrainerGUI:
         cb_grad_acc.bind("<FocusOut>", lambda e: self.save_local_config())
 
         tk.Label(grad_f, text="时间步重心 (Mu):", bg=self.card_bg, fg=self.text_main).pack(side=tk.LEFT)
-        cb_mu = ttk.Combobox(grad_f, textvariable=self.var_timestep_mu, values=["-1.09", "-0.60", "0.0", "0.35"], width=7)
-        cb_mu.pack(side=tk.LEFT, padx=(4, 0))
-        cb_mu.bind("<<ComboboxSelected>>", lambda e: (self.save_local_config(), self.recalculate_math()))
-        cb_mu.bind("<KeyRelease>", lambda e: self.recalculate_math())
-        cb_mu.bind("<FocusOut>", lambda e: self.save_local_config())
+        self.cb_mu = ttk.Combobox(grad_f, textvariable=self.var_timestep_mu, values=["-1.09", "-0.60", "0.0", "0.35"], width=7)
+        self.cb_mu.pack(side=tk.LEFT, padx=(4, 0))
+        self.cb_mu.bind("<<ComboboxSelected>>", lambda e: (self.save_local_config(), self.recalculate_math()))
+        self.cb_mu.bind("<KeyRelease>", lambda e: self.recalculate_math())
+        self.cb_mu.bind("<FocusOut>", lambda e: self.save_local_config())
 
         quant_f = tk.Frame(hp_card, bg=self.card_bg)
         quant_f.grid(row=10, column=0, columnspan=2, sticky=tk.EW, pady=2)
@@ -940,8 +1011,184 @@ class ModernLocalTrainerGUI:
             text="说明: Mu=-1.09 侧重画风构图(默认)，0.0~0.35 强化五官细节；底模精度 auto 按硬件自动匹配，fp8_compute 需 RTX 40系+。",
             bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8), wraplength=560, justify=tk.LEFT
         )
-        lbl_adv_hint.grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
+        lbl_adv_hint.grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
         self._wrap_labels.append(lbl_adv_hint)
+
+        # ==================== 折叠式进阶微调、防过拟合与优化器抽屉 (v1.5.0 默认收起) ====================
+        self.btn_adv_toggle = tk.Button(
+            hp_card,
+            text="▶ 🧪 进阶微调、防过拟合与优化器设置 (LoKr / Dropout / Muon / EMA / 采样分布)",
+            bg="#313244", fg=self.accent_purple, activebackground="#45475a", activeforeground=self.accent_purple,
+            relief=tk.FLAT, font=(self.font_family, 8, "bold"), anchor="w", padx=8, pady=4, cursor="hand2",
+            command=self._toggle_advanced_drawer
+        )
+        self.btn_adv_toggle.grid(row=13, column=0, columnspan=2, sticky=tk.EW, pady=(2, 2))
+
+        self.adv_drawer_frame = tk.Frame(
+            hp_card, bg="#181825", highlightbackground="#45475a", highlightthickness=1, padx=8, pady=6
+        )
+
+        # (A) LoKr 专属控制行（仅 Algo == lokr 时动态显现）
+        self.lokr_row = tk.Frame(self.adv_drawer_frame, bg="#181825")
+        tk.Label(self.lokr_row, text="LoKr 矩阵因子:", bg="#181825", fg=self.accent_peach, width=15, anchor="w", font=(self.font_family, 8, "bold")).pack(side=tk.LEFT)
+        cb_lokr_fac = ttk.Combobox(self.lokr_row, textvariable=self.var_lokr_factor, values=["-1", "4", "8", "16"], width=5, state="readonly")
+        cb_lokr_fac.pack(side=tk.LEFT, padx=(0, 8))
+        cb_lokr_fac.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        tk.Checkbutton(
+            self.lokr_row, text="Full Matrix", variable=self.var_lokr_full_matrix,
+            bg="#181825", fg=self.text_main, selectcolor=self.input_bg, activebackground="#181825",
+            font=(self.font_family, 8), command=self.save_local_config
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Checkbutton(
+            self.lokr_row, text="Decompose Both", variable=self.var_lokr_decompose_both,
+            bg="#181825", fg=self.text_main, selectcolor=self.input_bg, activebackground="#181825",
+            font=(self.font_family, 8), command=self.save_local_config
+        ).pack(side=tk.LEFT)
+
+        # (B) 适配器规范化与三层防过拟合 Dropout
+        self.reg_row = tk.Frame(self.adv_drawer_frame, bg="#181825")
+        self.reg_row.pack(fill=tk.X, pady=2)
+        tk.Checkbutton(
+            self.reg_row, text="训练归一化层 (Train Norms)", variable=self.var_train_norms,
+            bg="#181825", fg=self.accent_blue, selectcolor=self.input_bg, activebackground="#181825",
+            font=(self.font_family, 8, "bold"), command=self.save_local_config
+        ).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(self.reg_row, text="Seed:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        ent_seed = tk.Entry(self.reg_row, textvariable=self.var_seed, width=6, bg=self.input_bg, fg=self.text_main, font=(self.font_family, 8))
+        ent_seed.pack(side=tk.LEFT, padx=(3, 12))
+        tk.Label(self.reg_row, text="导出格式:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        cb_sfmt = ttk.Combobox(self.reg_row, textvariable=self.var_save_format, values=["both", "comfy", "lycoris"], width=8, state="readonly")
+        cb_sfmt.pack(side=tk.LEFT, padx=(3, 0))
+        cb_sfmt.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+
+        drop_row = tk.Frame(self.adv_drawer_frame, bg="#181825")
+        drop_row.pack(fill=tk.X, pady=2)
+        tk.Label(drop_row, text="RankDrop:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        cb_rdrop = ttk.Combobox(drop_row, textvariable=self.var_rank_dropout, values=["0.0", "0.05", "0.1", "0.15", "0.2"], width=5)
+        cb_rdrop.pack(side=tk.LEFT, padx=(2, 8))
+        cb_rdrop.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        tk.Label(drop_row, text="ModDrop:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        cb_mdrop = ttk.Combobox(drop_row, textvariable=self.var_module_dropout, values=["0.0", "0.05", "0.1", "0.15"], width=5)
+        cb_mdrop.pack(side=tk.LEFT, padx=(2, 8))
+        cb_mdrop.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        tk.Label(drop_row, text="InDrop:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        self.cb_input_dropout = ttk.Combobox(drop_row, textvariable=self.var_input_dropout, values=["0.0", "0.05", "0.1"], width=5)
+        self.cb_input_dropout.pack(side=tk.LEFT, padx=(2, 6))
+        self.cb_input_dropout.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        self.lbl_dora_drop_lock = tk.Label(drop_row, text="", bg="#181825", fg=self.accent_yellow, font=(self.font_family, 7))
+        self.lbl_dora_drop_lock.pack(side=tk.LEFT)
+
+        # (C) 优化器、调度器与权重正则
+        opt_row1 = tk.Frame(self.adv_drawer_frame, bg="#181825")
+        opt_row1.pack(fill=tk.X, pady=2)
+        tk.Label(opt_row1, text="优化器:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        cb_opt = ttk.Combobox(opt_row1, textvariable=self.var_optimizer, values=["adamw", "adamw8bit_kernel", "muon"], width=15, state="readonly")
+        cb_opt.pack(side=tk.LEFT, padx=(3, 8))
+        cb_opt.bind("<<ComboboxSelected>>", lambda e: (self._sync_optimizer_dynamic_controls(), self.save_local_config()))
+        tk.Label(opt_row1, text="LR 调度:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        cb_sched = ttk.Combobox(opt_row1, textvariable=self.var_lr_scheduler, values=["cosine", "constant"], width=8, state="readonly")
+        cb_sched.pack(side=tk.LEFT, padx=(3, 8))
+        cb_sched.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        tk.Label(opt_row1, text="Warmup:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        ent_warm = tk.Entry(opt_row1, textvariable=self.var_warmup_steps, width=5, bg=self.input_bg, fg=self.text_main, font=(self.font_family, 8))
+        ent_warm.pack(side=tk.LEFT, padx=(3, 0))
+
+        opt_row2 = tk.Frame(self.adv_drawer_frame, bg="#181825")
+        opt_row2.pack(fill=tk.X, pady=2)
+        tk.Label(opt_row2, text="WeightDecay:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        ent_wd = tk.Entry(opt_row2, textvariable=self.var_weight_decay, width=6, bg=self.input_bg, fg=self.text_main, font=(self.font_family, 8))
+        ent_wd.pack(side=tk.LEFT, padx=(3, 8))
+        tk.Label(opt_row2, text="WD规则:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        cb_wdr = ttk.Combobox(opt_row2, textvariable=self.var_wd_rules, values=["moss", "none", "all"], width=6, state="readonly")
+        cb_wdr.pack(side=tk.LEFT, padx=(3, 8))
+        cb_wdr.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        tk.Label(opt_row2, text="EMA衰减:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        cb_ema = ttk.Combobox(opt_row2, textvariable=self.var_ema, values=["0.0", "0.99", "0.995", "0.999"], width=7)
+        cb_ema.pack(side=tk.LEFT, padx=(3, 0))
+        cb_ema.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+
+        lbl_opt_hint = tk.Label(self.adv_drawer_frame, textvariable=self.var_opt_hint, bg="#181825", fg=self.accent_green, font=(self.font_family, 7), anchor="w")
+        lbl_opt_hint.pack(fill=tk.X)
+
+        # (D) 时间步采样模式与数据增强
+        aug_row = tk.Frame(self.adv_drawer_frame, bg="#181825")
+        aug_row.pack(fill=tk.X, pady=2)
+        tk.Label(aug_row, text="采样分布:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        cb_ts = ttk.Combobox(aug_row, textvariable=self.var_timestep, values=["moss", "uniform", "logit_normal"], width=11, state="readonly")
+        cb_ts.pack(side=tk.LEFT, padx=(3, 8))
+        cb_ts.bind("<<ComboboxSelected>>", lambda e: (self._sync_timestep_dynamic_controls(), self.save_local_config()))
+        tk.Label(aug_row, text="TextDrop:", bg="#181825", fg=self.text_main, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        cb_tdrop = ttk.Combobox(aug_row, textvariable=self.var_text_drop, values=["0.0", "0.05", "0.1", "0.15"], width=5)
+        cb_tdrop.pack(side=tk.LEFT, padx=(3, 8))
+        cb_tdrop.bind("<<ComboboxSelected>>", lambda e: self.save_local_config())
+        tk.Checkbutton(
+            aug_row, text="镜像翻转 Flip (不对称/文字慎用)", variable=self.var_flip,
+            bg="#181825", fg=self.accent_yellow, selectcolor=self.input_bg, activebackground="#181825",
+            font=(self.font_family, 8), command=self.save_local_config
+        ).pack(side=tk.LEFT)
+
+        lbl_ts_hint = tk.Label(self.adv_drawer_frame, textvariable=self.var_timestep_hint, bg="#181825", fg=self.accent_yellow, font=(self.font_family, 7), wraplength=540, justify=tk.LEFT, anchor="w")
+        lbl_ts_hint.pack(fill=tk.X, pady=(1, 0))
+        self._wrap_labels.append(lbl_ts_hint)
+
+        self._sync_adapter_dynamic_controls()
+        self._sync_optimizer_dynamic_controls()
+        self._sync_timestep_dynamic_controls()
+
+    def _toggle_advanced_drawer(self):
+        expanded = not self.var_adv_expanded.get()
+        self.var_adv_expanded.set(expanded)
+        if expanded:
+            self.btn_adv_toggle.config(text="▼ 🧪 收起进阶微调、防过拟合与优化器设置")
+            self.adv_drawer_frame.grid(row=14, column=0, columnspan=2, sticky=tk.EW, pady=(2, 4))
+            self._sync_adapter_dynamic_controls()
+            self._sync_optimizer_dynamic_controls()
+            self._sync_timestep_dynamic_controls()
+        else:
+            self.btn_adv_toggle.config(text="▶ 🧪 进阶微调、防过拟合与优化器设置 (LoKr / Dropout / Muon / EMA / 采样分布)")
+            self.adv_drawer_frame.grid_forget()
+
+    def _sync_adapter_dynamic_controls(self):
+        algo = (self.var_algo.get() or "lora").strip().lower()
+        if hasattr(self, "lokr_row") and hasattr(self, "reg_row"):
+            if algo == "lokr":
+                if not self.lokr_row.winfo_ismapped():
+                    self.lokr_row.pack(fill=tk.X, pady=2, before=self.reg_row)
+            else:
+                self.lokr_row.pack_forget()
+
+        if hasattr(self, "cb_input_dropout") and hasattr(self, "lbl_dora_drop_lock"):
+            if self.var_dora.get():
+                self.var_input_dropout.set("0.0")
+                self.cb_input_dropout.config(state="disabled")
+                self.lbl_dora_drop_lock.config(text="DoRA下InDrop锁定0")
+            else:
+                self.cb_input_dropout.config(state="normal")
+                self.lbl_dora_drop_lock.config(text="")
+
+    def _sync_optimizer_dynamic_controls(self):
+        opt = (self.var_optimizer.get() or "adamw").strip().lower()
+        if opt == "adamw":
+            self.var_opt_hint.set("AdamW (默认): 严格遵循 6G/8G/12G/16G 显存优化挡位与 Host 流式卸载。")
+        elif opt == "muon":
+            self.var_opt_hint.set("⚡ Muon 正交优化器: 后端将自动重映射 MEMORY_PROFILE 为 GPU 状态纯流式挡位 (禁用 Host 卸载)。")
+        else:
+            self.var_opt_hint.set("💡 AdamW 8-bit Kernel: 显存状态降至 2B/参数，后端自动切换为 GPU 状态纯流式挡位。")
+
+    def _sync_timestep_dynamic_controls(self):
+        ts = (self.var_timestep.get() or "moss").strip().lower()
+        if ts == "uniform":
+            if hasattr(self, "cb_mu"):
+                self.cb_mu.config(state="disabled")
+            self.var_timestep_hint.set("Uniform 均匀采样 (shift=1.0): 整个噪点轨迹等概率覆盖，不使用 Mu 参数。")
+        elif ts == "logit_normal":
+            if hasattr(self, "cb_mu"):
+                self.cb_mu.config(state="normal")
+            self.var_timestep_hint.set("⚠️ Logit-Normal 模式符号与 MOSS 相反: 负数(如 -0.5)偏低噪精细五官，正数偏高噪轮廓 (shift=1.0)！")
+        else:
+            if hasattr(self, "cb_mu"):
+                self.cb_mu.config(state="normal")
+            self.var_timestep_hint.set("MOSS 官方模式 (1-sigmoid, shift=1.0): Mu 越大越偏低噪细节 (-1.09 画风 | 0.0 动作 | 0.35 角色)。")
 
     def create_file_picker_block(self, parent, label_text, var, browse_title, folder_path, filetypes=None):
         """
@@ -1742,6 +1989,15 @@ class ModernLocalTrainerGUI:
                     self.var_dora.set(bool(info.get("dora", False)))
                     if info.get("preset"):
                         self.var_target_preset.set(info["preset"])
+                    if info.get("train_norms") is not None:
+                        self.var_train_norms.set(bool(info["train_norms"]))
+                    if info.get("lokr_factor") is not None:
+                        self.var_lokr_factor.set(str(info["lokr_factor"]))
+                    if info.get("lokr_full_matrix") is not None:
+                        self.var_lokr_full_matrix.set(bool(info["lokr_full_matrix"]))
+                    if info.get("lokr_decompose_both") is not None:
+                        self.var_lokr_decompose_both.set(bool(info["lokr_decompose_both"]))
+                    self._sync_adapter_dynamic_controls()
                     step_tag = f"原步数 {info['step']}, " if info.get("step") else ""
                     dora_tag = "+DoRA" if info.get("dora") else ""
                     algo_tag = f"{str(info.get('algo', 'lora')).upper()}{dora_tag}"
@@ -1991,8 +2247,7 @@ class ModernLocalTrainerGUI:
         else:
             self.var_dataset_stat.set("⚠️ 目录不存在，请检查路径")
 
-    def _estimate_effective_batch(self) -> tuple:
-        """估算 Token 打包吞吐、梯度累积等效 Batch 与 Mu 感知步数除数。"""
+    def _resolve_max_tokens_budget(self) -> int:
         preset = self.var_vram_preset.get().lower()
         if preset == "auto":
             vram_gb = float(getattr(self, "detected_vram_gb", 16.0))
@@ -2004,8 +2259,99 @@ class ModernLocalTrainerGUI:
                 eff_preset = "16g"
         else:
             eff_preset = preset
+        return {"6g": 4352, "8g": 4352, "12g": 6144, "16g": 8192}.get(eff_preset, 8192)
 
-        max_tokens = {"6g": 4352, "8g": 4352, "12g": 6144, "16g": 8192}.get(eff_preset, 8192)
+    def run_dataset_health_audit(self):
+        """一键体检当前单图集或多子集的所有图片尺寸、长宽比、缺失标注、超长文本与逗号堆砌风险。"""
+        if self.var_multi_subset.get():
+            if not self.subsets:
+                messagebox.showinfo("提示", "当前处于【多子集配比模式】，请先至少添加一个子集再执行体检！")
+                return
+            targets = list(self.subsets)
+        else:
+            targets = [{
+                "name": self.var_lora_name.get().strip() or "dataset",
+                "path": self.var_data_dir.get(),
+                "repeats": self.var_repeats.get(),
+                "trigger": self.var_trigger_word.get().strip(),
+            }]
+
+        max_tokens = self._resolve_max_tokens_budget()
+        try:
+            res = int(self.var_resolution.get())
+        except Exception:
+            res = 1024
+
+        self.log(f"\n[🩺 图集体检] 正在扫描图集健康状况 (目标分辨率 {res}px, MAX_TOKENS={max_tokens})...\n")
+
+        def _worker():
+            try:
+                import train_local
+                result = train_local.audit_dataset_directories(targets, max_tokens=max_tokens, resolution=res)
+            except Exception as err:
+                result = {
+                    "level": "error",
+                    "report_text": f"图集体检过程发生异常：{err}",
+                }
+            self.root.after(0, lambda: self._on_audit_finished(result))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_audit_finished(self, result: dict):
+        report_txt = result.get("report_text", "")
+        self.log(report_txt + "\n")
+        self._show_audit_result_dialog(result)
+
+    def _show_audit_result_dialog(self, result: dict):
+        level = result.get("level", "ok")
+        dlg = tk.Toplevel(self.root)
+        dlg.title("🩺 数据集健康体检报告")
+        dlg.configure(bg=self.card_bg)
+        dlg.transient(self.root)
+        w, h = 720, 480
+        rx = self.root.winfo_rootx() + max(40, (self.root.winfo_width() - w) // 2)
+        ry = self.root.winfo_rooty() + max(40, (self.root.winfo_height() - h) // 2)
+        dlg.geometry(f"{w}x{h}+{rx}+{ry}")
+
+        if level == "ok":
+            hdr_text = "✅ 体检全部通过：图集结构完整，可直接启动训练！"
+            hdr_color = self.accent_green
+        elif level == "warn":
+            hdr_text = "⚠️ 发现可优化项：请参考下方诊断建议处理异常样本（非致命项也可继续训练）"
+            hdr_color = self.accent_yellow
+        else:
+            hdr_text = "❌ 发现阻塞项：目录不存在或未检测到有效图片，请先修正！"
+            hdr_color = self.accent_red
+
+        tk.Label(
+            dlg, text=hdr_text, bg=self.card_bg, fg=hdr_color,
+            font=(self.font_family, 10, "bold"), anchor="w", padx=12, pady=8
+        ).pack(fill=tk.X)
+
+        box_wrap = tk.Frame(dlg, bg="#11111b", padx=8, pady=4)
+        box_wrap.pack(fill=tk.BOTH, expand=True, padx=12)
+        sb = ttk.Scrollbar(box_wrap, orient="vertical")
+        txt = tk.Text(
+            box_wrap, bg="#11111b", fg=self.text_main, font=("Consolas", 9),
+            wrap=tk.WORD, yscrollcommand=sb.set, relief=tk.FLAT, padx=6, pady=6
+        )
+        sb.config(command=txt.yview)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        txt.insert("1.0", result.get("report_text", ""))
+        txt.config(state=tk.DISABLED)
+
+        btn_close_bar = tk.Frame(dlg, bg=self.card_bg, pady=8, padx=12)
+        btn_close_bar.pack(fill=tk.X)
+        tk.Button(
+            btn_close_bar, text="知道了 / 关闭", bg=self.accent_blue, fg="#11111b",
+            relief=tk.FLAT, font=(self.font_family, 9, "bold"), padx=16, pady=4,
+            cursor="hand2", command=dlg.destroy
+        ).pack(side=tk.RIGHT)
+
+    def _estimate_effective_batch(self) -> tuple:
+        """估算 Token 打包吞吐、梯度累积等效 Batch 与 Mu 感知步数除数。"""
+        max_tokens = self._resolve_max_tokens_budget()
         try:
             res = int(self.var_resolution.get())
         except Exception:
@@ -2089,10 +2435,45 @@ class ModernLocalTrainerGUI:
         self.recalculate_math()
         self.log(f"[提示] 步数已按动态吞吐公式(等效Batch={eff_batch}, Mu={mu:.2f})对齐为: {rec} 步\n")
 
-    # 预设模板应用
-    def apply_style_preset(self):
-        self.var_multi_subset.set(False)
+    # 预设模板应用与统一复位辅助
+    def _reset_advanced_defaults(self):
+        """切换预设时统一复位 v1.5.0 进阶旋钮为纯净基准值，防止上一次实验状态串味。"""
+        self.var_lokr_factor.set("8")
+        self.var_lokr_full_matrix.set(False)
+        self.var_lokr_decompose_both.set(False)
+        self.var_train_norms.set(False)
+        self.var_rank_dropout.set("0.0")
+        self.var_module_dropout.set("0.0")
+        self.var_input_dropout.set("0.0")
+        self.var_optimizer.set("adamw")
+        self.var_lr_scheduler.set("cosine")
+        self.var_warmup_steps.set("-1")
+        self.var_weight_decay.set("0.01")
+        self.var_wd_rules.set("moss")
+        self.var_ema.set("0.0")
+        self.var_timestep.set("moss")
+        self.var_text_drop.set("0.05")
+        self.var_flip.set(False)
+        self.var_seed.set("0")
+        self.var_save_format.set("both")
+
+    def _finalize_preset_apply(self, title: str, message: str, multi_subset: bool, align_steps: bool = True):
+        self.var_multi_subset.set(multi_subset)
         self._apply_subset_panel_visibility()
+        if multi_subset:
+            self.refresh_subset_tree()
+        self._sync_adapter_dynamic_controls()
+        self._sync_optimizer_dynamic_controls()
+        self._sync_timestep_dynamic_controls()
+        if align_steps and not multi_subset:
+            self.align_steps_by_formula()
+        self.recalculate_math()
+        self.update_output_preview()
+        self.save_local_config()
+        messagebox.showinfo(title, message)
+
+    def apply_style_preset(self):
+        self._reset_advanced_defaults()
         self.var_repeats.set(3)
         self.var_epochs.set(5)
         self.var_rank.set(32)
@@ -2106,21 +2487,17 @@ class ModernLocalTrainerGUI:
         self.var_timestep_mu.set("-1.09")
         self.var_lora_name.set("my_art_style")
         self.var_trigger_word.set("in the style of my_art_style")
-        self.align_steps_by_formula()
-        self.recalculate_math()
-        self.update_output_preview()
-        self.save_local_config()
-        messagebox.showinfo(
+        self._finalize_preset_apply(
             "模板切换",
             "已成功加载【艺术画风模板】(极速画风黄金配比)：\n"
             "LoRA名称: my_art_style | 算法: LoRA (attn-mlp) | LoRA+=1.0\n"
             "Repeats=3, Epochs=5, Rank=32, Alpha=32.0, LR=1e-4\n"
-            "GradAcc=1, Mu=-1.09 (按真实等效Batch计步，40图约600步)"
+            "GradAcc=1, Mu=-1.09 (按真实等效Batch计步，40图约600步)",
+            multi_subset=False,
         )
 
     def apply_character_preset(self):
-        self.var_multi_subset.set(False)
-        self._apply_subset_panel_visibility()
+        self._reset_advanced_defaults()
         self.var_repeats.set(6)
         self.var_epochs.set(4)
         self.var_rank.set(32)
@@ -2134,22 +2511,17 @@ class ModernLocalTrainerGUI:
         self.var_timestep_mu.set("0.35")
         self.var_lora_name.set("my_character")
         self.var_trigger_word.set("my_character_char")
-        self.align_steps_by_formula()
-        self.recalculate_math()
-        self.update_output_preview()
-        self.save_local_config()
-        messagebox.showinfo(
+        self._finalize_preset_apply(
             "模板切换",
             "已成功加载【单人角色模板】(高精度五官服饰版)：\n"
             "LoRA名称: my_character | 算法: LoRA + DoRA (attn-mlp) | LoRA+=2.0\n"
             "Repeats=6, Epochs=4, Rank=32, Alpha=32.0, LR=8e-5\n"
-            "GradAcc=2, Mu=0.35 (强化中低噪面部结构与细节一致)"
+            "GradAcc=2, Mu=0.35 (强化中低噪面部结构与细节一致)",
+            multi_subset=False,
         )
 
     def apply_multi_char_preset(self):
-        self.var_multi_subset.set(True)
-        self._apply_subset_panel_visibility()
-        self.refresh_subset_tree()
+        self._reset_advanced_defaults()
         self.var_epochs.set(4)
         self.var_rank.set(48)
         self.var_alpha.set(48.0)
@@ -2162,21 +2534,18 @@ class ModernLocalTrainerGUI:
         self.var_timestep_mu.set("0.35")
         self.var_lora_name.set("multi_char_pack")
         self.var_trigger_word.set("")
-        self.recalculate_math()
-        self.update_output_preview()
-        self.save_local_config()
-        messagebox.showinfo(
+        self._finalize_preset_apply(
             "多人物模板就绪",
             "已加载【多人物配比模板】并展开多子集面板！\n"
             "• 架构配置：LoRA + DoRA (Rank=48, Alpha=48.0, attn-mlp+text-refiner, LoRA+=2.0)\n"
             "• 进阶调度：GradAcc=2 (稳梯度防串角), Mu=0.35 (精细五官服饰对齐)\n"
-            "• 使用提示：请在下方点击【➕ 添加子集】分别添加各角色文件夹并设置互不冲突的专属触发词，添加完后点【⚖️ 一键配平 Repeat】即可均衡曝光！"
+            "• 使用提示：请在下方点击【➕ 添加子集】分别添加各角色文件夹并设置互不冲突的专属触发词，添加完后点【⚖️ 一键配平 Repeat】即可均衡曝光！",
+            multi_subset=True,
+            align_steps=False,
         )
 
     def apply_multi_style_preset(self):
-        self.var_multi_subset.set(True)
-        self._apply_subset_panel_visibility()
-        self.refresh_subset_tree()
+        self._reset_advanced_defaults()
         self.var_epochs.set(5)
         self.var_rank.set(48)
         self.var_alpha.set(48.0)
@@ -2189,20 +2558,18 @@ class ModernLocalTrainerGUI:
         self.var_timestep_mu.set("-0.60")
         self.var_lora_name.set("multi_style_pack")
         self.var_trigger_word.set("")
-        self.recalculate_math()
-        self.update_output_preview()
-        self.save_local_config()
-        messagebox.showinfo(
+        self._finalize_preset_apply(
             "多画风模板就绪",
             "已加载【多画风配比模板】并展开多子集面板！\n"
             "• 架构配置：LoRA + DoRA (Rank=48, Alpha=48.0, attn-mlp+modulation, LoRA+=2.0)\n"
             "• 进阶调度：GradAcc=2 (降方差防风格糊化), Mu=-0.60 (兼顾宏观笔触与线条锐度)\n"
-            "• 使用提示：请分别添加不同画风子目录并绑定唯一风格前缀触发词，标注中务必剔除画风词以防串味！"
+            "• 使用提示：请分别添加不同画风子目录并绑定唯一风格前缀触发词，标注中务必剔除画风词以防串味！",
+            multi_subset=True,
+            align_steps=False,
         )
 
     def apply_concept_preset(self):
-        self.var_multi_subset.set(False)
-        self._apply_subset_panel_visibility()
+        self._reset_advanced_defaults()
         self.var_repeats.set(5)
         self.var_epochs.set(4)
         self.var_rank.set(32)
@@ -2216,16 +2583,98 @@ class ModernLocalTrainerGUI:
         self.var_timestep_mu.set("0.0")
         self.var_lora_name.set("my_concept")
         self.var_trigger_word.set("my_concept_v1")
-        self.align_steps_by_formula()
-        self.recalculate_math()
-        self.update_output_preview()
-        self.save_local_config()
-        messagebox.showinfo(
+        self._finalize_preset_apply(
             "概念/动作模板就绪",
             "已加载【概念/动作/材质模板】：\n"
             "• 架构配置：LoRA + DoRA (Rank=32, Alpha=32.0, attn-mlp+text-refiner, LoRA+=2.0)\n"
             "• 进阶调度：GradAcc=2, Mu=0.0 (全时间段对称采样，兼顾动态肢体与局部材质)\n"
-            "• 建议图集保持主体与背景高度随机，仅目标动作/镜头/材质保持一致。"
+            "• 建议图集保持主体与背景高度随机，仅目标动作/镜头/材质保持一致。",
+            multi_subset=False,
+        )
+
+    def apply_lokr_style_preset(self):
+        """💎 LoKr 高还原画风预设：紧凑克罗内克分解 + Modulation 色彩注入 + EMA 平滑。"""
+        self._reset_advanced_defaults()
+        self.var_repeats.set(4)
+        self.var_epochs.set(5)
+        self.var_rank.set(32)
+        self.var_alpha.set(32.0)
+        self.var_algo.set("lokr")
+        self.var_lokr_factor.set("8")
+        self.var_lokr_full_matrix.set(False)
+        self.var_lokr_decompose_both.set(False)
+        self.var_dora.set(False)
+        self.var_target_preset.set("attn-mlp+modulation")
+        self.var_loraplus.set("1.0")
+        self.var_lr.set("1.5e-4")
+        self.var_grad_acc.set("1")
+        self.var_timestep.set("moss")
+        self.var_timestep_mu.set("-1.09")
+        self.var_ema.set("0.99")
+        self.var_lora_name.set("my_lokr_style")
+        self.var_trigger_word.set("in the style of my_lokr_style")
+        self._finalize_preset_apply(
+            "特色实战预设：💎 LoKr 高还原画风",
+            "已加载【💎 LoKr 高还原画风预设】：\n"
+            "• 算法：LoKr (Factor=8) + attn-mlp+modulation | Rank=32, Alpha=32.0\n"
+            "• 调度：LR=1.5e-4, Mu=-1.09, EMA=0.99 (兼顾极小产出体积与高频笔触还原)",
+            multi_subset=False,
+        )
+
+    def apply_antifit_char_preset(self):
+        """🛡️ 小图集防过拟合角色预设：Rank/Module Dropout + TextDrop + EMA，专治 10~20 张小样本死记背景。"""
+        self._reset_advanced_defaults()
+        self.var_repeats.set(6)
+        self.var_epochs.set(4)
+        self.var_rank.set(32)
+        self.var_alpha.set(32.0)
+        self.var_algo.set("lora")
+        self.var_dora.set(True)
+        self.var_target_preset.set("attn-mlp")
+        self.var_loraplus.set("2.0")
+        self.var_lr.set("6e-5")
+        self.var_grad_acc.set("2")
+        self.var_timestep.set("moss")
+        self.var_timestep_mu.set("0.35")
+        self.var_rank_dropout.set("0.1")
+        self.var_module_dropout.set("0.05")
+        self.var_input_dropout.set("0.0")
+        self.var_text_drop.set("0.1")
+        self.var_ema.set("0.99")
+        self.var_lora_name.set("my_char_antifit")
+        self.var_trigger_word.set("my_char_v1")
+        self._finalize_preset_apply(
+            "特色实战预设：🛡️ 小图集防过拟合角色",
+            "已加载【🛡️ 小图集防过拟合角色预设】(专治 10~20 张小样本衣服/背景死锁)：\n"
+            "• 架构：LoRA + DoRA (attn-mlp, LoRA+=2.0) | LR=6e-5, GradAcc=2, Mu=0.35\n"
+            "• 防过拟合：RankDrop=0.1, ModDrop=0.05, InDrop=0.0(DoRA锁定), TextDrop=0.1, EMA=0.99",
+            multi_subset=False,
+        )
+
+    def apply_muon_style_preset(self):
+        """⚡ Muon 画风加速预设：启用 Muon 正交化优化器并自动切入 GPU 优化器安全显存档位。"""
+        self._reset_advanced_defaults()
+        self.var_repeats.set(3)
+        self.var_epochs.set(5)
+        self.var_rank.set(32)
+        self.var_alpha.set(32.0)
+        self.var_algo.set("lora")
+        self.var_dora.set(False)
+        self.var_target_preset.set("attn-mlp")
+        self.var_loraplus.set("1.0")
+        self.var_optimizer.set("muon")
+        self.var_lr.set("1e-4")
+        self.var_grad_acc.set("1")
+        self.var_timestep.set("moss")
+        self.var_timestep_mu.set("-1.09")
+        self.var_lora_name.set("my_muon_style")
+        self.var_trigger_word.set("in the style of my_muon_style")
+        self._finalize_preset_apply(
+            "特色实战预设：⚡ Muon 画风加速",
+            "已加载【⚡ Muon 画风加速预设】：\n"
+            "• 优化器：Muon (正交矩阵动量加速画风早期收敛)，后端自动切入 GPU 状态安全流式显存档位\n"
+            "• 配置：LoRA (Rank=32, Alpha=32.0), LR=1e-4, Mu=-1.09",
+            multi_subset=False,
         )
 
     def clear_console(self):
@@ -2280,11 +2729,24 @@ class ModernLocalTrainerGUI:
             lr_val = float(self.var_lr.get().strip())
             save_every_val = int(self.var_save_every.get())
             grad_acc_val = int(float(self.var_grad_acc.get().strip()))
-            timestep_mu_val = float(self.var_timestep_mu.get().strip())
+            timestep_mu_val = float((self.var_timestep_mu.get() or "0.0").strip())
+            lokr_factor_val = int(self.var_lokr_factor.get())
+            rank_drop_val = float(self.var_rank_dropout.get().strip())
+            mod_drop_val = float(self.var_module_dropout.get().strip())
+            in_drop_val = 0.0 if self.var_dora.get() else float(self.var_input_dropout.get().strip())
+            warmup_val = int(float(self.var_warmup_steps.get().strip()))
+            wd_val = float(self.var_weight_decay.get().strip())
+            ema_val = float(self.var_ema.get().strip())
+            text_drop_val = float(self.var_text_drop.get().strip())
+            seed_val = int(float(self.var_seed.get().strip()))
             if repeats_val < 1 or epochs_val < 1 or steps_val < 1 or rank_val < 1 or lr_val <= 0 or grad_acc_val < 1:
                 raise ValueError("超参数及梯度累积必须为正数")
+            if not (0.0 <= rank_drop_val < 1.0 and 0.0 <= mod_drop_val < 1.0 and 0.0 <= in_drop_val < 1.0):
+                raise ValueError("Dropout 概率必须在 [0.0, 1.0) 之间")
+            if wd_val < 0.0 or not (0.0 <= ema_val < 1.0) or not (0.0 <= text_drop_val <= 1.0):
+                raise ValueError("WeightDecay>=0、EMA 需在 [0.0, 1.0)、TextDrop 需在 [0.0, 1.0]")
         except Exception as e:
-            messagebox.showerror("参数格式错误", f"请检查核心超参数是否填写了合法数字：\n{e}")
+            messagebox.showerror("参数格式错误", f"请检查核心或进阶超参数是否填写了合法数字：\n{e}")
             return
 
         lora_name_clean = self.var_lora_name.get().strip()
@@ -2356,14 +2818,28 @@ class ModernLocalTrainerGUI:
             "--rank", str(self.var_rank.get()),
             "--alpha", str(self.var_alpha.get()),
             "--algo", self.var_algo.get(),
+            "--lokr_factor", str(lokr_factor_val),
+            "--input_dropout", str(in_drop_val),
+            "--rank_dropout", str(rank_drop_val),
+            "--module_dropout", str(mod_drop_val),
             "--target_preset", self.var_target_preset.get(),
             "--loraplus_ratio", str(self.var_loraplus.get()),
             "--lr", str(self.var_lr.get()),
+            "--optimizer", self.var_optimizer.get(),
+            "--lr_scheduler", self.var_lr_scheduler.get(),
+            "--warmup_steps", str(warmup_val),
+            "--weight_decay", str(wd_val),
+            "--wd_rules", self.var_wd_rules.get(),
+            "--ema", str(ema_val),
             "--precision", self.var_precision.get(),
             "--vram_preset", self.var_vram_preset.get(),
             "--resolution", str(self.var_resolution.get()),
             "--grad_acc", str(grad_acc_val),
+            "--timestep", self.var_timestep.get(),
             "--timestep_mu", str(timestep_mu_val),
+            "--text_drop", str(text_drop_val),
+            "--seed", str(seed_val),
+            "--save_format", self.var_save_format.get(),
             "--base_precision", self.var_base_precision.get(),
             "--tune", self.var_tune.get(),
             "--overlong", "drop_tokens",
@@ -2376,6 +2852,14 @@ class ModernLocalTrainerGUI:
 
         if self.var_dora.get():
             cmd.append("--dora")
+        if self.var_lokr_full_matrix.get():
+            cmd.append("--lokr_full_matrix")
+        if self.var_lokr_decompose_both.get():
+            cmd.append("--lokr_decompose_both")
+        if self.var_train_norms.get():
+            cmd.append("--train_norms")
+        if self.var_flip.get():
+            cmd.append("--flip")
         if subsets_manifest_path is not None:
             cmd.extend(["--subsets_json", str(subsets_manifest_path)])
 

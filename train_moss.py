@@ -19,7 +19,14 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.4.0"
+    return "1.5.0"
+
+
+def _env_bool(*keys: str, default: bool = False) -> bool:
+    for k in keys:
+        if k in os.environ and os.environ[k].strip():
+            return os.environ[k].strip().lower() in ("1", "true", "yes", "on")
+    return default
 
 
 APP_VERSION = _load_app_version()
@@ -44,8 +51,25 @@ parser.add_argument("--alpha", type=float, default=float(os.environ.get("ALPHA",
 parser.add_argument("--algo", type=str, default=os.environ.get("ALGO", "lora"),
                     choices=["lora", "loha", "lokr"],
                     help="Adapter algorithm: lora (default), loha (Hadamard), lokr (Kronecker)")
+parser.add_argument("--lokr_factor", type=int, default=int(os.environ.get("LOKR_FACTOR", "8")),
+                    help="LoKr Kronecker factor (-1=auto, 4=high capacity, 8=default, 16=ultra-compact)")
+parser.add_argument("--lokr_full_matrix", action="store_true",
+                    default=_env_bool("LOKR_FULL_MATRIX"),
+                    help="LoKr: use full second matrix factor")
+parser.add_argument("--lokr_decompose_both", action="store_true",
+                    default=_env_bool("LOKR_DECOMPOSE_BOTH"),
+                    help="LoKr: decompose both Kronecker matrices when dimensions permit")
+parser.add_argument("--train_norms", action="store_true",
+                    default=_env_bool("TRAIN_NORMS"),
+                    help="Also train AdaLN/RMS/LayerNorm scale weights alongside adapters")
+parser.add_argument("--input_dropout", type=float, default=float(os.environ.get("INPUT_DROPOUT", "0.0")),
+                    help="Adapter input dropout in [0.0, 1.0) (forced to 0.0 when --dora is enabled)")
+parser.add_argument("--rank_dropout", type=float, default=float(os.environ.get("RANK_DROPOUT", "0.0")),
+                    help="Adapter rank dropout in [0.0, 1.0) to prevent overfitting")
+parser.add_argument("--module_dropout", type=float, default=float(os.environ.get("MODULE_DROPOUT", "0.0")),
+                    help="Whole-module stochastic drop probability in [0.0, 1.0)")
 parser.add_argument("--dora", action="store_true",
-                    default=os.environ.get("USE_DORA", os.environ.get("DORA", "false")).strip().lower() in ("1", "true", "yes", "on"),
+                    default=_env_bool("USE_DORA", "DORA"),
                     help="Enable DoRA (Weight-Decomposed Low-Rank Adaptation)")
 parser.add_argument("--target_preset", type=str, default=os.environ.get("TARGET_PRESET", "attn-mlp"),
                     choices=["attn", "attn-mlp", "attn-mlp+modulation", "attn-mlp+text-refiner", "full-block", "all"],
@@ -56,10 +80,38 @@ parser.add_argument("--subsets_json", type=str, default=os.environ.get("SUBSETS_
                     help="Optional JSON file path or JSON array string for multi-subset training")
 parser.add_argument("--lr", type=str, default=os.environ.get("LR", "1e-4"),
                     help="Learning rate (default: 1e-4)")
+parser.add_argument("--optimizer", type=str, default=os.environ.get("OPTIMIZER", "adamw"),
+                    choices=["adamw", "adamw8bit_kernel", "muon"],
+                    help="Optimizer: adamw (default), adamw8bit_kernel, or muon")
+parser.add_argument("--lr_scheduler", type=str, default=os.environ.get("LR_SCHEDULER", "cosine"),
+                    choices=["cosine", "constant"],
+                    help="LR scheduler mode (default: cosine)")
+parser.add_argument("--warmup_steps", type=int, default=int(os.environ.get("WARMUP_STEPS", "-1")),
+                    help="LR warmup steps (-1=auto 5%% clamped to [5, 100]; >=0 explicit)")
+parser.add_argument("--weight_decay", type=float, default=float(os.environ.get("WEIGHT_DECAY", "0.01")),
+                    help="Decoupled weight decay coefficient (default: 0.01)")
+parser.add_argument("--wd_rules", type=str, default=os.environ.get("WD_RULES", "moss"),
+                    choices=["moss", "none", "all"],
+                    help="Weight decay parameter selection rule (default: moss)")
+parser.add_argument("--ema", type=float, default=float(os.environ.get("EMA", "0.0")),
+                    help="EMA decay rate (0.0=off, 0.99~0.995 recommended for long runs)")
 parser.add_argument("--grad_acc", type=int, default=int(os.environ.get("GRAD_ACC", "1")),
                     help="Gradient accumulation steps (default: 1; 2~4 stabilizes complex outfits on <=12GB)")
+parser.add_argument("--timestep", type=str, default=os.environ.get("TIMESTEP", "moss"),
+                    choices=["moss", "uniform", "logit_normal"],
+                    help="Timestep distribution: moss, uniform, or logit_normal")
 parser.add_argument("--timestep_mu", type=float, default=float(os.environ.get("TIMESTEP_MU", "-1.09")),
-                    help="MossTimestep truncated logit-normal mean mu (-1.09=89%% high-noise style, 0.0~0.35=low-noise detail)")
+                    help="Mean mu for moss/logit_normal timestep sampling")
+parser.add_argument("--text_drop", type=float, default=float(os.environ.get("TEXT_DROP", "0.05")),
+                    help="Empty-prompt unconditional dropout probability (default: 0.05)")
+parser.add_argument("--flip", action="store_true",
+                    default=_env_bool("FLIP"),
+                    help="Enable random horizontal flip augmentation (caution on asymmetric outfits/text)")
+parser.add_argument("--seed", type=int, default=int(os.environ.get("SEED", "0")),
+                    help="Random seed for reproducibility (default: 0)")
+parser.add_argument("--save_format", type=str, default=os.environ.get("SAVE_FORMAT", "both"),
+                    choices=["both", "comfy", "hf", "lycoris"],
+                    help="Export adapter format: both, comfy, or hf/lycoris")
 parser.add_argument("--base_precision", type=str, default=os.environ.get("BASE_PRECISION", "auto"),
                     choices=["auto", "int8", "fp8", "fp8_compute", "compute"],
                     help="Frozen backbone storage/compute precision: auto, int8, fp8, fp8_compute, compute")
@@ -116,9 +168,9 @@ print("=" * 75)
 print(f">>> OpenMOSS MOSS-Image Cloud LoRA Training Engine v{APP_VERSION} <<<")
 print(f">>> Target LoRA: '{args.lora_name}' | Trigger Word: '{args.trigger_word if args.trigger_word else '(None)'}' <<<")
 print(f">>> Hyperparameters: Repeats={args.repeats}, Epochs={args.epochs}, Steps={args.steps} <<<")
-print(f">>> Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, Preset={args.target_preset}, LoRA+={args.loraplus_ratio} <<<")
-print(f">>> Dimensions: Rank={args.rank}, Alpha={args.alpha}, LR={args.lr}, GradAcc={max(1, int(args.grad_acc))} <<<")
-print(f">>> Dynamics: TimestepMu={args.timestep_mu}, BasePrec={args.base_precision}, Tune={args.tune}, Overlong={args.overlong} <<<")
+print(f">>> Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, TrainNorms={'ON' if args.train_norms else 'OFF'}, Preset={args.target_preset}, LoRA+={args.loraplus_ratio} <<<")
+print(f">>> Dimensions & Optim: Rank={args.rank}, Alpha={args.alpha}, LR={args.lr}, Opt={args.optimizer.upper()} ({args.lr_scheduler}), GradAcc={max(1, int(args.grad_acc))} <<<")
+print(f">>> Dynamics & Augment: Timestep={args.timestep}(mu={args.timestep_mu}), TextDrop={args.text_drop}, Flip={bool(args.flip)}, Seed={args.seed}, EMA={args.ema}, SaveFmt={args.save_format} <<<")
 print(f">>> Cloud Options: Variant={args.variant}, VRAM={args.vram_preset}, Res={args.resolution}, Quant={args.base_quant}, Prec={args.precision}, GPUs={args.gpus}, Parallel={args.parallel} <<<")
 print("=" * 75)
 
@@ -194,22 +246,22 @@ else:
 if effective_preset == "6g":
     recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_6g.py")'
     max_tokens_val = 4352
-    memory_profile_str = 'MEMORY_PROFILE = "ckpt-ring2-actoff-optcpu-gradoff"'
+    base_profile_name = "ckpt-ring2-actoff-optcpu-gradoff"
     print(f" [VRAM Preset] Applied 6G Profile (extreme ~4.4GB VRAM): {vram_note}")
 elif effective_preset == "8g":
     recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_8g.py")'
     max_tokens_val = 4352
-    memory_profile_str = 'MEMORY_PROFILE = "minimal"'
+    base_profile_name = "minimal"
     print(f" [VRAM Preset] Applied 8G Profile (~5.5GB VRAM): {vram_note}")
 elif effective_preset == "12g":
     recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_12g.py")'
     max_tokens_val = 6144
-    memory_profile_str = 'MEMORY_PROFILE = "ckpt-ring4-actoff-optstream-gradoff"'
+    base_profile_name = "ckpt-ring4-actoff-optstream-gradoff"
     print(f" [VRAM Preset] Applied 12G Profile (~8.5GB VRAM, MAX_TOKENS=6144): {vram_note}")
 else:
     recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_16g.py")'
     max_tokens_val = 8192
-    memory_profile_str = 'MEMORY_PROFILE = "low"'
+    base_profile_name = "low"
     print(f" [VRAM Preset] Applied 16G Profile (MAX_TOKENS=8192, MEMORY_PROFILE=low): {vram_note}")
 
 if args.precision == "auto":
@@ -231,7 +283,7 @@ else:
 parallel_cfg_str = ""
 if effective_parallel == "ddp":
     if effective_preset == "16g" and use_int8_backbone:
-        memory_profile_str = 'MEMORY_PROFILE = "ckpt-resident"'
+        base_profile_name = "ckpt-resident"
         max_tokens_val = 9216
         print(" [Dual-GPU DDP] 2x T4 16GB: Enabled int8 backbone resident mode (MEMORY_PROFILE='ckpt-resident', MAX_TOKENS=9216 -> 2x 1024px/GPU = 4 imgs/step).")
     parallel_cfg_str = (
@@ -244,10 +296,23 @@ if effective_parallel == "ddp":
 elif effective_parallel == "pipeline":
     use_int8_backbone = False
     args.base_precision = "compute"
-    memory_profile_str = 'MEMORY_PROFILE = "ckpt-resident"'
+    base_profile_name = "ckpt-resident"
     recipe_import += '\nuse_config("../moss/parallel/parallel_pipeline.py")'
     parallel_cfg_str = 'DEVICES = (0, 1)'
     print(" [Dual-GPU Pipeline] Enabled 1F1B stage split across GPU(0, 1) with full-precision resident weights.")
+
+if args.optimizer != "adamw" and base_profile_name != "ckpt-resident":
+    _opt_remap = {
+        "6g": "ckpt-ring2-actoff",
+        "8g": "ckpt-ring2-actoff",
+        "12g": "ckpt-ring4-actoff",
+        "16g": "ckpt-ring8-actoff",
+    }
+    resolved_profile_name = _opt_remap.get(effective_preset, "ckpt-ring4-actoff")
+    print(f" [Optimizer Guard] OPTIMIZER='{args.optimizer}' requires optim_state='gpu' & fused_step=False; remapped MEMORY_PROFILE '{base_profile_name}' -> '{resolved_profile_name}'.")
+else:
+    resolved_profile_name = base_profile_name
+memory_profile_str = f'MEMORY_PROFILE = "{resolved_profile_name}"'
 
 if int(args.max_tokens) > 0:
     max_tokens_val = int(args.max_tokens)
@@ -702,6 +767,10 @@ def _inspect_safetensors(sf_path: str) -> dict:
         "algo": "lora",
         "dora": False,
         "preset": None,
+        "train_norms": None,
+        "lokr_factor": None,
+        "lokr_full_matrix": None,
+        "lokr_decompose_both": None,
     }
     try:
         import struct
@@ -726,6 +795,8 @@ def _inspect_safetensors(sf_path: str) -> dict:
                 info["step"] = int(meta["kohakumoss_step"])
             except Exception:
                 pass
+        if "kohakumoss_algo" in meta and str(meta["kohakumoss_algo"]).strip():
+            info["algo"] = str(meta["kohakumoss_algo"]).strip().lower()
         if "kohakumoss_spec" in meta:
             try:
                 spec = json.loads(meta["kohakumoss_spec"])
@@ -737,8 +808,18 @@ def _inspect_safetensors(sf_path: str) -> dict:
                     info["algo"] = str(spec["algo"]).lower()
                 if "dora" in spec:
                     info["dora"] = bool(spec["dora"])
+                if "train_norms" in spec:
+                    info["train_norms"] = bool(spec["train_norms"])
                 if spec.get("preset") and isinstance(spec["preset"], str):
                     info["preset"] = spec["preset"]
+                akw = spec.get("algo_kwargs")
+                if isinstance(akw, dict):
+                    if "factor" in akw:
+                        info["lokr_factor"] = int(akw["factor"])
+                    if "full_matrix" in akw:
+                        info["lokr_full_matrix"] = bool(akw["full_matrix"])
+                    if "decompose_both" in akw:
+                        info["lokr_decompose_both"] = bool(akw["decompose_both"])
             except Exception:
                 pass
 
@@ -762,6 +843,34 @@ def _inspect_safetensors(sf_path: str) -> dict:
     except Exception:
         pass
     return info
+
+
+def _align_args_from_spec(l_info: dict, mode_tag: str):
+    if l_info.get("rank") and l_info["rank"] != args.rank:
+        print(f" [{mode_tag} Auto-Align] Aligned Rank {args.rank} -> {l_info['rank']}")
+        args.rank = l_info["rank"]
+        if l_info.get("alpha"):
+            args.alpha = l_info["alpha"]
+    if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
+        print(f" [{mode_tag} Auto-Align] Aligned Algo {args.algo} -> {l_info['algo']}")
+        args.algo = l_info["algo"]
+    if bool(l_info.get("dora", False)) != bool(args.dora):
+        print(f" [{mode_tag} Auto-Align] Aligned DoRA {args.dora} -> {bool(l_info.get('dora', False))}")
+        args.dora = bool(l_info.get("dora", False))
+    if l_info.get("preset") and l_info["preset"] != args.target_preset:
+        print(f" [{mode_tag} Auto-Align] Aligned Target Preset {args.target_preset} -> {l_info['preset']}")
+        args.target_preset = l_info["preset"]
+    if l_info.get("train_norms") is not None and bool(l_info["train_norms"]) != bool(args.train_norms):
+        print(f" [{mode_tag} Auto-Align] Aligned Train Norms {args.train_norms} -> {bool(l_info['train_norms'])}")
+        args.train_norms = bool(l_info["train_norms"])
+    if args.algo == "lokr":
+        if l_info.get("lokr_factor") is not None and int(l_info["lokr_factor"]) != int(args.lokr_factor):
+            print(f" [{mode_tag} Auto-Align] Aligned LoKr Factor {args.lokr_factor} -> {int(l_info['lokr_factor'])}")
+            args.lokr_factor = int(l_info["lokr_factor"])
+        if l_info.get("lokr_full_matrix") is not None:
+            args.lokr_full_matrix = bool(l_info["lokr_full_matrix"])
+        if l_info.get("lokr_decompose_both") is not None:
+            args.lokr_decompose_both = bool(l_info["lokr_decompose_both"])
 
 
 # 7.9 解析训练模式 (fresh / resume / init_from)
@@ -804,20 +913,7 @@ if train_mode == "resume":
         ckpt_candidates.sort(key=lambda x: x[0])
         resumed_step, chosen_ckpt = ckpt_candidates[-1]
         l_info = _inspect_safetensors(os.path.join(chosen_ckpt, "trainable.safetensors"))
-        if l_info.get("rank") and l_info["rank"] != args.rank:
-            print(f" [Resume Auto-Align] Aligned Rank {args.rank} -> {l_info['rank']}")
-            args.rank = l_info["rank"]
-            if l_info.get("alpha"):
-                args.alpha = l_info["alpha"]
-        if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
-            print(f" [Resume Auto-Align] Aligned Algo {args.algo} -> {l_info['algo']}")
-            args.algo = l_info["algo"]
-        if bool(l_info.get("dora", False)) != bool(args.dora):
-            print(f" [Resume Auto-Align] Aligned DoRA {args.dora} -> {bool(l_info.get('dora', False))}")
-            args.dora = bool(l_info.get("dora", False))
-        if l_info.get("preset") and l_info["preset"] != args.target_preset:
-            print(f" [Resume Auto-Align] Aligned Target Preset {args.target_preset} -> {l_info['preset']}")
-            args.target_preset = l_info["preset"]
+        _align_args_from_spec(l_info, "Resume")
         resume_cfg_str = f'RESUME = "{Path(chosen_ckpt).as_posix()}"'
         if args.steps <= resumed_step:
             effective_steps = resumed_step + args.steps
@@ -857,26 +953,17 @@ if train_mode == "init_from":
     os.makedirs(stage_init_dir, exist_ok=True)
     shutil.copy2(chosen_sf, os.path.join(stage_init_dir, "trainable.safetensors"))
     l_info = _inspect_safetensors(chosen_sf)
-    if l_info.get("rank") and l_info["rank"] != args.rank:
-        print(f" [Init-From Auto-Align] Aligned Rank {args.rank} -> {l_info['rank']} from {chosen_sf}")
-        args.rank = l_info["rank"]
-        if l_info.get("alpha"):
-            args.alpha = l_info["alpha"]
-    if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
-        print(f" [Init-From Auto-Align] Aligned Algo {args.algo} -> {l_info['algo']}")
-        args.algo = l_info["algo"]
-    if bool(l_info.get("dora", False)) != bool(args.dora):
-        print(f" [Init-From Auto-Align] Aligned DoRA {args.dora} -> {bool(l_info.get('dora', False))}")
-        args.dora = bool(l_info.get("dora", False))
-    if l_info.get("preset") and l_info["preset"] != args.target_preset:
-        print(f" [Init-From Auto-Align] Aligned Target Preset {args.target_preset} -> {l_info['preset']}")
-        args.target_preset = l_info["preset"]
+    _align_args_from_spec(l_info, "Init-From")
     init_from_cfg_str = f'INIT_FROM = "{stage_init_dir}"'
     print(f" [Init-From] Continuing training from existing LoRA: {chosen_sf} (Rank={args.rank}, Alpha={args.alpha}, Steps={effective_steps})")
 
 # 8. 生成标准训练与数据配置 (与本地引擎完全对齐，注入分辨率、显存档位、架构变体、续炼与防 OOM 守卫)
 user_cfg_dir = os.path.join(trainer_dir, "configs", "user")
 os.makedirs(user_cfg_dir, exist_ok=True)
+
+text_drop_val = max(0.0, min(1.0, float(args.text_drop)))
+flip_val = bool(args.flip)
+seed_val = int(args.seed)
 
 data_cfg_content = f"""
 data_root = "/tmp/workspace_dataset"
@@ -902,25 +989,58 @@ CAPTION = {{
     "template": "nl",
 }}
 CAPTION_VARIANTS = 1
-TEXT_DROP = 0.05
+TEXT_DROP = {text_drop_val}
 LATENT_CACHE = "offline"
 TEXT_CACHE = "offline"
-FLIP = False
+FLIP = {flip_val}
 TEXT_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{effective_text_device}"}}
 IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
 VAE_ENCODE = {{"compile": "off"}}
 """
 
-warmup_steps = min(100, max(5, int(effective_steps * 0.05))) if effective_steps > 10 else 0
+raw_warmup = min(100, max(5, int(effective_steps * 0.05))) if (args.warmup_steps < 0 and effective_steps > 10) else max(0, int(args.warmup_steps))
+if args.warmup_steps < 0 and effective_steps <= 10:
+    raw_warmup = 0
+warmup_steps = max(0, min(raw_warmup, max(0, int(effective_steps) - 1)))
+sched_mode = args.lr_scheduler.lower() if args.lr_scheduler.lower() in ("cosine", "constant") else "cosine"
+if sched_mode == "constant":
+    schedule_cfg_str = f'SCHEDULE = {{\n    "mode": "constant",\n    "warmup": {warmup_steps},\n    "end": -1,\n}}'
+else:
+    schedule_cfg_str = f'SCHEDULE = {{\n    "mode": "cosine",\n    "warmup": {warmup_steps},\n    "end": -1,\n    "min_value": 0.1,\n}}'
+
 grad_acc_val = max(1, int(args.grad_acc))
 timestep_mu_val = float(args.timestep_mu)
+timestep_mode = args.timestep.lower()
+if timestep_mode == "uniform":
+    timestep_kwargs_str = 'TIMESTEP_KWARGS = {"shift": 1.0}'
+elif timestep_mode == "logit_normal":
+    timestep_kwargs_str = f'TIMESTEP_KWARGS = {{\n    "mu": {timestep_mu_val},\n    "s": 1.0,\n    "shift": 1.0,\n}}'
+else:
+    timestep_mode = "moss"
+    timestep_kwargs_str = f'TIMESTEP_KWARGS = {{\n    "mu": {timestep_mu_val},\n    "s": 0.95,\n    "shift": 1.0,\n    "cutoff": 0.95,\n    "uniform_mix": 0.01,\n}}'
+
 save_every_val = max(0, int(args.save_every))
+resolved_save_format = "hf" if args.save_format.lower() == "lycoris" else args.save_format.lower()
+weight_decay_val = max(0.0, float(args.weight_decay))
+ema_val = max(0.0, min(0.99999, float(args.ema)))
+
+in_drop = max(0.0, min(0.99, float(args.input_dropout)))
+rank_drop = max(0.0, min(0.99, float(args.rank_dropout)))
+mod_drop = max(0.0, min(0.99, float(args.module_dropout)))
+if args.dora and in_drop > 0.0:
+    print(f" [DoRA Guard] DoRA disables input dropout; forcing input_dropout {in_drop} -> 0.0.")
+    in_drop = 0.0
+
 fp16_fix_kwargs_str = 'FP16_FIX_KWARGS = {"c": 1 / 16}' if fp16_fix_val == "online" else "FP16_FIX_KWARGS = {}"
 
+lokr_factor_val = int(args.lokr_factor)
 if args.algo == "loha":
     algo_kwargs_str = 'ALGO_KWARGS = {"use_tucker": False, "use_scalar": False, "rank_dropout_scale": False}'
 elif args.algo == "lokr":
-    algo_kwargs_str = 'ALGO_KWARGS = {"factor": 8, "decompose_both": False, "full_matrix": False, "use_tucker": False, "rank_dropout_scale": False}'
+    algo_kwargs_str = (
+        f'ALGO_KWARGS = {{"factor": {lokr_factor_val}, "decompose_both": {bool(args.lokr_decompose_both)}, '
+        f'"full_matrix": {bool(args.lokr_full_matrix)}, "use_tucker": False, "rank_dropout_scale": False}}'
+    )
 else:
     algo_kwargs_str = "ALGO_KWARGS = {}"
 dora_detach_val = True if args.dora else False
@@ -934,6 +1054,7 @@ use_config("{args.lora_name}_data.py")
 
 VARIANT = "{arch_variant}"
 RUN_NAME = "{args.lora_name}"
+SEED = {seed_val}
 TRANSFORMER = "{transformer_filename}"
 {parallel_cfg_str}
 {base_prec_str}
@@ -950,32 +1071,27 @@ ALGO = "{args.algo}"
 {algo_kwargs_str}
 DORA = {bool(args.dora)}
 DORA_DETACH = {dora_detach_val}
+TRAIN_NORMS = {bool(args.train_norms)}
+DROPOUT = {{"input": {in_drop}, "rank": {rank_drop}, "module": {mod_drop}}}
 PRESET = "{args.target_preset}"
 LORAPLUS_RATIO = {loraplus_val}
 DIM = {args.rank}
 ALPHA = {args.alpha}
 STEPS = {effective_steps}
 GRAD_ACC = {grad_acc_val}
+OPTIMIZER = "{args.optimizer}"
 LR = {args.lr}
-TIMESTEP = "moss"
-TIMESTEP_KWARGS = {{
-    "mu": {timestep_mu_val},
-    "s": 0.95,
-    "shift": 1.0,
-    "cutoff": 0.95,
-    "uniform_mix": 0.01,
-}}
+WEIGHT_DECAY = {weight_decay_val}
+WD_RULES = "{args.wd_rules}"
+EMA = {ema_val}
+TIMESTEP = "{timestep_mode}"
+{timestep_kwargs_str}
 SAVE_EVERY = {save_every_val}
 SAVE_MINUTES = 25
 KEEP_LAST = 5
-SAVE_FORMAT = "both"
+SAVE_FORMAT = "{resolved_save_format}"
 SAVE_FUSED_QKV = False
-SCHEDULE = {{
-    "mode": "cosine",
-    "warmup": {warmup_steps},
-    "end": -1,
-    "min_value": 0.1
-}}
+{schedule_cfg_str}
 """
 
 data_cfg_file = os.path.join(user_cfg_dir, f"{args.lora_name}_data.py")
@@ -1074,23 +1190,40 @@ summary_data = {
     "rank": args.rank,
     "alpha": args.alpha,
     "algo": args.algo,
+    "lokr_factor": lokr_factor_val,
+    "lokr_full_matrix": bool(args.lokr_full_matrix),
+    "lokr_decompose_both": bool(args.lokr_decompose_both),
+    "train_norms": bool(args.train_norms),
+    "dropout": {"input": in_drop, "rank": rank_drop, "module": mod_drop},
     "dora": bool(args.dora),
     "dora_detach": dora_detach_val,
     "target_preset": args.target_preset,
     "loraplus_ratio": loraplus_val,
     "dataset_mode": "multi_subset" if cloud_subsets_summary else "single",
     "subsets": cloud_subsets_summary,
+    "optimizer": args.optimizer,
     "learning_rate": args.lr,
+    "lr_scheduler": sched_mode,
+    "warmup_steps": warmup_steps,
+    "weight_decay": weight_decay_val,
+    "wd_rules": args.wd_rules,
+    "ema": ema_val,
     "model_variant": selected_variant,
     "arch_variant": arch_variant,
     "backbone_file": transformer_filename,
     "base_quant": "int8" if is_int8_transformer else "full",
     "vram_preset": effective_preset,
+    "memory_profile": resolved_profile_name,
     "resolution": args.resolution,
     "precision": effective_precision,
     "base_precision": effective_base_prec,
     "grad_acc": grad_acc_val,
+    "timestep": timestep_mode,
     "timestep_mu": timestep_mu_val,
+    "text_drop": text_drop_val,
+    "flip": flip_val,
+    "seed": seed_val,
+    "save_format": resolved_save_format,
     "tune": args.tune,
     "overlong": args.overlong,
     "active_gpus": active_gpus,

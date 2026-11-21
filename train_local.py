@@ -47,7 +47,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.2.2"
+    return "1.5.0"
 
 
 APP_VERSION = _load_app_version()
@@ -371,7 +371,7 @@ def apply_compatibility_patches(trainer_dir: Path):
 
 
 def inspect_safetensors_lora(sf_path: Path) -> dict:
-    """秒级解析 .safetensors 文件头，提取真实 Rank(Dim)、Alpha、算法、DoRA、步数与键数量（零显存占用）。"""
+    """秒级解析 .safetensors 文件头，提取 Rank(Dim)、Alpha、算法、LoKr 因子、Norms、DoRA、步数与键数量（零显存占用）。"""
     info = {
         "rank": None,
         "alpha": None,
@@ -379,6 +379,10 @@ def inspect_safetensors_lora(sf_path: Path) -> dict:
         "algo": "lora",
         "dora": False,
         "preset": None,
+        "train_norms": None,
+        "lokr_factor": None,
+        "lokr_full_matrix": None,
+        "lokr_decompose_both": None,
         "keys_count": 0,
         "path": str(sf_path),
     }
@@ -407,6 +411,8 @@ def inspect_safetensors_lora(sf_path: Path) -> dict:
                 info["step"] = int(meta["kohakumoss_step"])
             except Exception:
                 pass
+        if "kohakumoss_algo" in meta and str(meta["kohakumoss_algo"]).strip():
+            info["algo"] = str(meta["kohakumoss_algo"]).strip().lower()
         if "kohakumoss_spec" in meta:
             try:
                 spec = json.loads(meta["kohakumoss_spec"])
@@ -418,8 +424,18 @@ def inspect_safetensors_lora(sf_path: Path) -> dict:
                     info["algo"] = str(spec["algo"]).lower()
                 if "dora" in spec:
                     info["dora"] = bool(spec["dora"])
+                if "train_norms" in spec:
+                    info["train_norms"] = bool(spec["train_norms"])
                 if spec.get("preset") and isinstance(spec["preset"], str):
                     info["preset"] = spec["preset"]
+                akw = spec.get("algo_kwargs")
+                if isinstance(akw, dict):
+                    if "factor" in akw:
+                        info["lokr_factor"] = int(akw["factor"])
+                    if "full_matrix" in akw:
+                        info["lokr_full_matrix"] = bool(akw["full_matrix"])
+                    if "decompose_both" in akw:
+                        info["lokr_decompose_both"] = bool(akw["decompose_both"])
             except Exception:
                 pass
 
@@ -919,6 +935,367 @@ def prepare_multi_subset_dataset(subsets: list, workspace_data_dir: Path) -> tup
 
     return workspace_data_dir, subset_summaries
 
+
+def _read_image_size(img_path: Path):
+    """读取图片原始像素宽高 (width, height)，仅解析文件头，不解码整张像素图。"""
+    try:
+        from PIL import Image
+        with Image.open(img_path) as im:
+            return int(im.width), int(im.height)
+    except Exception:
+        pass
+
+    import struct
+    try:
+        with open(img_path, "rb") as f:
+            head = f.read(32)
+            if len(head) < 10:
+                return None
+            # PNG
+            if head[:8] == b"\x89PNG\r\n\x1a\n" and len(head) >= 24:
+                w, h = struct.unpack(">II", head[16:24])
+                return int(w), int(h)
+            # BMP
+            if head[:2] == b"BM" and len(head) >= 26:
+                w, h = struct.unpack("<ii", head[18:26])
+                return int(w), abs(int(h))
+            # WEBP
+            if head[:4] == b"RIFF" and head[8:12] == b"WEBP" and len(head) >= 30:
+                chunk = head[12:16]
+                if chunk == b"VP8X":
+                    w = 1 + int.from_bytes(head[24:27], "little")
+                    h = 1 + int.from_bytes(head[27:30], "little")
+                    return w, h
+                if chunk == b"VP8 " and len(head) >= 30:
+                    w, h = struct.unpack("<HH", head[26:30])
+                    return w & 0x3FFF, h & 0x3FFF
+                if chunk == b"VP8L" and len(head) >= 25:
+                    b0, b1, b2, b3 = head[21:25]
+                    w = 1 + (((b1 & 0x3F) << 8) | b0)
+                    h = 1 + (((b3 & 0xF) << 10) | (b2 << 2) | ((b1 & 0xC0) >> 6))
+                    return w, h
+            # JPEG SOF parser
+            if head[:2] == b"\xff\xd8":
+                f.seek(2)
+                while True:
+                    byte = f.read(1)
+                    if not byte:
+                        break
+                    if byte != b"\xff":
+                        continue
+                    marker = f.read(1)
+                    while marker == b"\xff":
+                        marker = f.read(1)
+                    if not marker:
+                        break
+                    code = marker[0]
+                    if code in (0xD8, 0xD9, 0x01) or (0xD0 <= code <= 0xD7):
+                        continue
+                    seg_len_bytes = f.read(2)
+                    if len(seg_len_bytes) < 2:
+                        break
+                    seg_len = struct.unpack(">H", seg_len_bytes)[0]
+                    if code in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                        sof = f.read(5)
+                        if len(sof) == 5:
+                            h, w = struct.unpack(">HH", sof[1:5])
+                            return int(w), int(h)
+                        break
+                    f.seek(max(0, seg_len - 2), os.SEEK_CUR)
+    except Exception:
+        return None
+    return None
+
+
+def _is_suspected_tag_soup(caption_text: str) -> bool:
+    """启发式检测 .txt 文本是否疑似未经改写的 Danbooru 纯逗号标签堆砌。"""
+    text = (caption_text or "").strip()
+    if not text:
+        return False
+    comma_count = text.count(",")
+    if comma_count < 8:
+        return False
+    lower_padded = f" {text.lower()} "
+    nl_connectors = (" a ", " an ", " the ", " is ", " are ", " was ", " with ", " wearing ", " in ", " on ", " standing ", " sitting ")
+    connector_hits = sum(1 for kw in nl_connectors if kw in lower_padded)
+    period_count = text.count(".")
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    avg_words = (sum(len(p.split()) for p in parts) / len(parts)) if parts else 0.0
+    if avg_words <= 3.8 and period_count == 0 and connector_hits <= 1:
+        return True
+    if comma_count >= 14 and period_count <= 1 and avg_words <= 4.2 and connector_hits <= 2:
+        return True
+    return False
+
+
+def audit_dataset_directories(targets: list, max_tokens: int = 4352, resolution: int = 1024) -> dict:
+    """
+    训练前本地图集体检器（支持单图集与多子集）：
+    检查缺/空 .txt 标注、低于 768px 的低分辨率图、超出 ASPECT_RANGE=(0.33, 3.0) 的极端长宽比图、
+    按当前 MAX_TOKENS/分辨率预算估算会触发文本截断的超长 .txt，以及疑似纯 Danbooru 逗号堆砌标注。
+    """
+    img_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+    target_area = max(256, int(resolution)) * max(256, int(resolution))
+    est_image_tokens = max(1, target_area // 256)
+    avail_text_tokens = max(32, int(max_tokens) - est_image_tokens)
+
+    total_images = 0
+    total_captions = 0
+    missing_dirs = []
+    missing_txt = []
+    low_res = []
+    extreme_aspect = []
+    overlong_txt = []
+    suspected_tags = []
+    subdir_summaries = []
+
+    for entry in (targets or []):
+        if not isinstance(entry, dict) or entry.get("enabled", True) is False:
+            continue
+        sub_name = str(entry.get("name") or "dataset")
+        sub_path_str = str(entry.get("path") or "").strip()
+        sub_trigger = str(entry.get("trigger") or "").strip()
+        sub_dir = Path(sub_path_str)
+        if not sub_path_str or not sub_dir.is_dir():
+            missing_dirs.append(f"[{sub_name}] 目录不存在: {sub_path_str}")
+            continue
+
+        imgs = sorted(f for f in sub_dir.iterdir() if f.is_file() and f.suffix.lower() in img_exts)
+        sub_txt_ok = 0
+        for img_p in imgs:
+            total_images += 1
+            rel_label = f"[{sub_name}] {img_p.name}"
+            size = _read_image_size(img_p)
+            if size is not None:
+                w, h = size
+                if w > 0 and h > 0:
+                    if min(w, h) < 768 or (w * h) < (768 * 768):
+                        low_res.append(f"{rel_label} ({w}x{h})")
+                    aspect = max(w / h, h / w)
+                    if aspect > 3.0:
+                        extreme_aspect.append(f"{rel_label} ({w}x{h}, 比例 {aspect:.2f}:1)")
+
+            txt_p = img_p.with_suffix(".txt")
+            if not txt_p.is_file():
+                missing_txt.append(f"{rel_label} (缺少同名 .txt)")
+                continue
+
+            raw_caption = txt_p.read_text(encoding="utf-8", errors="ignore").strip()
+            if not raw_caption:
+                missing_txt.append(f"{rel_label} (.txt 为空)")
+                continue
+
+            total_captions += 1
+            sub_txt_ok += 1
+            effective_caption = raw_caption
+            if sub_trigger and sub_trigger.lower() not in raw_caption.lower():
+                effective_caption = f"{sub_trigger}, {raw_caption}"
+
+            est_txt_tokens = int(len(effective_caption) / 3.5) + 12
+            if est_txt_tokens > avail_text_tokens:
+                overlong_txt.append(
+                    f"{rel_label} (估算文本 ~{est_txt_tokens} tok + 图像 ~{est_image_tokens} tok > {max_tokens})"
+                )
+
+            if _is_suspected_tag_soup(raw_caption):
+                suspected_tags.append(f"{rel_label} (逗号 {raw_caption.count(',')} 个，疑似标签堆砌)")
+
+        subdir_summaries.append({
+            "name": sub_name,
+            "path": str(sub_dir),
+            "images": len(imgs),
+            "captions": sub_txt_ok,
+        })
+
+    issue_count = len(missing_dirs) + len(missing_txt) + len(low_res) + len(extreme_aspect) + len(overlong_txt) + len(suspected_tags)
+    if missing_dirs or total_images == 0:
+        level = "error"
+    elif issue_count > 0:
+        level = "warn"
+    else:
+        level = "ok"
+
+    lines = [
+        f"========== 📊 图集预检体检报告 (分辨率 {resolution}px | Token预算 {max_tokens}) ==========",
+        f"• 已扫描子集/目录: {len(subdir_summaries)} 个 | 有效图片: {total_images} 张 | 有效非空标注: {total_captions} 份",
+        f"• 预估视觉占用: ~{est_image_tokens} tokens/图 | 当前单图文本可用上限: ~{avail_text_tokens} tokens (~{int(max(0, avail_text_tokens - 12) * 3.5)} 英文字符)",
+        "",
+    ]
+    if missing_dirs:
+        lines.append(f"❌ [1. 无效目录 ({len(missing_dirs)})] 以下目录不存在：")
+        lines.extend(f"   - {x}" for x in missing_dirs[:15])
+        lines.append("   💡 修复建议：请重新浏览选择正确的图片文件夹路径。\n")
+    if total_images == 0:
+        lines.append("❌ 未发现任何支持格式 (.jpg/.jpeg/.png/.webp/.bmp) 的图片文件！\n")
+
+    def _append_section(title: str, items: list, advice: str):
+        if items:
+            lines.append(f"⚠️ {title} ({len(items)} 项)：")
+            for x in items[:15]:
+                lines.append(f"   - {x}")
+            if len(items) > 15:
+                lines.append(f"   ... 另有 {len(items) - 15} 项未展开")
+            lines.append(f"   💡 一句话建议：{advice}\n")
+        else:
+            lines.append(f"✅ {title}: 全部通过 (0 项异常)")
+
+    _append_section(
+        "缺失或空白 .txt 标注",
+        missing_txt,
+        "用自然语言补齐对应 .txt 描述；若空白过多且未设触发词，模型容易把无关背景死记进权重。"
+    )
+    _append_section(
+        "低分辨率小图 (<768px)",
+        low_res,
+        "因引擎锁定 UPSCALE='never'，过小图片无法放大到 1024px，建议超分放大或剔除严重模糊底图。"
+    )
+    _append_section(
+        "极端长宽比图 (>3:1)",
+        extreme_aspect,
+        "超出引擎 ASPECT_RANGE=(0.33, 3.0) 的长图或超宽图会被过滤或裁边，建议先手动裁剪。"
+    )
+    _append_section(
+        f"疑似超长文本 (超出 MAX_TOKENS={max_tokens})",
+        overlong_txt,
+        "精简冗余描述，或将【训练分辨率】切到 896 / 提升显存档位至 12g/16g 释放更多文本空间。"
+    )
+    _append_section(
+        "疑似纯逗号标签堆砌 (Danbooru Tag Soup)",
+        suspected_tags,
+        "MOSS-Image 使用 Qwen3.5-9B 语义编码器，建议改用完整流畅的英文自然语言句子以防特征绑定混乱。"
+    )
+
+    if level == "ok":
+        lines.append("\n🎉 恭喜！图集全部体检项目均健康通过，可直接启动训练。")
+
+    return {
+        "level": level,
+        "total_images": total_images,
+        "total_captions": total_captions,
+        "subdirs": subdir_summaries,
+        "missing_dirs": missing_dirs,
+        "missing_txt": missing_txt,
+        "low_res": low_res,
+        "extreme_aspect": extreme_aspect,
+        "overlong_txt": overlong_txt,
+        "suspected_tags": suspected_tags,
+        "report_text": "\n".join(lines),
+    }
+
+
+def _resolve_optimizer_memory_profile(effective_preset: str, optimizer: str, base_profile: str) -> tuple:
+    """
+    校验并映射非 AdamW 优化器的显存档位：
+    KohakuMossTrainer 要求 optimizer != 'adamw' 时 optim_state 必须为 'gpu'，且 muon 需 fused_step=False。
+    带 -gradoff / minimal / low 的档位均使用 host/stream 或 fused_step，因此自动切换到纯净 ring+actoff 档位。
+    """
+    opt = (optimizer or "adamw").lower()
+    if opt == "adamw" or base_profile == "ckpt-resident":
+        return base_profile, None
+
+    remap_table = {
+        "6g": "ckpt-ring2-actoff",
+        "8g": "ckpt-ring2-actoff",
+        "12g": "ckpt-ring4-actoff",
+        "16g": "ckpt-ring8-actoff",
+    }
+    mapped = remap_table.get(effective_preset, "ckpt-ring4-actoff")
+    notice = (
+        f" [Optimizer Guard] OPTIMIZER='{opt}' requires optim_state='gpu' & fused_step=False; "
+        f"auto-remapped MEMORY_PROFILE '{base_profile}' -> '{mapped}'."
+    )
+    return mapped, notice
+
+
+def _resolve_save_format(save_fmt: str) -> str:
+    """将用户友好的 'lycoris' 别名映射为 KohakuMossTrainer 规范值 'hf'。"""
+    fmt = (save_fmt or "both").strip().lower()
+    if fmt == "lycoris":
+        return "hf"
+    if fmt in ("both", "comfy", "hf", "none"):
+        return fmt
+    return "both"
+
+
+def _build_timestep_cfg(mode: str, mu: float) -> tuple:
+    """生成合规的 TIMESTEP 与 TIMESTEP_KWARGS（训练期 shift 始终锁定 1.0）。"""
+    m = (mode or "moss").strip().lower()
+    mu_val = float(mu)
+    if m == "uniform":
+        return m, 'TIMESTEP_KWARGS = {"shift": 1.0}'
+    if m == "logit_normal":
+        return m, f'TIMESTEP_KWARGS = {{\n    "mu": {mu_val},\n    "s": 1.0,\n    "shift": 1.0,\n}}'
+    return "moss", (
+        "TIMESTEP_KWARGS = {\n"
+        f'    "mu": {mu_val},\n'
+        '    "s": 0.95,\n'
+        '    "shift": 1.0,\n'
+        '    "cutoff": 0.95,\n'
+        '    "uniform_mix": 0.01,\n'
+        "}"
+    )
+
+
+def _build_schedule_cfg(mode: str, warmup_arg: int, effective_steps: int) -> tuple:
+    """生成带防越界保护的 AnySchedule SCHEDULE 配置字典字符串。"""
+    m = (mode or "cosine").strip().lower()
+    if m not in ("cosine", "constant"):
+        m = "cosine"
+    if int(warmup_arg) < 0:
+        raw_warmup = min(100, max(5, int(effective_steps * 0.05))) if effective_steps > 10 else 0
+    else:
+        raw_warmup = max(0, int(warmup_arg))
+    warmup_val = max(0, min(raw_warmup, max(0, int(effective_steps) - 1)))
+    if m == "constant":
+        cfg_str = (
+            "SCHEDULE = {\n"
+            '    "mode": "constant",\n'
+            f'    "warmup": {warmup_val},\n'
+            '    "end": -1,\n'
+            "}"
+        )
+    else:
+        cfg_str = (
+            "SCHEDULE = {\n"
+            '    "mode": "cosine",\n'
+            f'    "warmup": {warmup_val},\n'
+            '    "end": -1,\n'
+            '    "min_value": 0.1,\n'
+            "}"
+        )
+    return warmup_val, cfg_str
+
+
+def _apply_checkpoint_spec_alignment(args, l_info: dict, mode_tag: str):
+    """续炼 / init_from 启动前从 safetensors 元信息自动对齐 Rank/Alpha/Algo/DoRA/LoKr/Norms。"""
+    if l_info.get("rank") and l_info["rank"] != args.rank:
+        print(f" [{mode_tag} Auto-Align] Aligned Rank {args.rank} -> {l_info['rank']}")
+        args.rank = l_info["rank"]
+        if l_info.get("alpha"):
+            args.alpha = l_info["alpha"]
+    if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
+        print(f" [{mode_tag} Auto-Align] Aligned Algo {args.algo} -> {l_info['algo']}")
+        args.algo = l_info["algo"]
+    if bool(l_info.get("dora", False)) != bool(args.dora):
+        print(f" [{mode_tag} Auto-Align] Aligned DoRA {args.dora} -> {bool(l_info.get('dora', False))}")
+        args.dora = bool(l_info.get("dora", False))
+    if l_info.get("preset") and l_info["preset"] != args.target_preset:
+        print(f" [{mode_tag} Auto-Align] Aligned Target Preset {args.target_preset} -> {l_info['preset']}")
+        args.target_preset = l_info["preset"]
+    if l_info.get("train_norms") is not None and bool(l_info["train_norms"]) != bool(args.train_norms):
+        print(f" [{mode_tag} Auto-Align] Aligned Train Norms {args.train_norms} -> {bool(l_info['train_norms'])}")
+        args.train_norms = bool(l_info["train_norms"])
+    if args.algo == "lokr":
+        if l_info.get("lokr_factor") is not None and int(l_info["lokr_factor"]) != int(args.lokr_factor):
+            print(f" [{mode_tag} Auto-Align] Aligned LoKr Factor {args.lokr_factor} -> {int(l_info['lokr_factor'])}")
+            args.lokr_factor = int(l_info["lokr_factor"])
+        if l_info.get("lokr_full_matrix") is not None and bool(l_info["lokr_full_matrix"]) != bool(args.lokr_full_matrix):
+            print(f" [{mode_tag} Auto-Align] Aligned LoKr Full Matrix {args.lokr_full_matrix} -> {bool(l_info['lokr_full_matrix'])}")
+            args.lokr_full_matrix = bool(l_info["lokr_full_matrix"])
+        if l_info.get("lokr_decompose_both") is not None and bool(l_info["lokr_decompose_both"]) != bool(args.lokr_decompose_both):
+            print(f" [{mode_tag} Auto-Align] Aligned LoKr Decompose Both {args.lokr_decompose_both} -> {bool(l_info['lokr_decompose_both'])}")
+            args.lokr_decompose_both = bool(l_info["lokr_decompose_both"])
+
 def main():
     parser = argparse.ArgumentParser(description="OpenMOSS MOSS-Image Local Training Engine for Windows Consumer GPUs")
     parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
@@ -954,6 +1331,20 @@ def main():
                         help="LoRA Alpha (default: 32.0 for full strength 1.0)")
     parser.add_argument("--algo", type=str, default="lora", choices=["lora", "loha", "lokr"],
                         help="Adapter algorithm: lora (default), loha (Hadamard), lokr (Kronecker)")
+    parser.add_argument("--lokr_factor", type=int, default=8,
+                        help="LoKr Kronecker factor (-1=auto, 4=high capacity, 8=default, 16=ultra-compact)")
+    parser.add_argument("--lokr_full_matrix", action="store_true",
+                        help="LoKr: use full second matrix factor (increases capacity & file size)")
+    parser.add_argument("--lokr_decompose_both", action="store_true",
+                        help="LoKr: decompose both Kronecker matrices when dimensions permit")
+    parser.add_argument("--train_norms", action="store_true",
+                        help="Also train AdaLN/RMS/LayerNorm scale weights alongside adapters")
+    parser.add_argument("--input_dropout", type=float, default=0.0,
+                        help="Adapter input dropout in [0.0, 1.0) (automatically forced to 0.0 when --dora is enabled)")
+    parser.add_argument("--rank_dropout", type=float, default=0.0,
+                        help="Adapter rank dropout in [0.0, 1.0) to prevent overfitting on small datasets")
+    parser.add_argument("--module_dropout", type=float, default=0.0,
+                        help="Whole-module stochastic drop probability in [0.0, 1.0)")
     parser.add_argument("--dora", action="store_true",
                         help="Enable DoRA (Weight-Decomposed Low-Rank Adaptation, ICML 2024) for improved detail and style fidelity")
     parser.add_argument("--target_preset", type=str, default="attn-mlp",
@@ -963,6 +1354,18 @@ def main():
                         help="LoRA+ learning rate multiplier for up-projection weights (1.0=off, recommended 2.0~4.0 for faster multi-concept convergence)")
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Learning rate (default: 1e-4)")
+    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "adamw8bit_kernel", "muon"],
+                        help="Optimizer: adamw (default), adamw8bit_kernel, or muon (non-adamw auto-remaps MEMORY_PROFILE to GPU optim_state)")
+    parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["cosine", "constant"],
+                        help="Learning rate scheduler mode (default: cosine)")
+    parser.add_argument("--warmup_steps", type=int, default=-1,
+                        help="LR warmup steps (-1=auto 5%% clamped to [5, 100]; >=0 explicit, clamped < steps)")
+    parser.add_argument("--weight_decay", type=float, default=0.01,
+                        help="Decoupled weight decay coefficient (default: 0.01)")
+    parser.add_argument("--wd_rules", type=str, default="moss", choices=["moss", "none", "all"],
+                        help="Weight decay parameter selection rule (default: moss)")
+    parser.add_argument("--ema", type=float, default=0.0,
+                        help="Exponential Moving Average decay rate (0.0=off, 0.99~0.995 recommended for long/high-step runs)")
     parser.add_argument("--precision", type=str, default="bf16", choices=["bf16", "fp16"],
                         help="Training precision (bf16 recommended for RTX 40/30 series)")
     parser.add_argument("--base_precision", type=str, default="auto",
@@ -970,8 +1373,18 @@ def main():
                         help="Frozen backbone storage/compute precision (auto, int8, fp8, fp8_compute, compute)")
     parser.add_argument("--grad_acc", type=int, default=1,
                         help="Gradient accumulation steps (1=fast default; 2~4 stabilizes complex character details on 8GB)")
+    parser.add_argument("--timestep", type=str, default="moss", choices=["moss", "uniform", "logit_normal"],
+                        help="Timestep distribution: moss (1-sigmoid; higher mu=low-noise detail), uniform, or logit_normal (negative mu=low-noise detail)")
     parser.add_argument("--timestep_mu", type=float, default=-1.09,
-                        help="MossTimestep truncated logit-normal mean mu (-1.09=89%% high-noise style focus, 0.0~0.35=more low-noise garment/face details)")
+                        help="Mean mu for moss/logit_normal timestep sampling (moss: -1.09 style / 0.35 char; logit_normal has opposite sign)")
+    parser.add_argument("--text_drop", type=float, default=0.05,
+                        help="Empty-prompt unconditional dropout probability (default: 0.05)")
+    parser.add_argument("--flip", action="store_true",
+                        help="Enable random horizontal flip augmentation (CAUTION: avoid on asymmetric outfits or text)")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed for reproducibility (default: 0)")
+    parser.add_argument("--save_format", type=str, default="both", choices=["both", "comfy", "hf", "lycoris"],
+                        help="Export adapter format: both (ComfyUI + LyCORIS), comfy, or hf/lycoris")
     parser.add_argument("--tune", type=str, default="off", choices=["off", "table"],
                         help="Triton/kernel autotuner mode: off (fast start) or table (benchmark & cache best kernels)")
     parser.add_argument("--overlong", type=str, default="drop_tokens", choices=["drop_tokens", "drop"],
@@ -1010,9 +1423,10 @@ def main():
     print(f"Custom Trigger Word:          {args.trigger_word if args.trigger_word else '(None, using original captions)'}")
     print(f"Dedicated Output Directory:   {lora_dedicated_folder}")
     print(f"OS: Windows | Target Precision: {args.precision.upper()} | Text Device: {args.text_device.upper()}")
-    print(f"Adapter Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, Preset={args.target_preset}")
-    print(f"Hyperparameters: Steps={args.steps}, GradAcc={max(1, int(args.grad_acc))}, Dim={args.rank}, Alpha={args.alpha}, LR={args.lr}")
-    print(f"Dynamics & Precision: TimestepMu={args.timestep_mu}, BasePrec={args.base_precision}, Tune={args.tune}, Overlong={args.overlong}")
+    print(f"Adapter Architecture: Algo={args.algo.upper()}, DoRA={'ON' if args.dora else 'OFF'}, TrainNorms={'ON' if args.train_norms else 'OFF'}, Preset={args.target_preset}")
+    print(f"Hyperparameters: Steps={args.steps}, GradAcc={max(1, int(args.grad_acc))}, Dim={args.rank}, Alpha={args.alpha}, LR={args.lr}, Opt={args.optimizer.upper()} ({args.lr_scheduler})")
+    print(f"Dynamics & Augment: Timestep={args.timestep}(mu={args.timestep_mu}), TextDrop={args.text_drop}, Flip={bool(args.flip)}, Seed={args.seed}, EMA={args.ema}, SaveFmt={args.save_format}")
+    print(f"Precision & Tokens: BasePrec={args.base_precision}, Tune={args.tune}, Overlong={args.overlong}")
 
     # 1. 硬件与 PyTorch 环境预检
     total_vram = 16.0
@@ -1173,26 +1587,33 @@ def main():
         # 针对 6G/8G 消费级显卡（如 RTX 3070 / 4060 等），应用官方极限 4.4G 压制配方：两层流式环形缓冲 + 激活与梯度全面卸载 + CPU 优化器
         recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_6g.py")'
         max_tokens_val = 4352
-        memory_profile_str = 'MEMORY_PROFILE = "ckpt-ring2-actoff-optcpu-gradoff"'
+        base_profile_name = "ckpt-ring2-actoff-optcpu-gradoff"
         print(f" [VRAM Preset] Applied 6G Profile (extreme ~4.4GB VRAM): {auto_note}")
     elif effective_preset == "8g":
         # 针对 8G 显卡标准配置，minimal profile (两层流式环形缓冲 + 激活梯度卸载 + host AdamW)
         recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_8g.py")'
         max_tokens_val = 4352
-        memory_profile_str = 'MEMORY_PROFILE = "minimal"'
+        base_profile_name = "minimal"
         print(f" [VRAM Preset] Applied 8G Profile (~5.5GB VRAM): {auto_note}")
     elif effective_preset == "12g":
         # 针对 12G 显卡进阶配置，严格对齐上游 vram_12g.py（保留 gradoff 防 OOM）
         recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_12g.py")'
         max_tokens_val = 6144
-        memory_profile_str = 'MEMORY_PROFILE = "ckpt-ring4-actoff-optstream-gradoff"'
+        base_profile_name = "ckpt-ring4-actoff-optstream-gradoff"
         print(f" [VRAM Preset] Applied 12G Profile (~8.5GB VRAM, MAX_TOKENS=6144): {auto_note}")
     else:
         # 针对 16G/24G 显卡标准高吞吐配置，对齐上游 vram_16g.py（解耦 fp16 配方避免 BF16 混用）
         recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_16g.py")'
         max_tokens_val = 8192
-        memory_profile_str = 'MEMORY_PROFILE = "low"'
+        base_profile_name = "low"
         print(f" [VRAM Preset] Applied 16G Profile (MAX_TOKENS=8192, MEMORY_PROFILE=low): {auto_note}")
+
+    resolved_profile_name, opt_profile_notice = _resolve_optimizer_memory_profile(
+        effective_preset, args.optimizer, base_profile_name
+    )
+    if opt_profile_notice:
+        print(opt_profile_notice)
+    memory_profile_str = f'MEMORY_PROFILE = "{resolved_profile_name}"'
 
     print(f" [Resolution] Target Area: {args.resolution}x{args.resolution} ({args.resolution * args.resolution} px)")
 
@@ -1230,20 +1651,7 @@ def main():
             t_sf = latest_ckpt_dir / "trainable.safetensors"
             if t_sf.exists():
                 l_info = inspect_safetensors_lora(t_sf)
-                if l_info.get("rank") and l_info["rank"] != args.rank:
-                    print(f" [Resume Auto-Align] Aligned Rank from {args.rank} -> {l_info['rank']} (matching checkpoint {latest_ckpt_dir.name})")
-                    args.rank = l_info["rank"]
-                    if l_info.get("alpha"):
-                        args.alpha = l_info["alpha"]
-                if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
-                    print(f" [Resume Auto-Align] Aligned Algo from {args.algo} -> {l_info['algo']}")
-                    args.algo = l_info["algo"]
-                if bool(l_info.get("dora", False)) != bool(args.dora):
-                    print(f" [Resume Auto-Align] Aligned DoRA from {args.dora} -> {bool(l_info.get('dora', False))}")
-                    args.dora = bool(l_info.get("dora", False))
-                if l_info.get("preset") and l_info["preset"] != args.target_preset:
-                    print(f" [Resume Auto-Align] Aligned Target Preset from {args.target_preset} -> {l_info['preset']}")
-                    args.target_preset = l_info["preset"]
+                _apply_checkpoint_spec_alignment(args, l_info, "Resume")
             resume_cfg_str = f'RESUME = "{sanitize_path(latest_ckpt_dir)}"'
             if args.steps <= resumed_step:
                 effective_steps = resumed_step + args.steps
@@ -1271,20 +1679,7 @@ def main():
         staged_init_dir, l_info = prepare_init_from_checkpoint(
             args.init_from, workspace_dir, args.lora_name, base_output_dir, trainer_dir
         )
-        if l_info.get("rank") and l_info["rank"] != args.rank:
-            print(f" [Init-From Auto-Align] Aligned Rank from {args.rank} -> {l_info['rank']} (matching existing LoRA '{Path(l_info['source_file']).name}')")
-            args.rank = l_info["rank"]
-            if l_info.get("alpha"):
-                args.alpha = l_info["alpha"]
-        if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
-            print(f" [Init-From Auto-Align] Aligned Algo from {args.algo} -> {l_info['algo']}")
-            args.algo = l_info["algo"]
-        if bool(l_info.get("dora", False)) != bool(args.dora):
-            print(f" [Init-From Auto-Align] Aligned DoRA from {args.dora} -> {bool(l_info.get('dora', False))}")
-            args.dora = bool(l_info.get("dora", False))
-        if l_info.get("preset") and l_info["preset"] != args.target_preset:
-            print(f" [Init-From Auto-Align] Aligned Target Preset from {args.target_preset} -> {l_info['preset']}")
-            args.target_preset = l_info["preset"]
+        _apply_checkpoint_spec_alignment(args, l_info, "Init-From")
         init_from_cfg_str = f'INIT_FROM = "{sanitize_path(staged_init_dir)}"'
         resume_source_info = f"Continued training (INIT_FROM) based on '{Path(l_info['source_file']).name}' (Rank={args.rank}, Alpha={args.alpha})"
         print(f" [Init-From] Loaded base LoRA weights from: {l_info['source_file']} (training {effective_steps} new steps)")
@@ -1298,6 +1693,10 @@ def main():
                 print(f" [Fresh Start] Backed up previous run checkpoints to: {backup_root.name}")
             except Exception:
                 pass
+
+    text_drop_val = max(0.0, min(1.0, float(args.text_drop)))
+    flip_val = bool(args.flip)
+    seed_val = int(args.seed)
 
     data_cfg_code = f"""
 data_root = "{sanitized_data_root}"
@@ -1323,19 +1722,31 @@ CAPTION = {{
     "template": "nl",
 }}
 CAPTION_VARIANTS = 1
-TEXT_DROP = 0.05
+TEXT_DROP = {text_drop_val}
 LATENT_CACHE = "offline"
 TEXT_CACHE = "offline"
-FLIP = False
+FLIP = {flip_val}
 TEXT_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.text_device}"}}
 IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
 VAE_ENCODE = {{"compile": "off"}}
 """
 
-    warmup_steps = min(100, max(5, int(effective_steps * 0.05))) if effective_steps > 10 else 0
+    warmup_steps, schedule_cfg_str = _build_schedule_cfg(args.lr_scheduler, args.warmup_steps, effective_steps)
     grad_acc_val = max(1, int(args.grad_acc))
     timestep_mu_val = float(args.timestep_mu)
+    timestep_mode, timestep_kwargs_str = _build_timestep_cfg(args.timestep, timestep_mu_val)
     save_every_val = max(0, int(args.save_every))
+    resolved_save_format = _resolve_save_format(args.save_format)
+    weight_decay_val = max(0.0, float(args.weight_decay))
+    ema_val = max(0.0, min(0.99999, float(args.ema)))
+
+    in_drop = max(0.0, min(0.99, float(args.input_dropout)))
+    rank_drop = max(0.0, min(0.99, float(args.rank_dropout)))
+    mod_drop = max(0.0, min(0.99, float(args.module_dropout)))
+    if args.dora and in_drop > 0.0:
+        print(f" [DoRA Guard] DoRA disables input dropout; forcing input_dropout {in_drop} -> 0.0 (rank/module dropout stay active).")
+        in_drop = 0.0
+
     is_healed_backbone = "heal" in transformer_filename.lower()
     fp16_fix_val = "online" if (args.precision == "fp16" and not is_healed_backbone) else "none"
     if fp16_fix_val == "online":
@@ -1349,10 +1760,14 @@ VAE_ENCODE = {{"compile": "off"}}
             effective_comfy_models = str(broad_m[0])
 
     # 按 KohakuMossTrainer 官方 algo_*.py 配方注入各算法防坑参数，确保 LyCORIS 融合内核与 ComfyUI 导出零冲突
+    lokr_factor_val = int(args.lokr_factor)
     if args.algo == "loha":
         algo_kwargs_str = 'ALGO_KWARGS = {"use_tucker": False, "use_scalar": False, "rank_dropout_scale": False}'
     elif args.algo == "lokr":
-        algo_kwargs_str = 'ALGO_KWARGS = {"factor": 8, "decompose_both": False, "full_matrix": False, "use_tucker": False, "rank_dropout_scale": False}'
+        algo_kwargs_str = (
+            f'ALGO_KWARGS = {{"factor": {lokr_factor_val}, "decompose_both": {bool(args.lokr_decompose_both)}, '
+            f'"full_matrix": {bool(args.lokr_full_matrix)}, "use_tucker": False, "rank_dropout_scale": False}}'
+        )
     else:
         algo_kwargs_str = "ALGO_KWARGS = {}"
     dora_detach_val = True if args.dora else False
@@ -1366,6 +1781,7 @@ use_config("{args.lora_name}_local_data.py")
 
 VARIANT = "{model_variant}"
 RUN_NAME = "{args.lora_name}"
+SEED = {seed_val}
 TRANSFORMER = "{transformer_filename}"
 {base_prec_str}
 {memory_profile_str}
@@ -1381,32 +1797,27 @@ ALGO = "{args.algo}"
 {algo_kwargs_str}
 DORA = {bool(args.dora)}
 DORA_DETACH = {dora_detach_val}
+TRAIN_NORMS = {bool(args.train_norms)}
+DROPOUT = {{"input": {in_drop}, "rank": {rank_drop}, "module": {mod_drop}}}
 PRESET = "{args.target_preset}"
 LORAPLUS_RATIO = {loraplus_val}
 DIM = {args.rank}
 ALPHA = {args.alpha}
 STEPS = {effective_steps}
 GRAD_ACC = {grad_acc_val}
+OPTIMIZER = "{args.optimizer}"
 LR = {args.lr}
-TIMESTEP = "moss"
-TIMESTEP_KWARGS = {{
-    "mu": {timestep_mu_val},
-    "s": 0.95,
-    "shift": 1.0,
-    "cutoff": 0.95,
-    "uniform_mix": 0.01,
-}}
+WEIGHT_DECAY = {weight_decay_val}
+WD_RULES = "{args.wd_rules}"
+EMA = {ema_val}
+TIMESTEP = "{timestep_mode}"
+{timestep_kwargs_str}
 SAVE_EVERY = {save_every_val}
 SAVE_MINUTES = 20
 KEEP_LAST = 5
-SAVE_FORMAT = "both"
+SAVE_FORMAT = "{resolved_save_format}"
 SAVE_FUSED_QKV = False
-SCHEDULE = {{
-    "mode": "cosine",
-    "warmup": {warmup_steps},
-    "end": -1,
-    "min_value": 0.1
-}}
+{schedule_cfg_str}
 """
 
     data_cfg_file = user_cfg_dir / f"{args.lora_name}_local_data.py"
@@ -1521,15 +1932,32 @@ SCHEDULE = {{
         "rank": args.rank,
         "alpha": args.alpha,
         "algo": args.algo,
+        "lokr_factor": lokr_factor_val,
+        "lokr_full_matrix": bool(args.lokr_full_matrix),
+        "lokr_decompose_both": bool(args.lokr_decompose_both),
+        "train_norms": bool(args.train_norms),
+        "dropout": {"input": in_drop, "rank": rank_drop, "module": mod_drop},
         "dora": bool(args.dora),
         "dora_detach": dora_detach_val,
         "target_preset": args.target_preset,
         "loraplus_ratio": loraplus_val,
+        "optimizer": args.optimizer,
         "learning_rate": args.lr,
+        "lr_scheduler": args.lr_scheduler,
+        "warmup_steps": warmup_steps,
+        "weight_decay": weight_decay_val,
+        "wd_rules": args.wd_rules,
+        "ema": ema_val,
         "precision": args.precision,
         "base_precision": effective_base_prec,
+        "memory_profile": resolved_profile_name,
         "grad_acc": grad_acc_val,
+        "timestep": timestep_mode,
         "timestep_mu": timestep_mu_val,
+        "text_drop": text_drop_val,
+        "flip": flip_val,
+        "seed": seed_val,
+        "save_format": resolved_save_format,
         "tune": args.tune,
         "overlong": args.overlong,
         "vram_preset": effective_preset,

@@ -5,7 +5,7 @@ import webbrowser
 
 from core.config_store import PROJECT_ROOT, open_in_explorer
 from .theme import PALETTE
-from .widgets import ScrollableFrame
+from .widgets import FlatButton, ScrollableFrame
 
 
 def build_cloud_tab(parent, app) -> ScrollableFrame:
@@ -32,7 +32,7 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
         roadmap_card,
         text=(
             "本选项卡专为即将到来的 v1.6.0【本地 UI 直控云端 GPU 实例】架构预留。"
-            "完成当前 v1.5.1 模块化架构升级后，你将无需手敲终端或忍受浏览器卡顿，直接在本界面遥控远程训练。"
+            "完成当前界面重构升级后，后续你将无需手敲终端或忍受浏览器卡顿，直接在本界面遥控远程训练。"
         ),
         bg=c["bg_dark"],
         fg=c["text_main"],
@@ -103,14 +103,12 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
         r = tk.Frame(asset_card, bg=c["bg_dark"])
         r.pack(fill=tk.X, pady=(0, 5))
         for text, fg, cmd in (left_btn, right_btn):
-            tk.Button(
+            FlatButton(
                 r,
                 text=text,
                 bg=c["input_bg"],
                 fg=fg,
-                relief=tk.FLAT,
                 font=(c["font_family"], 8, "bold"),
-                cursor="hand2",
                 pady=6,
                 command=cmd,
             ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))

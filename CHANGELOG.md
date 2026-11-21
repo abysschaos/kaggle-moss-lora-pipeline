@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持一键传图、远程拉起 `train_moss.py` 与日志流式回传、本地看板实时渲染远端 Loss 曲线；
     - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 等平台的一键启停机与费用告警适配器接口。
 
+## [1.5.4] - 2026-11-22
+
+### Added & Improved (UI 现代化无闪烁精雕)
+- **全面替换传统方框/圆点选框与零点击闪烁重绘 ([ui/widgets.py](ui/widgets.py) / [ui/theme.py](ui/theme.py))**：
+  - 实现纯 Tkinter 零焦点边框与无闪烁组件族：`FlatButton`（统一自定义按压与悬停色，彻底消除 Win32 按钮按压泛白闪烁）、`ToggleButton`（胶囊双态开关替代旧版 `tk.Checkbutton`，同时移除 DoRA 未开启时的静态误导性对勾）、`SegmentedSelector`（分段高亮按钮条替代旧版点状 `tk.Radiobutton`）、`HoverTooltip`（暗色悬浮参数中文说明卡）；
+  - 通过 Windows DWM API（`DwmSetWindowAttribute`）为主窗口、文本阅读弹窗与子集编辑弹窗启用原生**沉浸式暗色标题栏**，与 Catppuccin Mocha 界面一体融合；
+  - 新增当前激活预设按钮高亮（`highlight_active_preset`）、`Ctrl+1~5` 选项卡快捷键、一键 **`📋 预览命令`**（弹窗查看完整可执行 CLI 并支持 **`📋 复制全文`** 至剪贴板）。
+
+### Changed
+- **全页面统一接管与五位一体发布同步**：将 Tab 1~5、[MonitorPanel](ui/monitor_panel.py) 与弹窗全部切换至新组件库；更新 [VERSION](VERSION) 至 `1.5.4`、[launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) 至 `1.5.4.0`，同步更新 [CHANGELOG.md](CHANGELOG.md)、[README.md](README.md)、[docs/beginner_guide.md](docs/beginner_guide.md) 与全局技能 `kohaku`，并重编译 `MOSS_LoRA_Trainer.exe` 与 `SHA256SUMS.txt`。
+
 ## [1.5.3] - 2026-11-22
 
 ### Performance & UX
@@ -176,7 +187,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.3...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.4...HEAD
+[1.5.4]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.0...v1.5.1

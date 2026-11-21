@@ -4,7 +4,7 @@ import tkinter as tk
 
 from core.config_store import open_in_explorer
 from .theme import PALETTE
-from .widgets import ScrollableFrame, create_file_picker_block
+from .widgets import FlatButton, ScrollableFrame, create_file_picker_block
 
 
 def build_models_tab(parent, app) -> ScrollableFrame:
@@ -28,16 +28,14 @@ def build_models_tab(parent, app) -> ScrollableFrame:
         font=(c["font_family"], 9, "bold"),
     ).pack(side=tk.LEFT)
 
-    tk.Button(
+    FlatButton(
         mdl_hdr,
         text="🔍 自动扫描底模",
         bg=c["input_bg"],
         fg=c["accent_green"],
-        relief=tk.FLAT,
         font=(c["font_family"], 8, "bold"),
-        cursor="hand2",
         padx=8,
-        pady=2,
+        pady=3,
         command=lambda: app.auto_scan_models(silent=False),
     ).pack(side=tk.RIGHT)
 
@@ -103,32 +101,28 @@ def build_models_tab(parent, app) -> ScrollableFrame:
         ("📂 目录", c["accent_green"], app.open_trainer_folder),
         ("🔧 补丁修复", c["accent_yellow"], app.patch_trainer_manually),
     ):
-        tk.Button(
+        FlatButton(
             trn_hdr,
             text=text,
             bg=c["input_bg"],
             fg=fg,
-            relief=tk.FLAT,
             font=(c["font_family"], 8),
-            cursor="hand2",
             padx=7,
-            pady=2,
+            pady=3,
             command=cmd,
         ).pack(side=tk.RIGHT, padx=(4, 0))
 
     trn_body = tk.Frame(trainer_card, bg=c["card_bg"], padx=8, pady=6)
     trn_body.pack(fill=tk.X)
 
-    tk.Button(
+    FlatButton(
         trn_body,
         text="⬇️ 一键安装 / 同步引擎",
         bg=c["accent_blue"],
         fg="#11111b",
-        relief=tk.FLAT,
         font=(c["font_family"], 8, "bold"),
-        cursor="hand2",
         padx=10,
-        pady=4,
+        pady=5,
         command=app.download_or_clone_trainer,
     ).pack(side=tk.RIGHT, padx=(8, 0))
 

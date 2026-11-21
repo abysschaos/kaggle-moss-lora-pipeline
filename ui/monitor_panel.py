@@ -7,6 +7,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from .theme import PALETTE
+from .widgets import FlatButton, ToggleButton
 
 
 class MonitorPanel:
@@ -57,21 +58,27 @@ class MonitorPanel:
             bg=self.card_bg, fg=self.accent_blue, font=(self.font_family, 10, "bold"),
         ).pack(side=tk.LEFT)
 
-        tk.Button(
-            chart_hdr, text="清空曲线", bg=self.input_bg, fg=self.text_sub, relief=tk.FLAT,
-            font=(self.font_family, 8), padx=7, pady=1, cursor="hand2", command=self.clear_loss_chart,
+        FlatButton(
+            chart_hdr, text="清空曲线", bg=self.input_bg, fg=self.text_sub,
+            font=(self.font_family, 8), padx=7, pady=2, command=self.clear_loss_chart,
         ).pack(side=tk.RIGHT, padx=(4, 0))
 
-        tk.Button(
+        FlatButton(
             chart_hdr, text="📊 加载当前 LoRA 历史曲线", bg=self.input_bg, fg=self.accent_green,
-            relief=tk.FLAT, font=(self.font_family, 8, "bold"), padx=8, pady=1, cursor="hand2",
+            font=(self.font_family, 8, "bold"), padx=8, pady=2,
             command=lambda: self.load_history_metrics(silent=False),
         ).pack(side=tk.RIGHT, padx=(4, 0))
 
-        tk.Checkbutton(
-            chart_hdr, text="平滑趋势 (EMA)", variable=self.var_show_ema,
-            bg=self.card_bg, fg=self.accent_green, selectcolor=self.input_bg,
-            activebackground=self.card_bg, font=(self.font_family, 8), command=self.redraw_loss_chart,
+        ToggleButton(
+            chart_hdr,
+            variable=self.var_show_ema,
+            text_on="平滑趋势 (EMA)",
+            text_off="平滑趋势 (EMA)",
+            on_bg=self.accent_green,
+            off_fg=self.accent_green,
+            padx=8,
+            pady=2,
+            command=self.redraw_loss_chart,
         ).pack(side=tk.RIGHT, padx=(0, 6))
 
         kpi_bar = tk.Frame(chart_card, bg=self.card_bg)
@@ -107,9 +114,9 @@ class MonitorPanel:
             bg=self.card_bg, fg=self.accent_blue, font=(self.font_family, 10, "bold"),
         ).pack(side=tk.LEFT)
 
-        tk.Button(
-            header_box, text="清空控制台", bg=self.input_bg, fg=self.text_sub, relief=tk.FLAT,
-            font=(self.font_family, 8), padx=7, pady=1, cursor="hand2", command=self.clear_console,
+        FlatButton(
+            header_box, text="清空控制台", bg=self.input_bg, fg=self.text_sub,
+            font=(self.font_family, 8), padx=7, pady=2, command=self.clear_console,
         ).pack(side=tk.RIGHT)
 
         console_wrap = tk.Frame(log_card, bg="#11111b")
@@ -128,26 +135,29 @@ class MonitorPanel:
         btn_bar = tk.Frame(outer, bg=self.card_bg)
         btn_bar.pack(fill=tk.X)
 
-        self.btn_start = tk.Button(
+        self.btn_start = FlatButton(
             btn_bar, text="🚀 启动本地极速训练", bg="#2e7d32", fg="white",
-            disabledforeground="#cdd6f4", activebackground="#388e3c",
-            font=(self.font_family, 10, "bold"), relief=tk.FLAT, pady=8, cursor="hand2",
+            hover_bg="#388e3c", pressed_bg="#1b5e20",
+            disabledforeground="#cdd6f4",
+            font=(self.font_family, 10, "bold"), pady=8,
             command=self.app.start_training,
         )
         self.btn_start.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
-        self.btn_pause = tk.Button(
+        self.btn_pause = FlatButton(
             btn_bar, text="⏸️ 保存当前进度并暂停", bg="#45475a", fg="white",
-            disabledforeground="#9399b2", activebackground="#b45309",
-            font=(self.font_family, 9, "bold"), relief=tk.FLAT, pady=8, state=tk.DISABLED, cursor="hand2",
+            hover_bg="#d97706", pressed_bg="#b45309",
+            disabledforeground="#9399b2",
+            font=(self.font_family, 9, "bold"), pady=8, state=tk.DISABLED,
             command=self.app.pause_and_save_training,
         )
         self.btn_pause.pack(side=tk.LEFT, padx=4, ipadx=12)
 
-        self.btn_stop = tk.Button(
+        self.btn_stop = FlatButton(
             btn_bar, text="⏹ 强制终止", bg="#45475a", fg="white",
-            disabledforeground="#9399b2", activebackground="#d32f2f",
-            font=(self.font_family, 9, "bold"), relief=tk.FLAT, pady=8, state=tk.DISABLED, cursor="hand2",
+            hover_bg="#e53935", pressed_bg="#b71c1c",
+            disabledforeground="#9399b2",
+            font=(self.font_family, 9, "bold"), pady=8, state=tk.DISABLED,
             command=self.app.stop_training,
         )
         self.btn_stop.pack(side=tk.RIGHT, padx=(5, 0), ipadx=12)
@@ -164,16 +174,23 @@ class MonitorPanel:
 
     def set_running_state(self, running: bool):
         if running:
-            self.btn_start.config(state=tk.DISABLED, bg="#45475a")
-            self.btn_pause.config(state=tk.NORMAL, text="⏸️ 保存当前进度并暂停", bg="#d97706")
-            self.btn_stop.config(state=tk.NORMAL, bg="#c62828")
+            self.btn_start.config(state=tk.DISABLED)
+            self.btn_start.set_colors("#45475a", "white", "#45475a", "#45475a")
+            self.btn_pause.config(state=tk.NORMAL, text="⏸️ 保存当前进度并暂停")
+            self.btn_pause.set_colors("#d97706", "white", "#f59e0b", "#b45309")
+            self.btn_stop.config(state=tk.NORMAL)
+            self.btn_stop.set_colors("#c62828", "white", "#d32f2f", "#8e0000")
         else:
-            self.btn_start.config(state=tk.NORMAL, bg="#2e7d32")
-            self.btn_pause.config(state=tk.DISABLED, text="⏸️ 保存当前进度并暂停", bg="#45475a")
-            self.btn_stop.config(state=tk.DISABLED, bg="#45475a")
+            self.btn_start.config(state=tk.NORMAL)
+            self.btn_start.set_colors("#2e7d32", "white", "#388e3c", "#1b5e20")
+            self.btn_pause.config(state=tk.DISABLED, text="⏸️ 保存当前进度并暂停")
+            self.btn_pause.set_colors("#45475a", "white", "#45475a", "#45475a")
+            self.btn_stop.config(state=tk.DISABLED)
+            self.btn_stop.set_colors("#45475a", "white", "#45475a", "#45475a")
 
     def set_pause_pending(self):
-        self.btn_pause.config(state=tk.DISABLED, text="⏳ 正在保存当前步...", bg="#45475a")
+        self.btn_pause.config(state=tk.DISABLED, text="⏳ 正在保存当前步...")
+        self.btn_pause.set_colors("#45475a", "white", "#45475a", "#45475a")
 
     def clear_console(self):
         self.console.delete("1.0", tk.END)

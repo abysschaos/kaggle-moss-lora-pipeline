@@ -5,7 +5,7 @@ import webbrowser
 
 from core.config_store import PROJECT_ROOT, open_in_explorer
 from .theme import PALETTE
-from .widgets import ScrollableFrame
+from .widgets import FlatButton, ScrollableFrame
 
 
 def build_help_tab(parent, app) -> ScrollableFrame:
@@ -37,17 +37,15 @@ def build_help_tab(parent, app) -> ScrollableFrame:
     ]
 
     for label, fg, title, rel_path in doc_items:
-        tk.Button(
+        FlatButton(
             docs_card,
             text=label,
             bg=c["input_bg"],
             fg=fg,
-            relief=tk.FLAT,
             font=(c["font_family"], 8, "bold"),
             anchor="w",
             padx=10,
             pady=6,
-            cursor="hand2",
             command=lambda t=title, p=rel_path: app.open_doc_viewer(t, p),
         ).pack(fill=tk.X, pady=(0, 4))
 
@@ -57,22 +55,20 @@ def build_help_tab(parent, app) -> ScrollableFrame:
 
     tk.Label(
         tools_card,
-        text="🛠️ 本机环境快速自检与常用目录直达",
+        text="🛠️ 本机环境快速自检与常用目录直达 (支持 Ctrl+1~5 快捷切页)",
         bg=c["bg_dark"],
         fg=c["accent_blue"],
         font=(c["font_family"], 9, "bold"),
         anchor="w",
     ).pack(fill=tk.X, pady=(0, 6))
 
-    tk.Button(
+    FlatButton(
         tools_card,
         text="🩺 一键运行本机环境全面自检 (Python / CUDA / PyTorch / 底模 / 引擎状态)",
         bg=c["accent_green"],
         fg="#11111b",
-        relief=tk.FLAT,
         font=(c["font_family"], 8, "bold"),
         pady=7,
-        cursor="hand2",
         command=app.run_quick_env_diagnostics,
     ).pack(fill=tk.X, pady=(0, 8))
 
@@ -95,14 +91,12 @@ def build_help_tab(parent, app) -> ScrollableFrame:
         r = tk.Frame(tools_card, bg=c["bg_dark"])
         r.pack(fill=tk.X, pady=(0, 5))
         for text, fg, cmd in (left_btn, right_btn):
-            tk.Button(
+            FlatButton(
                 r,
                 text=text,
                 bg=c["input_bg"],
                 fg=fg,
-                relief=tk.FLAT,
                 font=(c["font_family"], 8, "bold"),
-                cursor="hand2",
                 pady=5,
                 command=cmd,
             ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))

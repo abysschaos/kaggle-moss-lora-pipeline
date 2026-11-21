@@ -47,8 +47,8 @@ from .tab_dataset import build_dataset_tab
 from .tab_help import build_help_tab
 from .tab_models import build_models_tab
 from .tab_train import build_train_tab
-from .theme import PALETTE, apply_dark_theme
-from .widgets import show_text_viewer_dialog
+from .theme import PALETTE, apply_dark_theme, apply_windows_dark_titlebar
+from .widgets import FlatButton, ToggleButton, show_text_viewer_dialog
 
 APP_VERSION = load_app_version()
 
@@ -107,6 +107,9 @@ class ModernLocalTrainerGUI:
         self._closing = False
         self._ui_queue = queue.SimpleQueue()
         self._ui_queue_job = None
+        self.preset_buttons = {}
+        self._preset_base_styles = {}
+        self._active_preset_id = None
         self.detected_vram_gb = 8.0
 
         self.config_file = PROJECT_ROOT / "local_config.json"
@@ -317,6 +320,8 @@ class ModernLocalTrainerGUI:
             self.tab_scrolls.append(builder(frame, self))
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        for tab_idx in range(len(self.tab_frames)):
+            self.root.bind(f"<Control-Key-{tab_idx + 1}>", lambda _e, i=tab_idx: self.select_tab(i))
 
         # 4. 右侧常驻监控看板 (并保留向后兼容引用属性)
         self.monitor = MonitorPanel(right_container, self.root, self)
@@ -523,6 +528,17 @@ class ModernLocalTrainerGUI:
         self.var_seed.set(ADVANCED_DEFAULTS["seed"])
         self.var_save_format.set(ADVANCED_DEFAULTS["save_format"])
 
+    def highlight_active_preset(self, preset_id: str):
+        """高亮当前激活的黄金预设按钮，并恢复其余预设的基准暗色外观。"""
+        self._active_preset_id = preset_id
+        for pid, btn in self.preset_buttons.items():
+            base_bg, base_fg, active_bg = self._preset_base_styles.get(pid, (self.input_bg, self.text_main, self.accent_blue))
+            if pid == preset_id:
+                btn.set_colors(active_bg, "#11111b", active_bg, active_bg)
+            else:
+                hover_bg = self.input_bg if base_bg != "#45475a" else "#52556b"
+                btn.set_colors(base_bg, base_fg, hover_bg, active_bg)
+
     def apply_preset(self, preset_id: str):
         """应用 core.presets 中声明的 8 套场景预设并同步 UI 联动。"""
         preset = get_preset_by_id(preset_id)
@@ -569,6 +585,7 @@ class ModernLocalTrainerGUI:
         self.on_dynamic_controls_changed()
         self.recalculate_math()
         self.update_quick_status_summary()
+        self.highlight_active_preset(preset_id)
         messagebox.showinfo(preset["dialog_title"], preset["dialog_message"])
 
     # ==================== 引擎管理、底模扫描与输出预览 ====================
@@ -934,7 +951,14 @@ class ModernLocalTrainerGUI:
         dlg.configure(bg=self.card_bg)
         dlg.transient(self.root)
         dlg.grab_set()
-        dlg.geometry("540x255")
+        dlg.geometry("540x265")
+        icon_path = PROJECT_ROOT / "assets" / "moss_trainer.ico"
+        if icon_path.exists():
+            try:
+                dlg.iconbitmap(str(icon_path))
+            except Exception:
+                pass
+        apply_windows_dark_titlebar(dlg)
 
         v_name = tk.StringVar(value=str(existing.get("name", "")))
         v_path = tk.StringVar(value=str(existing.get("path", "")))
@@ -951,8 +975,8 @@ class ModernLocalTrainerGUI:
 
         tk.Label(body, text="本地图集路径:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=1, column=0, sticky="w", pady=4)
         tk.Entry(body, textvariable=v_path, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT, font=("Consolas", 8)).grid(row=1, column=1, sticky="ew", padx=(8, 4), pady=4)
-        tk.Button(
-            body, text="浏览...", bg=self.accent_blue, fg="#11111b", relief=tk.FLAT, font=(self.font_family, 8, "bold"),
+        FlatButton(
+            body, text="浏览...", bg=self.accent_blue, fg="#11111b", font=(self.font_family, 8, "bold"), padx=10, pady=2,
             command=lambda: v_path.set(filedialog.askdirectory(title="选择子集图片文件夹") or v_path.get()),
         ).grid(row=1, column=2, pady=4)
 
@@ -962,9 +986,10 @@ class ModernLocalTrainerGUI:
         tk.Label(body, text="专属触发词 (可选前置):", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=3, column=0, sticky="w", pady=4)
         tk.Entry(body, textvariable=v_trig, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT).grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=4)
 
-        tk.Checkbutton(
-            body, text="启用此子集参与训练", variable=v_en,
-            bg=self.card_bg, fg=self.accent_green, selectcolor=self.input_bg, font=(self.font_family, 9),
+        ToggleButton(
+            body, variable=v_en,
+            text_on="已启用此子集参与训练", text_off="此子集已暂停（不参与训练）",
+            on_bg=self.accent_green, off_fg=self.accent_green, font_size=9,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=6)
 
         def _save():
@@ -991,8 +1016,8 @@ class ModernLocalTrainerGUI:
 
         btn_row = tk.Frame(body, bg=self.card_bg)
         btn_row.grid(row=5, column=0, columnspan=3, sticky="e", pady=(8, 0))
-        tk.Button(btn_row, text="取消", bg=self.input_bg, fg=self.text_sub, relief=tk.FLAT, padx=14, pady=4, command=dlg.destroy).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Button(btn_row, text="保存子集", bg=self.accent_green, fg="#11111b", relief=tk.FLAT, font=(self.font_family, 9, "bold"), padx=14, pady=4, command=_save).pack(side=tk.LEFT)
+        FlatButton(btn_row, text="取消", bg=self.input_bg, fg=self.text_sub, padx=14, pady=4, command=dlg.destroy).pack(side=tk.LEFT, padx=(0, 8))
+        FlatButton(btn_row, text="保存子集", bg=self.accent_green, fg="#11111b", font=(self.font_family, 9, "bold"), padx=14, pady=4, command=_save).pack(side=tk.LEFT)
 
     def add_subset_dialog(self):
         self._open_subset_editor_dialog(index=None)
@@ -1226,6 +1251,37 @@ class ModernLocalTrainerGUI:
                 )
         except Exception:
             self.var_math_info.set("📊 请填入有效正整数（Repeats / Epochs / GradAcc）以实时演算推荐步数。")
+
+    def preview_cli_command(self):
+        """校验当前全部面板参数并弹窗预览对应的完整 train_local.py 启动命令（支持一键复制）。"""
+        cleaned, err_msg = validate_training_params(self._collect_raw_params())
+        if err_msg:
+            messagebox.showerror("参数格式错误", err_msg)
+            return None
+
+        mode_code = (self.var_train_mode.get() or "fresh").strip()
+        subsets_manifest_path = None
+        if self.var_multi_subset.get():
+            safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", cleaned["lora_name"])
+            subsets_manifest_path = (PROJECT_ROOT / "workspace" / f"{safe_name}_subsets.json").resolve()
+
+        cmd = build_train_command(cleaned, mode_code, subsets_manifest_path)
+        formatted = (
+            "# 单行直接复制运行命令：\n"
+            f"{subprocess.list2cmdline(cmd)}\n\n"
+            "# 逐参数拆解清单：\n"
+            f'"{cmd[0]}" {cmd[1]} {cmd[2]}\n'
+            + "\n".join(f"  {tok}" for tok in cmd[3:])
+        )
+        return show_text_viewer_dialog(
+            self.root,
+            "📋 等效 CLI 训练命令预览",
+            f"任务 [{cleaned['lora_name']}] | 模式: {mode_code} | 共 {len(cmd)} 项参数片段",
+            self.accent_green,
+            formatted,
+            size=(780, 520),
+            copy_button=True,
+        )
 
     def align_steps_by_formula(self, silent: bool = False):
         try:
@@ -1472,6 +1528,7 @@ def run_gui():
         ModernLocalTrainerGUI(root)
         root.update_idletasks()
         root.deiconify()
+        apply_windows_dark_titlebar(root)
         root.mainloop()
     except Exception:
         crash_log = PROJECT_ROOT / "workspace" / "gui_crash.log"

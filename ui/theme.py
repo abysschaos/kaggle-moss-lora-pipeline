@@ -1,11 +1,15 @@
-"""Catppuccin Mocha dark color palette and ttk styling (Combobox, Treeview, Notebook)."""
+"""Catppuccin Mocha dark color palette, Windows dark titlebar, and zero-flash ttk styling."""
 
+import ctypes
+import os
 from tkinter import ttk
 
 PALETTE = {
     "bg_dark": "#181825",
     "card_bg": "#1e1e2e",
     "input_bg": "#313244",
+    "surface_dim": "#242436",
+    "border": "#45475a",
     "accent_blue": "#89b4fa",
     "accent_green": "#a6e3a1",
     "accent_red": "#f38ba8",
@@ -16,6 +20,39 @@ PALETTE = {
     "text_sub": "#a6adc8",
     "font_family": "Microsoft YaHei UI",
 }
+
+
+def adjust_hex_color(hex_color: str, delta: int) -> str:
+    """微调 #rrggbb 十六进制颜色明暗度，用于悬停与按压无闪烁状态色生成。"""
+    s = (hex_color or "").strip()
+    if len(s) != 7 or not s.startswith("#"):
+        return hex_color
+    try:
+        r = max(0, min(255, int(s[1:3], 16) + delta))
+        g = max(0, min(255, int(s[3:5], 16) + delta))
+        b = max(0, min(255, int(s[5:7], 16) + delta))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return hex_color
+
+
+def apply_windows_dark_titlebar(window) -> None:
+    """在 Windows 10/11 下为顶层窗口或弹窗启用原生沉浸式暗色标题栏。"""
+    if os.name != "nt" or window is None:
+        return
+    try:
+        window.update_idletasks()
+        user32 = ctypes.windll.user32
+        dwmapi = ctypes.windll.dwmapi
+        wid = window.winfo_id()
+        hwnd = user32.GetParent(wid) or user32.GetAncestor(wid, 2) or wid
+        val = ctypes.c_int(1)
+        for attr in (20, 19):
+            res = dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
+            if res == 0:
+                break
+    except Exception:
+        pass
 
 
 def apply_dark_theme(root) -> ttk.Style:
@@ -126,4 +163,11 @@ def apply_dark_theme(root) -> ttk.Style:
         focuscolor=[("focus", c["card_bg"])],
     )
     style.configure("TabContent.TFrame", background=c["card_bg"])
+
+    # 消除旧版 Tk 按钮/控件点击瞬间的默认浅灰闪烁与焦点虚线框
+    root.option_add("*Button.highlightThickness", 0)
+    root.option_add("*Button.borderWidth", 0)
+    root.option_add("*Button.takeFocus", 0)
+    root.option_add("*Button.activeBackground", c["border"])
+    root.option_add("*Button.activeForeground", c["text_main"])
     return style

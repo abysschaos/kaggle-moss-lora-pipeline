@@ -1,11 +1,11 @@
-"""Tab 2 (📂 数据与续炼): dataset/subset management, output paths, health audit, and resume/init_from."""
+"""Tab 2 (📂 数据与续炼): dataset/subset management, output paths, health audit, and segmented resume controls."""
 
 import tkinter as tk
 from tkinter import ttk
 
 from core.config_store import open_in_explorer
 from .theme import PALETTE
-from .widgets import ScrollableFrame, create_dir_picker_block
+from .widgets import FlatButton, ScrollableFrame, SegmentedSelector, ToggleButton, create_dir_picker_block
 
 
 def build_dataset_tab(parent, app) -> ScrollableFrame:
@@ -30,28 +30,26 @@ def build_dataset_tab(parent, app) -> ScrollableFrame:
         font=(c["font_family"], 9, "bold"),
     ).pack(side=tk.LEFT)
 
-    tk.Checkbutton(
+    ToggleButton(
         path_hdr,
-        text="多子集配比模式",
         variable=app.var_multi_subset,
-        bg=c["bg_dark"],
-        fg=c["accent_purple"],
-        selectcolor=c["input_bg"],
-        activebackground=c["bg_dark"],
-        font=(c["font_family"], 8, "bold"),
+        text_on="多子集配比：已启用",
+        text_off="多子集配比：单目录",
+        on_bg=c["accent_purple"],
+        off_fg=c["accent_purple"],
+        pady=3,
+        padx=8,
         command=app.toggle_multi_subset_mode,
     ).pack(side=tk.RIGHT, padx=(6, 0))
 
-    tk.Button(
+    FlatButton(
         path_hdr,
         text="🩺 一键体检图集",
         bg=c["input_bg"],
         fg=c["accent_peach"],
-        relief=tk.FLAT,
         font=(c["font_family"], 8, "bold"),
-        cursor="hand2",
         padx=8,
-        pady=2,
+        pady=3,
         command=app.run_dataset_health_audit,
     ).pack(side=tk.RIGHT)
 
@@ -66,7 +64,7 @@ def build_dataset_tab(parent, app) -> ScrollableFrame:
         stat_var=app.var_dataset_stat,
     )
 
-    # 1B. 多子集混合配比面板 (仅勾选多子集配比模式时展示)
+    # 1B. 多子集混合配比面板 (仅开启多子集配比模式时展示)
     app.multi_data_frame = tk.Frame(path_card, bg=c["card_bg"], padx=8, pady=6)
     sub_note = tk.Label(
         app.multi_data_frame,
@@ -111,16 +109,14 @@ def build_dataset_tab(parent, app) -> ScrollableFrame:
         ("🗑️ 删除选中", c["accent_red"], app.remove_selected_subset),
         ("⚖️ 一键配平 Repeat", c["accent_yellow"], app.auto_balance_subset_repeats),
     ):
-        tk.Button(
+        FlatButton(
             sub_btn_bar,
             text=text,
             bg=c["input_bg"],
             fg=fg,
-            relief=tk.FLAT,
             font=(c["font_family"], 8, "bold"),
-            cursor="hand2",
             padx=8,
-            pady=3,
+            pady=4,
             command=cmd,
         ).pack(side=tk.LEFT, padx=(0, 6))
 
@@ -152,7 +148,7 @@ def build_dataset_tab(parent, app) -> ScrollableFrame:
     resume_card.pack(fill=tk.X, pady=(0, 6))
 
     res_hdr = tk.Frame(resume_card, bg=c["bg_dark"])
-    res_hdr.pack(fill=tk.X, pady=(0, 5))
+    res_hdr.pack(fill=tk.X, pady=(0, 6))
     tk.Label(
         res_hdr,
         text="🔁 断点续炼、再训练与权重继承 (Resume / Init-From)",
@@ -160,38 +156,27 @@ def build_dataset_tab(parent, app) -> ScrollableFrame:
         fg=c["accent_blue"],
         font=(c["font_family"], 9, "bold"),
     ).pack(side=tk.LEFT)
-    tk.Button(
+    FlatButton(
         res_hdr,
         text="🔍 检测最新存档与规格对齐",
         bg=c["input_bg"],
         fg=c["accent_green"],
-        relief=tk.FLAT,
         font=(c["font_family"], 8, "bold"),
-        cursor="hand2",
         padx=8,
-        pady=2,
+        pady=3,
         command=app.refresh_resume_status,
     ).pack(side=tk.RIGHT)
 
-    mode_row = tk.Frame(resume_card, bg=c["bg_dark"])
-    mode_row.pack(fill=tk.X, pady=(0, 4))
-    for val, text, fg in (
-        ("fresh", "🆕 全新从头训练", c["text_main"]),
-        ("resume", "⏩ 断点续炼 (延续步数/优化器)", c["accent_green"]),
-        ("init_from", "🧬 继承权重再微调 (Step 归零)", c["accent_purple"]),
-    ):
-        tk.Radiobutton(
-            mode_row,
-            text=text,
-            variable=app.var_train_mode,
-            value=val,
-            bg=c["bg_dark"],
-            fg=fg,
-            selectcolor=c["input_bg"],
-            activebackground=c["bg_dark"],
-            font=(c["font_family"], 8, "bold"),
-            command=app.refresh_resume_status,
-        ).pack(side=tk.LEFT, padx=(0, 10))
+    SegmentedSelector(
+        resume_card,
+        variable=app.var_train_mode,
+        options=[
+            ("fresh", "🆕 全新从头训练", c["accent_blue"]),
+            ("resume", "⏩ 断点续炼 (延续步数/优化器)", c["accent_green"]),
+            ("init_from", "🧬 继承权重再微调 (Step归零)", c["accent_purple"]),
+        ],
+        command=app.refresh_resume_status,
+    ).pack(fill=tk.X, pady=(0, 6))
 
     res_stat_lbl = tk.Label(
         resume_card,
@@ -236,16 +221,14 @@ def build_dataset_tab(parent, app) -> ScrollableFrame:
         ("📂 选状态目录", c["accent_green"], app.browse_resume_ckpt_dir),
         ("✖ 清空", c["accent_red"], lambda: (app.var_resume_path.set(""), app.refresh_resume_status())),
     ):
-        tk.Button(
+        FlatButton(
             res_entry_row,
             text=text,
             bg=c["input_bg"],
             fg=fg,
-            relief=tk.FLAT,
             font=(c["font_family"], 8),
-            cursor="hand2",
             padx=6,
-            pady=2,
+            pady=3,
             command=cmd,
         ).pack(side=tk.LEFT, padx=(2, 0))
 

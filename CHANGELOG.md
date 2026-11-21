@@ -18,6 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持一键传图、远程拉起 `train_moss.py` 与日志流式回传、本地看板实时渲染远端 Loss 曲线；
     - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 等平台的一键启停机与费用告警适配器接口。
 
+## [1.5.3] - 2026-11-22
+
+### Performance & UX
+- **消除桌面启动空白卡顿与白屏闪烁 ([core/config_store.py](core/config_store.py) / [ui/app.py](ui/app.py))**：
+  - 将 `probe_gpu_quick()` 优化为**优先通过 `nvidia-smi` 毫秒级探测 GPU 型号、总显存与算力架构**，避免冷启动时在主线程同步 `import torch` 带来的数秒空白等待；
+  - 将 `GPU 探测` 与 `本地底模扫描` 全部移至后台异步执行，对已保存且真实存在的 `Transformer / TextEncoder / VAE` 与 ComfyUI 路径启用“零全盘遍历极速复检”，并在 `run_gui()` 中采用 `root.withdraw()` -> 首帧布局完备 -> `root.deiconify()` 消除白屏闪烁。
+- **自适应按需显隐滚动条与弹窗图标一致性 ([ui/widgets.py](ui/widgets.py))**：
+  - 升级 `ScrollableFrame`，仅当内部卡片高度真实超过可视化区域时动态展示右侧垂直滚动条并绑定滚轮，内容完整一屏可见时自动彻底隐藏滚动条（消除 4 个轻量选项卡的无意义灰色滚动条），同时为文本查看弹窗挂载 `moss_trainer.ico` 图标。
+
+### Fixed & Hardened
+- **显存档位 `auto` 与未知环境显存保守兜底**：将 `core/config_store.py` 与 `train_local.py` 中 GPU 识别失败或无效值兜底从误判风险极高的 `16.0 GB (8192 tokens)` 修正为保守的 **`8.0 GB (4352 tokens)`**，并在 Tab 1 算力公式栏显式展示当前生效档位与 `MAX_TOKENS` 预算（如 `auto→8g | MAX_TOKENS=4352`）。
+- **离线优先（Offline-First）本机环境、依赖与模型全自检 ([train_local.py](train_local.py) / [scripts/silent_launcher.pyw](scripts/silent_launcher.pyw) / [scripts/detect_env.py](scripts/detect_env.py))**：
+  - 新增 `_ensure_local_trainer_deps()`：通过 `importlib.util.find_spec` 与 `importlib.metadata` 预先核验本地 `kohakumoss` 可编辑链接及 5 项运行依赖；全部就绪时**完全跳过每次启动训练的重复 `pip install`**；
+  - 升级 `probe_local_models()`：优先快速检索已知 `comfy_models_dir` 与 `./models/`，扩充大小写不敏感与通配文件名匹配（缺失时才触发宽域扫盘）；工作区暂存底模时清理陈旧 `.safetensors` 残余并向 `TEXT_ENCODER_KWARGS` / `IMAGE_ENCODER_KWARGS` 写入选定精确文件路径；执行 `kogine` 子进程时显式注入 `HF_HUB_OFFLINE=1` 与 `TRANSFORMERS_OFFLINE=1`，彻底杜绝误触发云端拉取；
+  - 同步升级 `silent_launcher.pyw` 与 `detect_env.py` 加入 `local_config.json` 优先路径及 `_has_torch()` 校验，避免 `launch_ui.vbs` 回退到无 PyTorch 的系统 Python。
+- **图集体检低分横屏误报优化**：将 `audit_dataset_directories()` 的低分判定从硬性单边 `<768` 收敛为 **`(w * h) < (768 * 768)` 或 `min(w, h) < 512`**，不再把 `1200x640` 等面积充足的横图误判为低分小图。
+
+### Changed
+- **五位一体同步升级**：更新 [VERSION](VERSION) 至 `1.5.3`、[launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) 程序集版本至 `1.5.3.0`，同步更新 [CHANGELOG.md](CHANGELOG.md)、[README.md](README.md) 与全局技能 `kohaku`，重编译 `MOSS_LoRA_Trainer.exe` 与 `SHA256SUMS.txt`。
+
 ## [1.5.2] - 2026-11-22
 
 ### Fixed
@@ -156,7 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.2...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.3...HEAD
+[1.5.3]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.4.0...v1.5.0

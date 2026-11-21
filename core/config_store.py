@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -10,7 +11,7 @@ SUPPORTED_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VRAM_MAX_TOKENS = {"6g": 4352, "8g": 4352, "12g": 6144, "16g": 8192}
 
 
-def load_app_version(fallback: str = "1.5.2") -> str:
+def load_app_version(fallback: str = "1.5.3") -> str:
     """读取项目根目录 VERSION 单一版本信源，缺失时安全回退。"""
     ver_file = PROJECT_ROOT / "VERSION"
     try:
@@ -38,7 +39,30 @@ def resolve_cli_python() -> str:
 
 
 def probe_gpu_quick() -> tuple:
-    """快速探测 CUDA 显卡名称、总显存 (GB) 与原生 BF16 支持状态。"""
+    """毫秒级探测 CUDA 显卡名称、显存与算力架构：优先 nvidia-smi 避免冷启动导入 PyTorch 耗时，失败时回退 torch，兜底保守按 8.0 GB。"""
+    no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        res = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total,compute_cap", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3,
+            creationflags=no_win,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            first_line = res.stdout.strip().splitlines()[0]
+            parts = [p.strip() for p in first_line.split(",")]
+            if len(parts) >= 3:
+                name = parts[0]
+                vram = float(parts[1]) / 1024.0
+                major = int(parts[2].split(".")[0])
+                bf16 = "支持原生 BF16" if major >= 8 else "仅 FP16"
+                return f"{name} ({vram:.1f} GB, {bf16})", float(vram)
+    except Exception:
+        pass
+
     try:
         import torch
 
@@ -48,9 +72,9 @@ def probe_gpu_quick() -> tuple:
             vram = props.total_memory / (1024**3)
             bf16 = "支持原生 BF16" if int(props.major) >= 8 else "仅 FP16"
             return f"{name} ({vram:.1f} GB, {bf16})", float(vram)
-        return "仅 CPU (未检测到 CUDA)", 16.0
+        return "仅 CPU (未检测到 CUDA)", 8.0
     except Exception:
-        return "PyTorch 未加载", 16.0
+        return "GPU 未识别 (保守按 8G)", 8.0
 
 
 def discover_default_comfy_models(saved_dir: str = "") -> str:
@@ -112,8 +136,8 @@ def count_images_in_dir(dir_path_str: str) -> int:
         return 0
 
 
-def resolve_max_tokens_budget(vram_preset: str, detected_vram_gb: float = 16.0) -> int:
-    """根据显存档位或检测到的显存推导单包最大 Token 上限。"""
+def resolve_effective_vram_label(vram_preset: str, detected_vram_gb: float = 8.0) -> tuple:
+    """将显存档位 (auto/6g/8g/12g/16g) 解析为真实生效档位与单步 MAX_TOKENS 上限。"""
     preset = (vram_preset or "auto").strip().lower()
     if preset == "auto":
         if detected_vram_gb <= 10.0:
@@ -124,7 +148,13 @@ def resolve_max_tokens_budget(vram_preset: str, detected_vram_gb: float = 16.0) 
             eff_preset = "16g"
     else:
         eff_preset = preset
-    return VRAM_MAX_TOKENS.get(eff_preset, 8192)
+    return eff_preset, VRAM_MAX_TOKENS.get(eff_preset, 4352)
+
+
+def resolve_max_tokens_budget(vram_preset: str, detected_vram_gb: float = 8.0) -> int:
+    """根据显存档位或检测到的显存推导单包最大 Token 上限（未知环境保守回退 4352）。"""
+    _, max_tokens = resolve_effective_vram_label(vram_preset, detected_vram_gb)
+    return max_tokens
 
 
 def compute_exposure_summary(

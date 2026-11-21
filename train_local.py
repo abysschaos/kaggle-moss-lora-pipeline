@@ -2,6 +2,8 @@ import os
 import sys
 import re
 import glob
+import importlib.metadata
+import importlib.util
 import json
 import shutil
 import argparse
@@ -47,7 +49,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.5.2"
+    return "1.5.3"
 
 
 APP_VERSION = _load_app_version()
@@ -210,86 +212,107 @@ def _resolve_base_precision_cfg(req_base_prec: str, is_int8_file: bool, sm_major
     return "auto", ""
 
 
+def _match_ranked_safetensors(files: list, rules: list):
+    """按优先级规则列表（精确通配或关键词组合）在已扫描模型列表中大小写不敏感匹配最优文件。"""
+    import fnmatch
+
+    lowered = [(p, p.name.lower()) for p in files]
+    for pattern in rules:
+        pat_l = pattern.lower()
+        for path_obj, fname in lowered:
+            if fnmatch.fnmatch(fname, pat_l):
+                return path_obj
+    return None
+
+
 def probe_local_models(comfy_models_dir: str = None, prefer_bf16_te: bool = False) -> dict:
-    """智能检索本地已有的 MOSS-Image 底模、文本编码器与 VAE，实现零下载秒级就绪。"""
-    search_dirs = []
-    if comfy_models_dir and os.path.exists(comfy_models_dir):
-        search_dirs.append(Path(comfy_models_dir))
-    
-    # 动态宽域扫描系统已安装的 ComfyUI 模型库 (完全移除任何个人固定路径)
-    broad_models, _ = find_broad_comfy_paths()
-    for bm in broad_models:
-        if bm not in search_dirs:
-            search_dirs.append(bm)
-
-    local_models = Path("./models").resolve()
-    if local_models.exists() and local_models not in search_dirs:
-        search_dirs.append(local_models)
-
+    """智能检索本地已有的 MOSS-Image 底模、文本编码器与 VAE（优先指定目录与 ./models，缺失时再宽域扫盘，全程零云端拉取）。"""
     found = {
         "transformer": None,
         "text_encoder": None,
         "vae": None,
-        "base_weights_dir": None
+        "base_weights_dir": None,
     }
 
-    # 1. 查找 Transformer (优先选择 int8 旋转量化版，防御 8G/12G 显存 OOM，全面兼容 Base/Heal/SFT)
     heal_candidates = [
-        "**/moss_image_heal_int8_convrot.safetensors",
-        "**/moss_image_base_int8_convrot.safetensors",
-        "**/moss_image_sft_int8_convrot.safetensors",
-        "**/moss_image_heal_bf16.safetensors",
-        "**/moss_image_heal_fp16.safetensors",
-        "**/moss_image_base_bf16.safetensors",
-        "**/moss_image_sft_bf16.safetensors",
-        "**/moss_image_base.safetensors",
-        "**/moss_image_sft.safetensors"
+        "moss_image_heal_int8_convrot.safetensors",
+        "moss_image_base_int8_convrot.safetensors",
+        "moss_image_sft_int8_convrot.safetensors",
+        "*moss*image*heal*int8*.safetensors",
+        "*moss*image*base*int8*.safetensors",
+        "*moss*image*sft*int8*.safetensors",
+        "*moss*image*fp8*.safetensors",
+        "moss_image_heal_bf16.safetensors",
+        "moss_image_heal_fp16.safetensors",
+        "moss_image_base_bf16.safetensors",
+        "moss_image_sft_bf16.safetensors",
+        "*moss*image*heal*.safetensors",
+        "*moss*image*base*.safetensors",
+        "*moss*image*sft*.safetensors",
+        "moss_image*.safetensors",
     ]
-    for sdir in search_dirs:
-        for pat in heal_candidates:
-            matches = list(sdir.glob(pat))
-            if matches:
-                found["transformer"] = matches[0]
-                break
-        if found["transformer"]:
-            break
-
-    # 2. 查找 Text Encoder (Qwen3.5-9B，内存充裕或大显存时优先 BF16 提升离线特征精度，否则优先 int8 防换页)
     if prefer_bf16_te:
         text_candidates = [
-            "**/qwen3.5_9b_bf16.safetensors",
-            "**/qwen3.5_9b.safetensors",
-            "**/qwen3.5_9b_int8_convrot.safetensors"
+            "qwen3.5_9b_bf16.safetensors",
+            "qwen3.5_9b.safetensors",
+            "qwen3.5_9b_int8_convrot.safetensors",
+            "*qwen*3.5*9b*bf16*.safetensors",
+            "*qwen*3.5*9b*int8*.safetensors",
+            "*qwen*3.5*9b*w4a8*.safetensors",
+            "*qwen*3.5*9b*.safetensors",
         ]
     else:
         text_candidates = [
-            "**/qwen3.5_9b_int8_convrot.safetensors",
-            "**/qwen3.5_9b_bf16.safetensors",
-            "**/qwen3.5_9b.safetensors"
+            "qwen3.5_9b_int8_convrot.safetensors",
+            "qwen3.5_9b_bf16.safetensors",
+            "qwen3.5_9b.safetensors",
+            "*qwen*3.5*9b*int8*.safetensors",
+            "*qwen*3.5*9b*bf16*.safetensors",
+            "*qwen*3.5*9b*w4a8*.safetensors",
+            "*qwen*3.5*9b*.safetensors",
         ]
-    for sdir in search_dirs:
-        for pat in text_candidates:
-            matches = list(sdir.glob(pat))
-            if matches:
-                found["text_encoder"] = matches[0]
-                break
-        if found["text_encoder"]:
-            break
-
-    # 3. 查找 VAE (FLUX.2 VAE)
     vae_candidates = [
-        "**/flux2-vae_small.safetensors",
-        "**/flux2-vae.safetensors"
+        "flux2-vae_small.safetensors",
+        "flux2-vae.safetensors",
+        "*flux2*vae*small*.safetensors",
+        "*flux2*vae*.safetensors",
+        "*moss*vae*.safetensors",
     ]
-    for sdir in search_dirs:
-        for pat in vae_candidates:
-            matches = list(sdir.glob(pat))
-            if matches:
-                found["vae"] = matches[0]
-                break
-        if found["vae"]:
-            break
 
+    def _scan_root_dirs(dirs_to_scan: list):
+        for sdir in dirs_to_scan:
+            if not sdir.exists():
+                continue
+            try:
+                all_sf = sorted(sdir.rglob("*.safetensors"))
+            except Exception:
+                all_sf = []
+            if not all_sf:
+                continue
+            if not found["transformer"]:
+                found["transformer"] = _match_ranked_safetensors(all_sf, heal_candidates)
+            if not found["text_encoder"]:
+                found["text_encoder"] = _match_ranked_safetensors(all_sf, text_candidates)
+            if not found["vae"]:
+                found["vae"] = _match_ranked_safetensors(all_sf, vae_candidates)
+            if found["transformer"] and found["text_encoder"] and found["vae"]:
+                return True
+        return False
+
+    primary_dirs = []
+    if comfy_models_dir and os.path.exists(comfy_models_dir):
+        primary_dirs.append(Path(comfy_models_dir).resolve())
+    local_models = Path("./models").resolve()
+    if local_models.exists() and local_models not in primary_dirs:
+        primary_dirs.append(local_models)
+
+    if _scan_root_dirs(primary_dirs):
+        return found
+
+    # 仅在主目录未能集齐 3 个核心文件时，才触发全盘宽域扫描 ComfyUI 安装库
+    broad_models, _ = find_broad_comfy_paths()
+    extra_dirs = [bm.resolve() for bm in broad_models if bm.resolve() not in primary_dirs]
+    _scan_root_dirs(extra_dirs)
     return found
 
 def apply_compatibility_patches(trainer_dir: Path):
@@ -1069,7 +1092,8 @@ def audit_dataset_directories(targets: list, max_tokens: int = 4352, resolution:
             if size is not None:
                 w, h = size
                 if w > 0 and h > 0:
-                    if min(w, h) < 768 or (w * h) < (768 * 768):
+                    # 仅对总像素面积低于 768^2 或单边过窄 (<512px) 报警，避免把 1200x640 等横图误判为低分小图
+                    if min(w, h) < 512 or (w * h) < (768 * 768):
                         low_res.append(f"{rel_label} ({w}x{h})")
                     aspect = max(w / h, h / w)
                     if aspect > 3.0:
@@ -1145,9 +1169,9 @@ def audit_dataset_directories(targets: list, max_tokens: int = 4352, resolution:
         "用自然语言补齐对应 .txt 描述；若空白过多且未设触发词，模型容易把无关背景死记进权重。"
     )
     _append_section(
-        "低分辨率小图 (<768px)",
+        "低分辨率小图 (面积<768² 或 短边<512px)",
         low_res,
-        "因引擎锁定 UPSCALE='never'，过小图片无法放大到 1024px，建议超分放大或剔除严重模糊底图。"
+        "因引擎锁定 UPSCALE='never'，过小或过窄图片无法放大到 1024px，建议超分放大或剔除严重模糊底图。"
     )
     _append_section(
         "极端长宽比图 (>3:1)",
@@ -1296,6 +1320,48 @@ def _apply_checkpoint_spec_alignment(args, l_info: dict, mode_tag: str):
             print(f" [{mode_tag} Auto-Align] Aligned LoKr Decompose Both {args.lokr_decompose_both} -> {bool(l_info['lokr_decompose_both'])}")
             args.lokr_decompose_both = bool(l_info["lokr_decompose_both"])
 
+def _ensure_local_trainer_deps(trainer_dir: Path) -> bool:
+    """
+    先于本地 Python 环境核验 kohakumoss 可编辑链接与 5 项核心运行时依赖是否已完整就绪。
+    全部就绪时直接跳过 pip install（实现零网络/秒级启动）；返回 True 表示跳过了 pip。
+    """
+    required_pkgs = ("kohaku-engine", "kohakuvault", "lycoris-lora", "anyschedule", "safetensors")
+    trainer_ok = False
+    try:
+        spec = importlib.util.find_spec("kohakumoss")
+        if spec and spec.origin:
+            origin_resolved = str(Path(spec.origin).resolve()).lower()
+            trainer_resolved = str(trainer_dir.resolve()).lower()
+            trainer_ok = origin_resolved.startswith(trainer_resolved)
+    except Exception:
+        trainer_ok = False
+
+    missing_pkgs = []
+    for pkg in required_pkgs:
+        try:
+            importlib.metadata.distribution(pkg)
+        except Exception:
+            missing_pkgs.append(pkg)
+
+    if trainer_ok and not missing_pkgs:
+        print(" [Local Check] kohakumoss editable link & all runtime dependencies ready -> skipping pip install.")
+        return True
+
+    if not trainer_ok:
+        print(" [Local Install] Registering editable KohakuMossTrainer package (--no-deps)...")
+        subprocess.run([
+            sys.executable, "-m", "pip", "install", "-q", "--no-build-isolation", "--no-deps", "-e", str(trainer_dir)
+        ], creationflags=_NO_WINDOW, check=True)
+
+    if missing_pkgs:
+        print(f" [Local Install] Installing missing dependencies: {', '.join(missing_pkgs)}")
+        subprocess.run([
+            sys.executable, "-m", "pip", "install", "-q", "--no-deps", *missing_pkgs
+        ], creationflags=_NO_WINDOW, check=True)
+
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="OpenMOSS MOSS-Image Local Training Engine for Windows Consumer GPUs")
     parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
@@ -1429,7 +1495,7 @@ def main():
     print(f"Precision & Tokens: BasePrec={args.base_precision}, Tune={args.tune}, Overlong={args.overlong}")
 
     # 1. 硬件与 PyTorch 环境预检
-    total_vram = 16.0
+    total_vram = 8.0
     sm_major, sm_minor = 0, 0
     total_ram_gb = _get_host_ram_gb()
     try:
@@ -1511,9 +1577,18 @@ def main():
     target_text = text_stage / weights_info["text_encoder"].name
     target_vae = vae_stage / weights_info["vae"].name
 
-    for src, dst in [(weights_info["transformer"], target_transformer),
-                     (weights_info["text_encoder"], target_text),
-                     (weights_info["vae"], target_vae)]:
+    for stage_dir, src, dst in [
+        (diff_stage, weights_info["transformer"], target_transformer),
+        (text_stage, weights_info["text_encoder"], target_text),
+        (vae_stage, weights_info["vae"], target_vae),
+    ]:
+        # 清理目录中残留的其他旧同名版本底模，避免 KohakuMossTrainer 默认列表命中非用户选定权重
+        for old_sf in stage_dir.glob("*.safetensors"):
+            if old_sf.name != dst.name:
+                try:
+                    old_sf.unlink()
+                except Exception:
+                    pass
         if not dst.exists():
             try:
                 os.link(str(src), str(dst))
@@ -1532,22 +1607,31 @@ def main():
         src_data_path = Path(args.data_dir).resolve()
         prepare_dataset_structure(src_data_path, workspace_data_root, args.repeats, args.lora_name, args.trigger_word)
 
-    # 4. 检查并准备 KohakuMossTrainer 训练器
+    # 4. 检查并准备 KohakuMossTrainer 训练器（先本地校验，缺失时再安全拉取）
     trainer_dir = project_root / "KohakuMossTrainer"
-    if not trainer_dir.exists():
+    trainer_ready = (trainer_dir / "pyproject.toml").is_file() and (trainer_dir / "src" / "kohakumoss").is_dir()
+    if not trainer_ready:
         print_banner("Cloning KohakuMossTrainer Framework")
-        subprocess.run(["git", "clone", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(trainer_dir)], creationflags=_NO_WINDOW, check=True)
-    
-    apply_compatibility_patches(trainer_dir)
+        stage_trn = workspace_dir / "_trainer_clone_stage"
+        shutil.rmtree(stage_trn, ignore_errors=True)
+        cloned = False
+        for clone_cmd in [
+            ["git", "clone", "--depth", "1", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(stage_trn)],
+            ["git", "-c", "http.proxy=http://127.0.0.1:7890", "clone", "--depth", "1", "https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(stage_trn)],
+            ["git", "clone", "--depth", "1", "https://ghfast.top/https://github.com/KohakuBlueleaf/KohakuMossTrainer.git", str(stage_trn)],
+        ]:
+            shutil.rmtree(stage_trn, ignore_errors=True)
+            res = subprocess.run(clone_cmd, creationflags=_NO_WINDOW)
+            if res.returncode == 0 and (stage_trn / "pyproject.toml").is_file() and (stage_trn / "src" / "kohakumoss").is_dir():
+                cloned = True
+                break
+        if not cloned:
+            raise RuntimeError("Failed to clone KohakuMossTrainer from GitHub or mirror.")
+        shutil.rmtree(trainer_dir, ignore_errors=True)
+        shutil.move(str(stage_trn), str(trainer_dir))
 
-    # 确保本地依赖与可编辑模块就绪
-    subprocess.run([
-        sys.executable, "-m", "pip", "install", "-q", "--no-build-isolation", "--no-deps", "-e", str(trainer_dir)
-    ], creationflags=_NO_WINDOW, check=True)
-    subprocess.run([
-        sys.executable, "-m", "pip", "install", "-q", "--no-deps",
-        "kohaku-engine", "kohakuvault", "lycoris-lora", "anyschedule", "safetensors"
-    ], creationflags=_NO_WINDOW, check=True)
+    apply_compatibility_patches(trainer_dir)
+    _ensure_local_trainer_deps(trainer_dir)
 
     # 5. 生成本地训练与离线缓存专属配置文件 (名称与 lora_name 强对齐)
     print_banner(f"Generating Local Configurations for '{args.lora_name}'")
@@ -1558,8 +1642,8 @@ def main():
     sanitized_weights_dir = sanitize_path(models_stage_dir)
     transformer_filename = target_transformer.name
 
-    # 动态检测当前硬件 VRAM，精准匹配显存优化层
-    vram_gb = 16.0
+    # 动态检测当前硬件 VRAM，精准匹配显存优化层（兜底保守按 8.0 GB）
+    vram_gb = 8.0
     try:
         import torch
         if torch.cuda.is_available():
@@ -1726,8 +1810,8 @@ TEXT_DROP = {text_drop_val}
 LATENT_CACHE = "offline"
 TEXT_CACHE = "offline"
 FLIP = {flip_val}
-TEXT_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.text_device}"}}
-IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
+TEXT_ENCODER_KWARGS = {{"path": "{sanitize_path(target_text)}", "device": "{args.text_device}"}}
+IMAGE_ENCODER_KWARGS = {{"path": "{sanitize_path(target_vae)}", "device": "{args.vae_device}"}}
 VAE_ENCODE = {{"compile": "off"}}
 """
 
@@ -1834,18 +1918,22 @@ SAVE_FUSED_QKV = False
     if py_scripts_kogine.exists():
         kogine_cmd = str(py_scripts_kogine)
 
-    # 6. 执行离线双特征提取 (双离线缓存)
+    sub_env = os.environ.copy()
+    sub_env.setdefault("HF_HUB_OFFLINE", "1")
+    sub_env.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+    # 6. 执行离线双特征提取 (双离线缓存，禁止云端外联尝试)
     print_banner(f"Step 1/2: Extracting Text Embeddings (Device: {args.text_device.upper()})")
     subprocess.run([
         kogine_cmd, "run", "scripts/data/cache_text.py",
         "--config", f"configs/user/{args.lora_name}_local_data.py"
-    ], cwd=str(trainer_dir), env=os.environ, creationflags=_NO_WINDOW, check=True)
+    ], cwd=str(trainer_dir), env=sub_env, creationflags=_NO_WINDOW, check=True)
 
     print_banner(f"Step 2/2: Extracting Image Latents (Device: {args.vae_device.upper()})")
     subprocess.run([
         kogine_cmd, "run", "scripts/data/cache_latents.py",
         "--config", f"configs/user/{args.lora_name}_local_data.py"
-    ], cwd=str(trainer_dir), env=os.environ, creationflags=_NO_WINDOW, check=True)
+    ], cwd=str(trainer_dir), env=sub_env, creationflags=_NO_WINDOW, check=True)
 
     # 7. 物理级清洗配置文件中的临时离线编码器旋钮
     print_banner("Sanitizing Configuration Knobs for moss.py Validation")
@@ -1863,6 +1951,7 @@ SAVE_FUSED_QKV = False
         except Exception:
             pass
     os.environ["KOHAKUMOSS_PAUSE_FILE"] = str(pause_flag_file)
+    sub_env["KOHAKUMOSS_PAUSE_FILE"] = str(pause_flag_file)
 
     import threading
     stop_sync_event = threading.Event()
@@ -1893,7 +1982,7 @@ SAVE_FUSED_QKV = False
     ]
     print(f"Executing: {' '.join(train_cmd)}")
     try:
-        subprocess.run(train_cmd, cwd=str(trainer_dir), env=os.environ, creationflags=_NO_WINDOW, check=True)
+        subprocess.run(train_cmd, cwd=str(trainer_dir), env=sub_env, creationflags=_NO_WINDOW, check=True)
     finally:
         stop_sync_event.set()
 

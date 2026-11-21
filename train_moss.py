@@ -19,7 +19,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.5.2"
+    return "1.5.3"
 
 
 def _env_bool(*keys: str, default: bool = False) -> bool:

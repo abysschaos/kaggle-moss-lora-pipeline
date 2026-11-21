@@ -3,16 +3,19 @@
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+from core.config_store import PROJECT_ROOT
 from .theme import PALETTE
 
 
 class ScrollableFrame(tk.Frame):
-    """带垂直滚动条、宽屏自适应折行与安全滚轮绑定的容器面板。"""
+    """带按需自动显隐滚动条、宽屏自适应折行与安全滚轮绑定的容器面板。"""
 
     def __init__(self, parent, bg=None):
         bg_color = bg or PALETTE["card_bg"]
         super().__init__(parent, bg=bg_color)
         self._wrap_labels = []
+        self._vscroll_visible = False
+        self._scroll_check_job = None
 
         self.canvas = tk.Canvas(self, bg=bg_color, highlightthickness=0)
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
@@ -28,12 +31,44 @@ class ScrollableFrame(tk.Frame):
         self.content.bind("<Enter>", self._bind_wheel)
 
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.scrollbar.pack(side="right", fill="y")
 
     def register_wrap_label(self, widget):
         """注册需要随容器宽度变化自适应 wraplength 的文本标签或复选框。"""
         self._wrap_labels.append(widget)
         return widget
+
+    def _schedule_scrollbar_check(self):
+        """防抖调度滚动条显隐校验，避免布局尚未落定时的抖动。"""
+        if self._scroll_check_job is not None:
+            try:
+                self.after_cancel(self._scroll_check_job)
+            except Exception:
+                pass
+        try:
+            self._scroll_check_job = self.after_idle(self._update_scrollbar_visibility)
+        except Exception:
+            pass
+
+    def _update_scrollbar_visibility(self):
+        """仅当内容总高度确实超出可视高度时显示垂直滚动条，否则彻底隐藏并归零视图。"""
+        self._scroll_check_job = None
+        try:
+            canvas_h = self.canvas.winfo_height()
+            content_h = self.content.winfo_reqheight()
+            if canvas_h <= 1:
+                return
+            need_scroll = content_h > (canvas_h + 4)
+            if need_scroll:
+                if not self.scrollbar.winfo_ismapped():
+                    self.scrollbar.pack(side="right", fill="y")
+                self._vscroll_visible = True
+            else:
+                if self.scrollbar.winfo_ismapped():
+                    self.scrollbar.pack_forget()
+                self.canvas.yview_moveto(0.0)
+                self._vscroll_visible = False
+        except Exception:
+            pass
 
     def refresh_scroll_region(self):
         try:
@@ -42,6 +77,7 @@ class ScrollableFrame(tk.Frame):
                 self.canvas.configure(scrollregion=bbox)
         except Exception:
             pass
+        self._schedule_scrollbar_check()
 
     def _on_canvas_configure(self, event):
         self.canvas.itemconfig(self._canvas_window, width=event.width)
@@ -51,14 +87,15 @@ class ScrollableFrame(tk.Frame):
                 lbl.configure(wraplength=new_wrap)
             except Exception:
                 pass
+        self._schedule_scrollbar_check()
 
     def _on_mousewheel(self, event):
-        if not self.canvas.winfo_ismapped():
+        if not self._vscroll_visible or not self.canvas.winfo_ismapped():
             return
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _bind_wheel(self, _event):
-        if self.canvas.winfo_ismapped():
+        if self._vscroll_visible and self.canvas.winfo_ismapped():
             self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
     def _unbind_wheel(self, _event):
@@ -225,6 +262,12 @@ def show_text_viewer_dialog(parent, title: str, header_text: str, header_color: 
     dlg.title(title)
     dlg.configure(bg=c["card_bg"])
     dlg.transient(parent)
+    icon_path = PROJECT_ROOT / "assets" / "moss_trainer.ico"
+    if icon_path.exists():
+        try:
+            dlg.iconbitmap(str(icon_path))
+        except Exception:
+            pass
     w, h = size
     rx = parent.winfo_rootx() + max(40, (parent.winfo_width() - w) // 2)
     ry = parent.winfo_rooty() + max(40, (parent.winfo_height() - h) // 2)

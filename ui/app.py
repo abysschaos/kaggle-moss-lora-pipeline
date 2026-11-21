@@ -4,6 +4,7 @@ import ctypes
 import datetime
 import json
 import os
+import queue
 import re
 import shutil
 import stat
@@ -35,6 +36,7 @@ from core import (
     probe_gpu_quick,
     request_graceful_pause,
     rescue_latest_weights,
+    resolve_effective_vram_label,
     resolve_max_tokens_budget,
     save_local_config,
     validate_training_params,
@@ -102,7 +104,10 @@ class ModernLocalTrainerGUI:
         self._pause_requested = False
         self._user_stopped = False
         self._adv_expanded = False
-        self.detected_vram_gb = 16.0
+        self._closing = False
+        self._ui_queue = queue.SimpleQueue()
+        self._ui_queue_job = None
+        self.detected_vram_gb = 8.0
 
         self.config_file = PROJECT_ROOT / "local_config.json"
         saved_cfg = load_local_config(self.config_file)
@@ -126,7 +131,10 @@ class ModernLocalTrainerGUI:
                 "enabled": True,
             }]
 
-        self.var_comfy_dir = tk.StringVar(value=discover_default_comfy_models(saved_cfg.get("comfy_models_dir", "")))
+        saved_comfy_dir = str(saved_cfg.get("comfy_models_dir", "") or "").strip()
+        self.var_comfy_dir = tk.StringVar(
+            value=saved_comfy_dir if (saved_comfy_dir and os.path.exists(saved_comfy_dir)) else ""
+        )
         self.var_output_dir = tk.StringVar(value=saved_cfg.get("output_dir", str((PROJECT_ROOT / "output").resolve())))
         self.var_lora_name = tk.StringVar(value=saved_cfg.get("lora_name", "my_moss_lora"))
         self.var_trigger = tk.StringVar(value=saved_cfg.get("trigger_word", ""))
@@ -138,7 +146,10 @@ class ModernLocalTrainerGUI:
 
         self.var_precision = tk.StringVar(value=saved_cfg.get("precision", "bf16"))
         self.var_base_precision = tk.StringVar(value=saved_cfg.get("base_precision", "auto"))
-        self.var_vram_preset = tk.StringVar(value=saved_cfg.get("vram_preset", "auto"))
+        raw_vram_cfg = str(saved_cfg.get("vram_preset", "auto") or "auto").strip().lower()
+        if raw_vram_cfg not in ("auto", "6g", "8g", "12g", "16g"):
+            raw_vram_cfg = "auto"
+        self.var_vram_preset = tk.StringVar(value=raw_vram_cfg)
         self.var_resolution = tk.StringVar(value=str(saved_cfg.get("resolution", "1024")))
         self.var_text_device = tk.StringVar(value=saved_cfg.get("text_device", "cpu"))
         self.var_vae_device = tk.StringVar(value=saved_cfg.get("vae_device", "cuda"))
@@ -185,6 +196,7 @@ class ModernLocalTrainerGUI:
         self.var_resume_path = tk.StringVar(value=saved_cfg.get("resume_path", ""))
 
         # 状态文本标签变量
+        self.var_gpu_status = tk.StringVar(value="设备状态: ⏳ 正在探测 GPU...")
         self.var_trainer_status = tk.StringVar(value="正在检测 KohakuMossTrainer 引擎状态...")
         self.var_dataset_stat = tk.StringVar(value="当前共检测到 0 张图片")
         self.var_output_preview = tk.StringVar(value="")
@@ -208,8 +220,50 @@ class ModernLocalTrainerGUI:
         self.update_output_preview()
         self.refresh_resume_status()
         self.recalculate_math()
+        self._ui_queue_job = self.root.after(20, self._drain_ui_queue)
+        self.root.after(20, self._start_background_probes)
+        self.root.after(180, lambda: self.monitor.load_history_metrics(silent=True))
+
+    def _enqueue_ui(self, fn):
+        """将后台线程产生的界面更新任务安全投递至主线程队列，彻底避免 Python 3.13+ 跨线程 after 报错。"""
+        if not self._closing:
+            self._ui_queue.put(fn)
+
+    def _drain_ui_queue(self):
+        """在主线程周期性清空并执行来自后台工作线程的界面回调。"""
+        if self._closing:
+            return
+        try:
+            for _ in range(200):
+                try:
+                    fn = self._ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    fn()
+                except Exception:
+                    pass
+        finally:
+            if not self._closing:
+                try:
+                    self._ui_queue_job = self.root.after(25, self._drain_ui_queue)
+                except Exception:
+                    pass
+
+    def _start_background_probes(self):
+        """后台异步执行毫秒级 GPU 探测与本地底模复检，彻底消除启动白屏卡顿。"""
+        def _gpu_worker():
+            gpu_info, vram_gb = probe_gpu_quick()
+
+            def _apply_gpu():
+                self.detected_vram_gb = vram_gb
+                self.var_gpu_status.set(f"设备状态: {gpu_info}")
+                self.recalculate_math()
+
+            self._enqueue_ui(_apply_gpu)
+
+        threading.Thread(target=_gpu_worker, daemon=True).start()
         self.auto_scan_models(silent=True)
-        self.root.after(200, lambda: self.monitor.load_history_metrics(silent=True))
 
     # ==================== 主界面与 5-Tab 架构搭建 ====================
     def build_ui(self):
@@ -225,11 +279,9 @@ class ModernLocalTrainerGUI:
             font=(self.font_family, 13, "bold"),
         ).pack(side=tk.LEFT, padx=14, pady=10)
 
-        gpu_info, vram_gb = probe_gpu_quick()
-        self.detected_vram_gb = vram_gb
         tk.Label(
             header_frame,
-            text=f"设备状态: {gpu_info}",
+            textvariable=self.var_gpu_status,
             bg=self.card_bg,
             fg=self.accent_green,
             font=(self.font_family, 9, "bold"),
@@ -381,9 +433,21 @@ class ModernLocalTrainerGUI:
             if not confirm:
                 return
             self._user_stopped = True
+            self._closing = True
+            if self._ui_queue_job is not None:
+                try:
+                    self.root.after_cancel(self._ui_queue_job)
+                except Exception:
+                    pass
             self.monitor.stop_metrics_polling()
             force_kill_process_tree(self.process.pid)
         else:
+            self._closing = True
+            if self._ui_queue_job is not None:
+                try:
+                    self.root.after_cancel(self._ui_queue_job)
+                except Exception:
+                    pass
             self.monitor.stop_metrics_polling()
         self.root.destroy()
 
@@ -595,8 +659,8 @@ class ModernLocalTrainerGUI:
                 return
 
         def _worker():
-            self.root.after(0, lambda: self.var_trainer_status.set("⏳ 正在无损安装/同步 KohakuMossTrainer，请稍候..."))
-            self.root.after(0, lambda: self.monitor.log("[引擎] 开始执行无损检查与 KohakuMossTrainer 同步...\n"))
+            self._enqueue_ui(lambda: self.var_trainer_status.set("⏳ 正在无损安装/同步 KohakuMossTrainer，请稍候..."))
+            self._enqueue_ui(lambda: self.monitor.log("[引擎] 开始执行无损检查与 KohakuMossTrainer 同步...\n"))
 
             # 若现有目录已就绪且具备 .git，仅执行安全快进更新，不删除现有目录
             if is_trainer_ready(trainer_dir) and (trainer_dir / ".git").exists() and shutil.which("git"):
@@ -611,13 +675,13 @@ class ModernLocalTrainerGUI:
                         train_local.apply_compatibility_patches(trainer_dir)
                     except Exception:
                         pass
-                    self.root.after(0, self.check_trainer_status)
-                    self.root.after(0, lambda: self.monitor.log("[引擎] KohakuMossTrainer 已无损拉取更新并完成兼容修补。\n"))
-                    self.root.after(0, lambda: messagebox.showinfo("同步成功", "KohakuMossTrainer 已更新并完成兼容修补（现有数据完全保留）！"))
+                    self._enqueue_ui(self.check_trainer_status)
+                    self._enqueue_ui(lambda: self.monitor.log("[引擎] KohakuMossTrainer 已无损拉取更新并完成兼容修补。\n"))
+                    self._enqueue_ui(lambda: messagebox.showinfo("同步成功", "KohakuMossTrainer 已更新并完成兼容修补（现有数据完全保留）！"))
                     return
-                self.root.after(0, self.check_trainer_status)
-                self.root.after(0, lambda: self.monitor.log("⚠️ [引擎] 在线 git pull 未成功，已完整保留本地现有引擎不做任何删除。\n"))
-                self.root.after(0, lambda: messagebox.showwarning("更新未完成", "在线拉取超时或存在本地修改，现有 KohakuMossTrainer 引擎已完整保留不受影响。"))
+                self._enqueue_ui(self.check_trainer_status)
+                self._enqueue_ui(lambda: self.monitor.log("⚠️ [引擎] 在线 git pull 未成功，已完整保留本地现有引擎不做任何删除。\n"))
+                self._enqueue_ui(lambda: messagebox.showwarning("更新未完成", "在线拉取超时或存在本地修改，现有 KohakuMossTrainer 引擎已完整保留不受影响。"))
                 return
 
             stage_dir = PROJECT_ROOT / "workspace" / "_trainer_stage"
@@ -680,61 +744,87 @@ class ModernLocalTrainerGUI:
 
                     train_local.apply_compatibility_patches(trainer_dir)
                 except Exception as err:
-                    self.root.after(0, self.check_trainer_status)
-                    self.root.after(0, lambda e=err: self.monitor.log(f"❌ [引擎] 切换目录或修补异常: {e}\n"))
-                    self.root.after(0, lambda e=err: messagebox.showerror("安装异常", f"切换目录或写入补丁失败：{e}"))
+                    self._enqueue_ui(self.check_trainer_status)
+                    self._enqueue_ui(lambda e=err: self.monitor.log(f"❌ [引擎] 切换目录或修补异常: {e}\n"))
+                    self._enqueue_ui(lambda e=err: messagebox.showerror("安装异常", f"切换目录或写入补丁失败：{e}"))
                     return
-                self.root.after(0, self.check_trainer_status)
-                self.root.after(0, lambda: self.monitor.log("[引擎] KohakuMossTrainer 无损安装/修复与兼容补丁已就绪！\n"))
-                self.root.after(0, lambda: messagebox.showinfo("同步成功", "KohakuMossTrainer 核心引擎已安装并完成兼容修补！"))
+                self._enqueue_ui(self.check_trainer_status)
+                self._enqueue_ui(lambda: self.monitor.log("[引擎] KohakuMossTrainer 无损安装/修复与兼容补丁已就绪！\n"))
+                self._enqueue_ui(lambda: messagebox.showinfo("同步成功", "KohakuMossTrainer 核心引擎已安装并完成兼容修补！"))
             else:
                 self._force_rmtree(stage_dir)
-                self.root.after(0, self.check_trainer_status)
-                self.root.after(0, lambda: self.monitor.log("❌ [引擎] 全部通道下载均未成功，原有目录保持原样未删。\n"))
-                self.root.after(0, lambda: messagebox.showerror("同步失败", "GitHub 与镜像通道均超时，原有文件未作删除。请检查网络后重试。"))
+                self._enqueue_ui(self.check_trainer_status)
+                self._enqueue_ui(lambda: self.monitor.log("❌ [引擎] 全部通道下载均未成功，原有目录保持原样未删。\n"))
+                self._enqueue_ui(lambda: messagebox.showerror("同步失败", "GitHub 与镜像通道均超时，原有文件未作删除。请检查网络后重试。"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def auto_scan_models(self, silent: bool = True):
-        """调用 train_local.probe_local_models() 自动扫描本地 ComfyUI 与项目 models/ 底座权重。"""
-        try:
-            import train_local
+        """异步/极速自检本地 ComfyUI 与 models/ 底座权重；三路径均已存在时免全盘扫描，失效路径自动清空重探。"""
+        path_vars = (
+            ("transformer", self.var_transformer_path),
+            ("text_encoder", self.var_text_encoder_path),
+            ("vae", self.var_vae_path),
+        )
+        for _k, var in path_vars:
+            val = var.get().strip()
+            if val and not Path(val).is_file():
+                var.set("")
 
-            comfy_dir = self.var_comfy_dir.get().strip() or None
-            prefer_bf16 = (self.var_base_precision.get() or "").lower() in ("compute", "fp8_compute")
-            found = train_local.probe_local_models(comfy_dir, prefer_bf16_te=prefer_bf16)
+        cur_comfy = self.var_comfy_dir.get().strip()
+        if cur_comfy and not os.path.exists(cur_comfy):
+            self.var_comfy_dir.set("")
+            cur_comfy = ""
 
-            for key, var in (
-                ("transformer", self.var_transformer_path),
-                ("text_encoder", self.var_text_encoder_path),
-                ("vae", self.var_vae_path),
-            ):
-                if found.get(key) and not var.get().strip():
-                    var.set(str(found[key]))
+        all_files_ready = all(bool(var.get().strip() and Path(var.get().strip()).is_file()) for _k, var in path_vars)
+        if silent and all_files_ready and cur_comfy:
+            self.var_model_scan_stat.set("✅ 已锁定本地三核心底模（极速复检通过）")
+            return
 
-            t_ok = bool(self.var_transformer_path.get().strip() or found.get("transformer"))
-            te_ok = bool(self.var_text_encoder_path.get().strip() or found.get("text_encoder"))
-            v_ok = bool(self.var_vae_path.get().strip() or found.get("vae"))
-            ready_cnt = sum((t_ok, te_ok, v_ok))
-            if ready_cnt == 3:
-                self.var_model_scan_stat.set("✅ 扫描完成：Transformer / Qwen3.5-9B / FLUX.2 VAE 三核心底模已全部锁定！")
-            else:
-                self.var_model_scan_stat.set(
-                    f"⚠️ 仅命中 {ready_cnt}/3 个底模文件（Missing: "
-                    f"{'Transformer ' if not t_ok else ''}"
-                    f"{'TextEnc ' if not te_ok else ''}"
-                    f"{'VAE' if not v_ok else ''}），可点击下方浏览手动指定或放入 models/。"
-                )
-            if not silent:
-                messagebox.showinfo(
-                    "底模扫描结果",
-                    f"扫描状态 ({ready_cnt}/3)：\n"
-                    f"• Transformer: {self.var_transformer_path.get() or found.get('transformer') or '未找到'}\n"
-                    f"• Text Encoder: {self.var_text_encoder_path.get() or found.get('text_encoder') or '未找到'}\n"
-                    f"• VAE: {self.var_vae_path.get() or found.get('vae') or '未找到'}",
-                )
-        except Exception as err:
-            self.var_model_scan_stat.set(f"⚠️ 自动扫描异常: {err}")
+        self.var_model_scan_stat.set("⏳ 正在后台检索本地 ComfyUI / models 底模...")
+
+        def _scan_worker():
+            try:
+                import train_local
+
+                resolved_comfy = cur_comfy or discover_default_comfy_models("")
+                prefer_bf16 = (self.var_base_precision.get() or "").lower() in ("compute", "fp8_compute")
+                found = train_local.probe_local_models(resolved_comfy or None, prefer_bf16_te=prefer_bf16)
+
+                def _apply_found():
+                    if resolved_comfy and not self.var_comfy_dir.get().strip():
+                        self.var_comfy_dir.set(resolved_comfy)
+                    for key, var in path_vars:
+                        if found.get(key) and not var.get().strip():
+                            var.set(str(found[key]))
+
+                    t_ok = bool(self.var_transformer_path.get().strip() or found.get("transformer"))
+                    te_ok = bool(self.var_text_encoder_path.get().strip() or found.get("text_encoder"))
+                    v_ok = bool(self.var_vae_path.get().strip() or found.get("vae"))
+                    ready_cnt = sum((t_ok, te_ok, v_ok))
+                    if ready_cnt == 3:
+                        self.var_model_scan_stat.set("✅ 扫描完成：Transformer / Qwen3.5-9B / FLUX.2 VAE 三核心底模已全部锁定！")
+                    else:
+                        self.var_model_scan_stat.set(
+                            f"⚠️ 仅命中 {ready_cnt}/3 个底模文件（Missing: "
+                            f"{'Transformer ' if not t_ok else ''}"
+                            f"{'TextEnc ' if not te_ok else ''}"
+                            f"{'VAE' if not v_ok else ''}），可点击下方浏览手动指定或放入 models/。"
+                        )
+                    if not silent:
+                        messagebox.showinfo(
+                            "底模扫描结果",
+                            f"扫描状态 ({ready_cnt}/3)：\n"
+                            f"• Transformer: {self.var_transformer_path.get() or found.get('transformer') or '未找到'}\n"
+                            f"• Text Encoder: {self.var_text_encoder_path.get() or found.get('text_encoder') or '未找到'}\n"
+                            f"• VAE: {self.var_vae_path.get() or found.get('vae') or '未找到'}",
+                        )
+
+                self._enqueue_ui(_apply_found)
+            except Exception as err:
+                self._enqueue_ui(lambda e=err: self.var_model_scan_stat.set(f"⚠️ 自动扫描异常: {e}"))
+
+        threading.Thread(target=_scan_worker, daemon=True).start()
 
     def update_output_preview(self):
         name = self.var_lora_name.get().strip() or "my_lora"
@@ -986,9 +1076,9 @@ class ModernLocalTrainerGUI:
                 import train_local
 
                 res = train_local.audit_dataset_directories(targets, max_tokens=max_tokens, resolution=res_px)
-                self.root.after(0, lambda r=res: self._on_audit_finished(r))
+                self._enqueue_ui(lambda r=res: self._on_audit_finished(r))
             except Exception as err:
-                self.root.after(0, lambda e=err: messagebox.showerror("图集体检失败", str(e)))
+                self._enqueue_ui(lambda e=err: messagebox.showerror("图集体检失败", str(e)))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1113,6 +1203,9 @@ class ModernLocalTrainerGUI:
     def recalculate_math(self):
         try:
             is_multi, img_count, factor, ep, total_exp, rec, eff_batch, imgs_per_pack, acc, mu, _ = self._compute_math_summary()
+            raw_vram = (self.var_vram_preset.get() or "auto").strip().lower()
+            eff_vram, tok_budget = resolve_effective_vram_label(raw_vram, self.detected_vram_gb)
+            vram_tag = f"{raw_vram}→{eff_vram}" if raw_vram == "auto" else eff_vram
             if mu <= -0.8:
                 mu_hint = "宏观画风(高噪)"
             elif mu >= 0.3:
@@ -1123,12 +1216,12 @@ class ModernLocalTrainerGUI:
             if is_multi:
                 enabled_cnt = sum(1 for s in self.subsets if s.get("enabled", True))
                 self.var_math_info.set(
-                    f"📊 [多子集算力公式] ({enabled_cnt}启用子集 / 共{img_count}张) 单轮{factor}曝光 × {ep}Epochs = {total_exp}曝光\n"
+                    f"📊 [多子集算力 | 档位 {vram_tag} / MAX_TOKENS={tok_budget}] ({enabled_cnt}子集/{img_count}图) 单轮{factor}曝光 × {ep}Epochs = {total_exp}\n"
                     f"📦 单步等效 Batch = {imgs_per_pack}图/包 × GradAcc {acc} = {eff_batch}张/步 → 建议 Max Steps ≈ {rec} 步 ({mu_hint})"
                 )
             else:
                 self.var_math_info.set(
-                    f"📊 [单目录算力公式] {img_count}图 × {factor}Repeats × {ep}Epochs = {total_exp}次总曝光\n"
+                    f"📊 [单目录算力 | 档位 {vram_tag} / MAX_TOKENS={tok_budget}] {img_count}图 × {factor}Repeats × {ep}Epochs = {total_exp}次总曝光\n"
                     f"📦 单步等效 Batch = {imgs_per_pack}图/包 × GradAcc {acc} = {eff_batch}张/步 → 建议 Max Steps ≈ {rec} 步 ({mu_hint})"
                 )
         except Exception:
@@ -1310,14 +1403,14 @@ class ModernLocalTrainerGUI:
 
             for line in iter(self.process.stdout.readline, ""):
                 if line:
-                    self.root.after(0, lambda l=line: self.monitor.log(l))
+                    self._enqueue_ui(lambda l=line: self.monitor.log(l))
 
             self.process.stdout.close()
             rc = self.process.wait()
-            self.root.after(0, lambda code=rc: self.training_finished(code))
+            self._enqueue_ui(lambda code=rc: self.training_finished(code))
         except Exception as err:
-            self.root.after(0, lambda e=err: self.monitor.log(f"\n❌ 运行异常崩溃: {e}\n"))
-            self.root.after(0, lambda: self.training_finished(-1))
+            self._enqueue_ui(lambda e=err: self.monitor.log(f"\n❌ 运行异常崩溃: {e}\n"))
+            self._enqueue_ui(lambda: self.training_finished(-1))
 
     def pause_and_save_training(self):
         if not self.is_training:
@@ -1374,7 +1467,11 @@ def run_gui():
     _configure_windows_shell_ui()
     try:
         root = tk.Tk()
+        # 隐藏至首次布局与样式计算完毕后再显示，消除冷启动白屏闪烁
+        root.withdraw()
         ModernLocalTrainerGUI(root)
+        root.update_idletasks()
+        root.deiconify()
         root.mainloop()
     except Exception:
         crash_log = PROJECT_ROOT / "workspace" / "gui_crash.log"

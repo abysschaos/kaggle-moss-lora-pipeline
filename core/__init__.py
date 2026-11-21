@@ -11,6 +11,7 @@ from .config_store import (
     open_in_explorer,
     probe_gpu_quick,
     resolve_cli_python,
+    resolve_effective_vram_label,
     resolve_max_tokens_budget,
     save_local_config,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "load_app_version",
     "is_trainer_ready",
     "resolve_cli_python",
+    "resolve_effective_vram_label",
     "probe_gpu_quick",
     "discover_default_comfy_models",
     "load_local_config",

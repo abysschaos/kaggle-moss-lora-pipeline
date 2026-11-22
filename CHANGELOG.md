@@ -8,15 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned (Roadmap)
-- **体验增强候选 (v1.5.x)**：
+- **体验增强候选**：
   - 训练期定时样图预览（`SAMPLE_EVERY` / `SAMPLE_PROMPTS` + 显存守卫）；
   - 更多冷门/专项适配器算法接入（`tlora` / `oft`）；
   - 可选 `tags` 词表打标模式（暴露 `shuffle` 与 `keep_first` 控制，兼容常规标签图集）。
-- **云端平台远程控制专项 (v1.6.0 Cloud Remote Control)**：
-  - 在本地 GUI 内直接远程驱动云端训练，大幅降低个人用户使用云卡的门槛：
-    - **Kaggle 无头一键流水线**：本地图集自动打包 ZIP 并调用 Kaggle CLI 推送私有 Dataset、`kernels push` 投递作业、定时轮询状态并自动拉回最终与阶段权重；
-    - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持一键传图、远程拉起 `train_moss.py` 与日志流式回传、本地看板实时渲染远端 Loss 曲线；
-    - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 等平台的一键启停机与费用告警适配器接口。
+- **远端算力扩展候选 (v1.6.x+)**：
+  - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
+  - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
+
+## [1.6.0] - 2026-11-22
+
+### Added
+- **Kaggle 云端 API 零代码一键遥控台 ([core/kaggle_bridge.py](core/kaggle_bridge.py) / [ui/tab_cloud.py](ui/tab_cloud.py) / [ui/app.py](ui/app.py))**：
+  - 全新升级 Tab 4【`☁️ 云端遥控`】为“四步零代码云端工作台”：支持导入 `kaggle.json` 或填写 Token 并一键检测连通性、实时显示来自 Tab 1/2 的全部同步超参数与单/多子集状态摘要、选择算力（`Dual-T4 DDP / 单卡 GPU / 兼容队列`）与云端底模分支（`heal / base / sft` + 量化）、自动规范化 6~50 位合规 Kaggle Slug；
+  - **一键三连与分步流水线**：支持【🚀 一键全自动：打包上传图集 + 同步参数推送云端开炼】、分步打包上传私有 Dataset（自动处理已存在数据集平滑切至增量更新 `version -r zip`，原生兼容多子集相对清单 `subsets_cloud.json`）、30 秒自动轮询云端状态、以及完工后一键拉回压缩包解压到 `output/<lora_name>/` 并自动同步至 ComfyUI `models/loras/`；
+  - **零 API 兜底导出包**：提供【📦 导出免 API 手动上传包】，生成即拖即传的数据集 ZIP、所有 GUI 参数已自动预填完毕的 `.ipynb` 训练本以及中文四步操作指南。
+- **云端执行引擎与本地能力全面齐平 ([train_moss.py](train_moss.py) / [notebooks/kaggle_moss_lora_training.ipynb](notebooks/kaggle_moss_lora_training.ipynb))**：
+  - 为 `train_moss.py` 新增 `CLOUD_GUI_CONFIG_JSON` 注入锚点、`--config_json` 参数覆盖与 `--dry_config_check` 校验模式（严格遵循 `显式 CLI > --config_json > 嵌入式 GUI 配置 > 环境变量 > 默认值`）；
+  - 新增 `/kaggle/input/**/subsets_cloud.json` 自动扫描发现与相对路径解析、云端非阻断图集健康体检日志（`_audit_cloud_dataset_folders`），并将 `metrics.jsonl` 指标流同时归档入 `{lora_name}_lora_results.zip` 与 `/kaggle/working/metrics.jsonl`。
+- **右栏监控面板支持直接复盘云端曲线 ([ui/monitor_panel.py](ui/monitor_panel.py))**：
+  - 抽取 `MonitorPanel.load_metrics_from_path()`，在拉回云端产物时自动绘制云端训练的 `Loss / EMA` 收敛曲线与 KPI 统计卡片。
+
+### Changed & Security
+- **零侵入运行时探测与严格凭据隔离**：`core/kaggle_bridge.py` 自动优先探测系统 PATH / 用户 Python Scripts / `venv` 下的官方 Kaggle CLI 并提供一键用户目录安装，绝不污染本地 ComfyUI Python 环境；Kaggle API Key 仅保存至 `~/.kaggle/kaggle.json`，`local_config.json` 绝不存储敏感密钥；`.gitignore` 新增 `kaggle.json` 与 `.kaggle/` 规则。
+- **五位一体发布同步**：更新 [VERSION](VERSION) 至 `1.6.0`、[launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) 至 `1.6.0.0`，同步更新 [README.md](README.md)、[CHANGELOG.md](CHANGELOG.md)、[docs/beginner_guide.md](docs/beginner_guide.md)、[docs/kaggle_deployment_guide.md](docs/kaggle_deployment_guide.md)、[scripts/push_to_kaggle.ps1](scripts/push_to_kaggle.ps1)、[scripts/pull_weights.ps1](scripts/pull_weights.ps1) 与全局技能 `kohaku`，并重编译 `MOSS_LoRA_Trainer.exe` 与 `SHA256SUMS.txt`。
 
 ## [1.5.4] - 2026-11-22
 
@@ -187,7 +202,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.4...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.4...v1.6.0
 [1.5.4]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.1...v1.5.2

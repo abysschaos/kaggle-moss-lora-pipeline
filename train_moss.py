@@ -19,7 +19,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.5.4"
+    return "1.6.0"
 
 
 def _env_bool(*keys: str, default: bool = False) -> bool:
@@ -30,6 +30,9 @@ def _env_bool(*keys: str, default: bool = False) -> bool:
 
 
 APP_VERSION = _load_app_version()
+
+# 本地桌面端通过 Kaggle API 推送云端作业时注入的超参数 JSON（独立运行保持 None 不影响兼容）
+CLOUD_GUI_CONFIG_JSON = None
 
 # 0. 解析命令行与环境变量超参数 (全面对齐本地引擎，支持显存档位、分辨率、精度与 Base/Heal/SFT 变体)
 parser = argparse.ArgumentParser(description="OpenMOSS MOSS-Image Cloud LoRA Training Engine (Kaggle / Colab)")
@@ -162,7 +165,84 @@ parser.add_argument("--dataset_dir", type=str, default=os.environ.get("DATASET_D
                     help="Path to training dataset folder or archive")
 parser.add_argument("--dataset_url", type=str, default=os.environ.get("DATASET_URL", ""),
                     help="Optional direct download URL for a dataset .zip archive if not mounted under /kaggle/input")
-args, _ = parser.parse_known_args()
+parser.add_argument("--config_json", type=str, default=os.environ.get("CLOUD_CONFIG_JSON", ""),
+                    help="Optional JSON file path or JSON object string of GUI hyperparameter overrides")
+parser.add_argument("--dry_config_check", action="store_true", default=False,
+                    help="Parse injected GUI/CLI config and print resolved JSON without running CUDA probes")
+
+
+def _parse_json_config_source(raw_source) -> dict:
+    """从 JSON 字符串、字典或 JSON 文件路径加载参数字典，无效时返回空字典。"""
+    if raw_source is None:
+        return {}
+    if isinstance(raw_source, dict):
+        return raw_source
+    text = str(raw_source).strip()
+    if not text:
+        return {}
+    if os.path.isfile(text):
+        text = Path(text).read_text(encoding="utf-8")
+    loaded = json.loads(text)
+    if not isinstance(loaded, dict):
+        raise ValueError("Cloud config JSON payload must be a JSON object.")
+    return loaded
+
+
+def _coerce_action_value(action, raw_val):
+    """按 argparse action 定义安全转换 JSON 注入值类型，自动校验 choices 约束。"""
+    if raw_val is None:
+        return None, False
+    if isinstance(action.default, bool) or isinstance(action, argparse._StoreTrueAction):
+        if isinstance(raw_val, bool):
+            val = raw_val
+        elif isinstance(raw_val, (int, float)):
+            val = bool(raw_val)
+        else:
+            val = str(raw_val).strip().lower() in ("1", "true", "yes", "on")
+        return val, True
+    try:
+        val = action.type(raw_val) if action.type else raw_val
+    except Exception:
+        return None, False
+    if action.choices and val not in action.choices:
+        return None, False
+    return val, True
+
+
+def _apply_cloud_config_overrides(arg_parser: argparse.ArgumentParser) -> argparse.Namespace:
+    """按 显式CLI > --config_json > 内嵌 CLOUD_GUI_CONFIG_JSON > 环境变量 合并生成运行参数。"""
+    pre_args, _ = arg_parser.parse_known_args()
+    merged_overrides = {}
+    if CLOUD_GUI_CONFIG_JSON:
+        merged_overrides.update(_parse_json_config_source(CLOUD_GUI_CONFIG_JSON))
+    if getattr(pre_args, "config_json", ""):
+        merged_overrides.update(_parse_json_config_source(pre_args.config_json))
+
+    if merged_overrides:
+        coerced_defaults = {}
+        for act in arg_parser._actions:
+            if not act.dest or act.dest in ("help", "version", "dry_config_check", "config_json"):
+                continue
+            if act.dest in merged_overrides:
+                converted, ok = _coerce_action_value(act, merged_overrides[act.dest])
+                if ok:
+                    coerced_defaults[act.dest] = converted
+        if coerced_defaults:
+            arg_parser.set_defaults(**coerced_defaults)
+
+    resolved, _ = arg_parser.parse_known_args()
+    return resolved
+
+
+args = _apply_cloud_config_overrides(parser)
+if args.dry_config_check:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    print(json.dumps(vars(args), indent=2, ensure_ascii=False))
+    sys.exit(0)
 
 print("=" * 75)
 print(f">>> OpenMOSS MOSS-Image Cloud LoRA Training Engine v{APP_VERSION} <<<")
@@ -351,15 +431,96 @@ os.makedirs("/tmp/models/vae", exist_ok=True)
 
 workspace_data_root = "/tmp/workspace_dataset"
 os.makedirs(workspace_data_root, exist_ok=True)
-valid_img_exts = {".jpg", ".jpeg", ".png", ".webp"}
+valid_img_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 trigger_clean = args.trigger_word.strip() if args.trigger_word else ""
 cloud_subsets_summary = []
+staged_audit_dirs = []
 
-# 3. 智能发现与准备数据集 (支持多子集独立配比 --subsets_json，或单图集 /kaggle/input/ 挂载与解压)
+
+def _probe_image_dims(img_path: str):
+    """轻量读取图片尺寸（优先 PIL，失败时优雅返回 None 不中断云端流程）。"""
+    try:
+        from PIL import Image
+
+        with Image.open(img_path) as im:
+            return im.size
+    except Exception:
+        return None
+
+
+def _audit_cloud_dataset_folders(folder_paths: list, max_tokens: int, resolution: int) -> dict:
+    """对齐本地版 v1.5.3 规则的云端训练前非阻断图集健康体检。"""
+    target_area = max(256, int(resolution)) * max(256, int(resolution))
+    est_img_tokens = max(1, target_area // 256)
+    avail_txt_tokens = max(32, int(max_tokens) - est_img_tokens)
+
+    stats = {
+        "total_images": 0,
+        "missing_or_empty_txt": 0,
+        "low_res": 0,
+        "extreme_aspect": 0,
+        "overlong_txt": 0,
+        "suspected_tag_soup": 0,
+    }
+    for folder in folder_paths:
+        if not folder or not os.path.isdir(folder):
+            continue
+        for fname in sorted(os.listdir(folder)):
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in valid_img_exts:
+                continue
+            stats["total_images"] += 1
+            img_p = os.path.join(folder, fname)
+            dims = _probe_image_dims(img_p)
+            if dims and dims[0] > 0 and dims[1] > 0:
+                w, h = dims
+                if min(w, h) < 512 or (w * h) < (768 * 768):
+                    stats["low_res"] += 1
+                if max(w / h, h / w) > 3.0:
+                    stats["extreme_aspect"] += 1
+
+            txt_p = os.path.join(folder, os.path.splitext(fname)[0] + ".txt")
+            if not os.path.isfile(txt_p):
+                stats["missing_or_empty_txt"] += 1
+                continue
+            with open(txt_p, "r", encoding="utf-8", errors="ignore") as tf:
+                cap = tf.read().strip()
+            if not cap:
+                stats["missing_or_empty_txt"] += 1
+                continue
+            est_txt = int(len(cap) / 3.5) + 12
+            if est_txt > avail_txt_tokens:
+                stats["overlong_txt"] += 1
+            if cap.count(",") >= 8 and cap.count(".") == 0:
+                parts = [p.strip() for p in cap.split(",") if p.strip()]
+                avg_w = (sum(len(p.split()) for p in parts) / len(parts)) if parts else 0.0
+                if avg_w <= 3.8:
+                    stats["suspected_tag_soup"] += 1
+
+    print(
+        f" [Cloud Dataset Audit] Imgs={stats['total_images']} | Missing/EmptyTxt={stats['missing_or_empty_txt']} | "
+        f"LowRes(<768^2 or <512px)={stats['low_res']} | Aspect(>3:1)={stats['extreme_aspect']} | "
+        f"OverlongTxt={stats['overlong_txt']} | TagSoup={stats['suspected_tag_soup']}"
+    )
+    return stats
+
+
+# 3. 智能发现与准备数据集 (支持多子集独立配比 --subsets_json / subsets_cloud.json，或单图集 /kaggle/input/ 挂载与解压)
+subsets_base_dir = None
+if not (args.subsets_json and args.subsets_json.strip()) and os.path.exists("/kaggle/input"):
+    found_manifests = sorted(
+        glob.glob("/kaggle/input/**/subsets_cloud.json", recursive=True),
+        key=lambda p: (p.count(os.sep), len(p)),
+    )
+    if found_manifests:
+        args.subsets_json = found_manifests[0]
+        print(f"Auto-detected Kaggle multi-subset manifest: {args.subsets_json}")
+
 parsed_cloud_subsets = []
 if args.subsets_json and args.subsets_json.strip():
     raw_sub = args.subsets_json.strip()
     if os.path.isfile(raw_sub):
+        subsets_base_dir = os.path.dirname(os.path.abspath(raw_sub))
         parsed_cloud_subsets = json.loads(Path(raw_sub).read_text(encoding="utf-8"))
     else:
         parsed_cloud_subsets = json.loads(raw_sub)
@@ -372,6 +533,10 @@ if parsed_cloud_subsets:
         if not isinstance(item, dict) or item.get("enabled", True) is False:
             continue
         s_dir = str(item.get("path", "")).strip()
+        if s_dir and not os.path.isdir(s_dir) and subsets_base_dir:
+            rel_cand = os.path.normpath(os.path.join(subsets_base_dir, s_dir))
+            if os.path.isdir(rel_cand):
+                s_dir = rel_cand
         if not s_dir or not os.path.isdir(s_dir):
             raise FileNotFoundError(f"Cloud subset #{idx} directory not found: {s_dir}")
         s_rep = max(1, int(item.get("repeats", 1)))
@@ -385,6 +550,7 @@ if parsed_cloud_subsets:
         active_folders.add(folder_name)
         dst_sub = os.path.join(workspace_data_root, folder_name)
         os.makedirs(dst_sub, exist_ok=True)
+        staged_audit_dirs.append(dst_sub)
         s_trig = str(item.get("trigger", "") or "").strip()
 
         src_imgs = [f for f in os.listdir(s_dir) if os.path.splitext(f)[1].lower() in valid_img_exts]
@@ -428,7 +594,7 @@ else:
     elif os.path.exists("/kaggle/input"):
         candidate_dirs = []
         for root, dirs, files in os.walk("/kaggle/input"):
-            imgs = [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+            imgs = [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp'))]
             if imgs:
                 candidate_dirs.append((root, len(imgs)))
         if candidate_dirs:
@@ -522,11 +688,14 @@ else:
                     with open(txt_f, "w", encoding="utf-8") as tf:
                         tf.write(cap)
 
+    staged_audit_dirs.append(target_data_dir)
     img_count = len([f for f in os.listdir(target_data_dir) if os.path.splitext(f)[1].lower() in valid_img_exts])
     txt_count = len([f for f in os.listdir(target_data_dir) if f.lower().endswith(".txt")])
     print(f"Dataset verified: {img_count} images, {txt_count} txt captions in {target_data_dir}.")
     if img_count < 1 or txt_count < 1:
         raise RuntimeError(f"Dataset verification failed: Expected at least 1 image and caption, found {img_count} images, {txt_count} txt files.")
+
+cloud_audit_summary = _audit_cloud_dataset_folders(staged_audit_dirs, max_tokens_val, args.resolution)
 
 # 4. 安装外围依赖
 print("\n>>> Installing auxiliary utilities (safetensors, hf-transfer, bitsandbytes)...")
@@ -1179,8 +1348,22 @@ for sf in safetensors_files:
     print(f" - Archiving {sf} -> {dest}")
     shutil.copy2(sf, dest)
 
+# 归档训练指标 metrics.jsonl，供本地桌面 UI 直接加载绘出云端 Loss/EMA 收敛曲线
+metrics_candidates = []
+preferred_metrics = os.path.join(working_runs, "moss", args.lora_name, "metrics.jsonl")
+if os.path.isfile(preferred_metrics):
+    metrics_candidates.append(preferred_metrics)
+else:
+    metrics_candidates.extend(sorted(glob.glob(f"{working_runs}/**/metrics.jsonl", recursive=True)))
+if metrics_candidates:
+    src_metrics = metrics_candidates[0]
+    shutil.copy2(src_metrics, os.path.join(output_lora_dir, "metrics.jsonl"))
+    shutil.copy2(src_metrics, "/kaggle/working/metrics.jsonl")
+    print(f" - Archiving metrics trace -> {output_lora_dir}/metrics.jsonl & /kaggle/working/metrics.jsonl")
+
 summary_data = {
     "lora_name": args.lora_name,
+    "pipeline_version": APP_VERSION,
     "train_mode": train_mode,
     "trigger_word": args.trigger_word if args.trigger_word else "(None)",
     "steps": effective_steps,
@@ -1200,6 +1383,7 @@ summary_data = {
     "target_preset": args.target_preset,
     "loraplus_ratio": loraplus_val,
     "dataset_mode": "multi_subset" if cloud_subsets_summary else "single",
+    "dataset_audit": cloud_audit_summary,
     "subsets": cloud_subsets_summary,
     "optimizer": args.optimizer,
     "learning_rate": args.lr,

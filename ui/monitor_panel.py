@@ -410,20 +410,18 @@ class MonitorPanel:
             c.create_text(leg_x, leg_y, text="── 原始 Loss", anchor="e", fill=self.accent_blue, font=(self.font_family, 8, "bold"))
         c.create_text(pad_l, leg_y, text="Loss", anchor="w", fill="#9399b2", font=("Consolas", 8, "bold"))
 
-    def load_history_metrics(self, silent: bool = False):
-        lora_name = self.app.var_lora_name.get().strip() or "my_lora"
-        metrics_path = Path("./KohakuMossTrainer/runs/moss") / lora_name / "metrics.jsonl"
-        if not metrics_path.exists():
+    def load_metrics_from_path(self, metrics_path: Path, label: str = "", silent: bool = False) -> int:
+        """从任意本地或云端回传的 metrics.jsonl 文件加载 Loss/EMA 收敛曲线并刷新图表。"""
+        mpath = Path(metrics_path)
+        tag = label or mpath.parent.name
+        if not mpath.is_file():
             if not silent:
-                messagebox.showinfo(
-                    "未找到历史曲线",
-                    f"尚未在运行目录中找到 [{lora_name}] 的 metrics.jsonl 指标记录。\n启动训练后折线图将实时自动绘制！",
-                )
-            return
+                messagebox.showinfo("未找到指标文件", f"未找到收敛指标文件：\n{mpath}")
+            return 0
         try:
             self.loss_history.clear()
             self._loss_step_index.clear()
-            raw_text = metrics_path.read_text(encoding="utf-8", errors="ignore")
+            raw_text = mpath.read_text(encoding="utf-8", errors="ignore")
             self._metrics_file_offset = len(raw_text.encode("utf-8"))
             count = 0
             for line in raw_text.splitlines():
@@ -445,10 +443,24 @@ class MonitorPanel:
                     pass
             self._update_kpi_and_chart()
             if not silent and count > 0:
-                self.log(f"[监控面板] 已加载 [{lora_name}] 历史收敛曲线，共 {count} 个记录点。\n")
+                self.log(f"[监控面板] 已加载 [{tag}] 收敛曲线，共 {count} 个记录点。\n")
+            return count
         except Exception as err:
             if not silent:
                 messagebox.showerror("加载曲线失败", f"读取指标文件异常: {err}")
+            return 0
+
+    def load_history_metrics(self, silent: bool = False):
+        lora_name = self.app.var_lora_name.get().strip() or "my_lora"
+        metrics_path = Path("./KohakuMossTrainer/runs/moss") / lora_name / "metrics.jsonl"
+        if not metrics_path.exists():
+            if not silent:
+                messagebox.showinfo(
+                    "未找到历史曲线",
+                    f"尚未在运行目录中找到 [{lora_name}] 的 metrics.jsonl 指标记录。\n启动训练后折线图将实时自动绘制！",
+                )
+            return
+        self.load_metrics_from_path(metrics_path, label=lora_name, silent=silent)
 
     def start_metrics_polling(self, reset_chart: bool = True):
         self.stop_metrics_polling()

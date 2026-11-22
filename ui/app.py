@@ -27,18 +27,32 @@ from core import (
     compute_exposure_summary,
     count_images_in_dir,
     discover_default_comfy_models,
+    export_manual_upload_bundle,
+    fetch_kaggle_kernel_status,
+    find_kaggle_cli,
     force_kill_process_tree,
     get_preset_by_id,
+    import_kaggle_json,
+    install_kaggle_cli,
     is_trainer_ready,
     load_app_version,
     load_local_config,
     open_in_explorer,
     probe_gpu_quick,
+    pull_and_extract_kaggle_outputs,
+    push_kaggle_kernel,
+    read_kaggle_credentials,
     request_graceful_pause,
     rescue_latest_weights,
     resolve_effective_vram_label,
     resolve_max_tokens_budget,
+    sanitize_kaggle_slug,
+    save_kaggle_credentials,
     save_local_config,
+    stage_dataset_bundle,
+    stage_kernel_bundle,
+    test_kaggle_connection,
+    upload_kaggle_dataset,
     validate_training_params,
 )
 from .monitor_panel import MonitorPanel
@@ -105,11 +119,15 @@ class ModernLocalTrainerGUI:
         self._user_stopped = False
         self._adv_expanded = False
         self._closing = False
+        self._cloud_busy = False
+        self._cloud_poll_job = None
+        self._kaggle_cli_info = None
         self._ui_queue = queue.SimpleQueue()
         self._ui_queue_job = None
         self.preset_buttons = {}
         self._preset_base_styles = {}
         self._active_preset_id = None
+        self.cloud_action_buttons = []
         self.detected_vram_gb = 8.0
 
         self.config_file = PROJECT_ROOT / "local_config.json"
@@ -198,6 +216,33 @@ class ModernLocalTrainerGUI:
         self.var_train_mode = tk.StringVar(value=saved_cfg.get("train_mode", "fresh"))
         self.var_resume_path = tk.StringVar(value=saved_cfg.get("resume_path", ""))
 
+        # 云端遥控配置变量（注意：var_kaggle_api_key 绝不落盘至 local_config.json）
+        creds_snap = read_kaggle_credentials()
+        default_lora_slug = str(saved_cfg.get("lora_name", "my_moss_lora") or "my_moss_lora").strip()
+        k_user_init = str(saved_cfg.get("kaggle_username") or creds_snap.get("username", "") or "").strip()
+        k_acc_init = str(saved_cfg.get("kaggle_accelerator", "NvidiaTeslaT4") or "NvidiaTeslaT4").strip()
+        if k_acc_init not in ("NvidiaTeslaT4", "default_gpu", "NvidiaTeslaP100"):
+            k_acc_init = "NvidiaTeslaT4"
+        k_var_init = str(saved_cfg.get("kaggle_variant", "heal") or "heal").strip().lower()
+        if k_var_init not in ("heal", "base", "sft"):
+            k_var_init = "heal"
+        k_quant_init = str(saved_cfg.get("kaggle_base_quant", "auto") or "auto").strip().lower()
+        if k_quant_init not in ("auto", "int8", "full"):
+            k_quant_init = "auto"
+
+        self.var_kaggle_username = tk.StringVar(value=k_user_init)
+        self.var_kaggle_api_key = tk.StringVar(value="")
+        self.var_kaggle_dataset_slug = tk.StringVar(
+            value=str(saved_cfg.get("kaggle_dataset_slug") or sanitize_kaggle_slug(f"{default_lora_slug}-data"))
+        )
+        self.var_kaggle_kernel_slug = tk.StringVar(
+            value=str(saved_cfg.get("kaggle_kernel_slug") or sanitize_kaggle_slug(f"{default_lora_slug}-train", prefix="moss-train"))
+        )
+        self.var_kaggle_accelerator = tk.StringVar(value=k_acc_init)
+        self.var_kaggle_variant = tk.StringVar(value=k_var_init)
+        self.var_kaggle_base_quant = tk.StringVar(value=k_quant_init)
+        self.var_cloud_auto_poll = tk.BooleanVar(value=False)
+
         # 状态文本标签变量
         self.var_gpu_status = tk.StringVar(value="设备状态: ⏳ 正在探测 GPU...")
         self.var_trainer_status = tk.StringVar(value="正在检测 KohakuMossTrainer 引擎状态...")
@@ -207,9 +252,15 @@ class ModernLocalTrainerGUI:
         self.var_math_info = tk.StringVar(value="数据曝光计算器就绪...")
         self.var_model_scan_stat = tk.StringVar(value="提示：可点击【🔍 自动扫描底模】从 ComfyUI 路径探测现有模型")
         self.var_resume_status = tk.StringVar(value="就绪：全新从头训练")
+        self.var_kaggle_status = tk.StringVar(value="⏳ 正在后台自检 Kaggle CLI 与 API 凭证状态...")
+        self.var_cloud_sync_summary = tk.StringVar(value="就绪：将同步 Tab 1/2 当前超参数与图集")
+        self.var_cloud_job_status = tk.StringVar(value="⚪ 尚未查询云端作业状态")
 
         # 变量联动监听
-        self.var_lora_name.trace_add("write", lambda *_: (self.update_output_preview(), self.refresh_resume_status()))
+        self.var_lora_name.trace_add(
+            "write",
+            lambda *_: (self.update_output_preview(), self.refresh_resume_status(), self.refresh_cloud_sync_summary()),
+        )
         self.var_output_dir.trace_add("write", lambda *_: self.update_output_preview())
         self.var_resume_path.trace_add("write", lambda *_: self.refresh_resume_status())
 
@@ -223,6 +274,7 @@ class ModernLocalTrainerGUI:
         self.update_output_preview()
         self.refresh_resume_status()
         self.recalculate_math()
+        self.refresh_cloud_sync_summary()
         self._ui_queue_job = self.root.after(20, self._drain_ui_queue)
         self.root.after(20, self._start_background_probes)
         self.root.after(180, lambda: self.monitor.load_history_metrics(silent=True))
@@ -254,7 +306,7 @@ class ModernLocalTrainerGUI:
                     pass
 
     def _start_background_probes(self):
-        """后台异步执行毫秒级 GPU 探测与本地底模复检，彻底消除启动白屏卡顿。"""
+        """后台异步执行毫秒级 GPU 探测、Kaggle CLI 自检与本地底模复检，彻底消除启动白屏卡顿。"""
         def _gpu_worker():
             gpu_info, vram_gb = probe_gpu_quick()
 
@@ -266,6 +318,7 @@ class ModernLocalTrainerGUI:
             self._enqueue_ui(_apply_gpu)
 
         threading.Thread(target=_gpu_worker, daemon=True).start()
+        self.refresh_kaggle_env_status()
         self.auto_scan_models(silent=True)
 
     # ==================== 主界面与 5-Tab 架构搭建 ====================
@@ -354,6 +407,8 @@ class ModernLocalTrainerGUI:
             pass
         try:
             idx = self.notebook.index(self.notebook.select())
+            if idx == 3:
+                self.refresh_cloud_sync_summary()
             if 0 <= idx < len(self.tab_scrolls):
                 scroll = self.tab_scrolls[idx]
                 self.root.after_idle(scroll.refresh_scroll_region)
@@ -420,6 +475,12 @@ class ModernLocalTrainerGUI:
             "save_format": self.var_save_format.get(),
             "train_mode": self.var_train_mode.get(),
             "resume_path": self.var_resume_path.get().strip(),
+            "kaggle_username": self.var_kaggle_username.get().strip(),
+            "kaggle_dataset_slug": self.var_kaggle_dataset_slug.get().strip(),
+            "kaggle_kernel_slug": self.var_kaggle_kernel_slug.get().strip(),
+            "kaggle_accelerator": self.var_kaggle_accelerator.get().strip(),
+            "kaggle_variant": self.var_kaggle_variant.get().strip(),
+            "kaggle_base_quant": self.var_kaggle_base_quant.get().strip(),
         }
 
     def save_local_config(self):
@@ -428,6 +489,12 @@ class ModernLocalTrainerGUI:
     def on_closing(self):
         """关闭主窗口前保存本机配置，并在训练未停机时弹窗防误触确认强杀。"""
         self.save_local_config()
+        if self._cloud_poll_job is not None:
+            try:
+                self.root.after_cancel(self._cloud_poll_job)
+            except Exception:
+                pass
+            self._cloud_poll_job = None
         if self.is_training and self.process is not None and self.process.poll() is None:
             confirm = messagebox.askyesno(
                 "训练任务正在后台运行",
@@ -895,6 +962,7 @@ class ModernLocalTrainerGUI:
             cnt = count_images_in_dir(self.var_data_dir.get().strip())
             data_txt = f"[单目录] {cnt} 张图片"
         self.var_quick_status_summary.set(f"📂 当前图集: {data_txt}  |  模式: {mode_txt}")
+        self.refresh_cloud_sync_summary()
 
     def _apply_subset_panel_visibility(self):
         if not hasattr(self, "single_data_frame") or not hasattr(self, "multi_data_frame"):
@@ -1355,7 +1423,460 @@ class ModernLocalTrainerGUI:
         self.monitor.log(report)
         messagebox.showinfo("本机环境自检完成", report.strip())
 
+    # ==================== Kaggle 云端 API 一键遥控方法区 ====================
+    def _cloud_opts(self) -> dict:
+        return {
+            "accelerator": self.var_kaggle_accelerator.get().strip() or "NvidiaTeslaT4",
+            "variant": self.var_kaggle_variant.get().strip() or "heal",
+            "base_quant": self.var_kaggle_base_quant.get().strip() or "auto",
+        }
+
+    def _set_cloud_busy(self, busy: bool):
+        self._cloud_busy = busy
+        state = tk.DISABLED if busy else tk.NORMAL
+        for btn in getattr(self, "cloud_action_buttons", []):
+            try:
+                btn.config(state=state)
+            except Exception:
+                pass
+
+    def _run_cloud_worker(self, start_status: str, fn):
+        """在后台守护线程安全执行云端耗时操作并防重入，所有 UI 更新均经由 _enqueue_ui 回流主线程。"""
+        if self._cloud_busy:
+            messagebox.showinfo("云端操作进行中", "当前已有云端任务正在上传、推送或拉取中，请等待右侧日志提示完成。")
+            return
+        self._set_cloud_busy(True)
+        if start_status:
+            self.var_cloud_job_status.set(start_status)
+
+        def _worker():
+            try:
+                fn()
+            except Exception as err:
+                self._enqueue_ui(lambda e=err: self.monitor.log(f"❌ [云端操作异常] {e}\n"))
+                self._enqueue_ui(lambda e=err: self.var_cloud_job_status.set(f"🔴 云端操作失败: {e}"))
+                self._enqueue_ui(lambda e=err: messagebox.showerror("云端操作异常", str(e)))
+            finally:
+                self._enqueue_ui(lambda: self._set_cloud_busy(False))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def refresh_kaggle_env_status(self):
+        """异步自检本机 Kaggle CLI 与 ~/.kaggle/kaggle.json 凭证状态（零阻塞启动）。"""
+        def _probe():
+            cli = find_kaggle_cli()
+            creds = read_kaggle_credentials()
+
+            def _apply():
+                self._kaggle_cli_info = cli
+                if creds.get("username") and not self.var_kaggle_username.get().strip():
+                    self.var_kaggle_username.set(creds["username"])
+                cli_txt = f"✅ {cli['version']} ({cli['source']})" if cli.get("found") else "⚠️ 未安装 Kaggle CLI"
+                if creds.get("username") and creds.get("has_key"):
+                    cred_txt = f"✅ 已接入账号 [{creds['username']}] (Key: {creds['key_masked']})"
+                else:
+                    cred_txt = "⚠️ 尚未配置 kaggle.json（点下方【📥 导入 kaggle.json】或填入 Token 保存）"
+                self.var_kaggle_status.set(f"CLI 状态：{cli_txt}  |  凭据：{cred_txt}")
+
+            self._enqueue_ui(_apply)
+
+        threading.Thread(target=_probe, daemon=True).start()
+
+    def refresh_cloud_sync_summary(self):
+        """实时在 Tab 4 展示即将推送至 Kaggle 的 Tab 1/2 参数与算力摘要。"""
+        try:
+            lora_name = self.var_lora_name.get().strip() or "my_moss_lora"
+            if self.var_multi_subset.get():
+                enabled_subs = [s for s in self.subsets if s.get("enabled", True)]
+                imgs = sum(count_images_in_dir(s.get("path", "")) for s in enabled_subs)
+                ds_txt = f"多子集 ({len(enabled_subs)} 个/{imgs} 张)"
+            else:
+                imgs = count_images_in_dir(self.var_data_dir.get().strip())
+                ds_txt = f"单图集 ({imgs} 张)"
+            acc_map = {"NvidiaTeslaT4": "双卡 T4 DDP", "default_gpu": "单卡 GPU", "NvidiaTeslaP100": "兼容队列"}
+            acc_txt = acc_map.get(self.var_kaggle_accelerator.get().strip(), "双卡 T4 DDP")
+            dora_txt = "+DoRA" if self.var_dora.get() else ""
+            self.var_cloud_sync_summary.set(
+                f"🔄 将同步推送：[{lora_name}] | {ds_txt} | {self.var_steps.get().strip()}步 | "
+                f"{self.var_algo.get().upper()}{dora_txt} R{self.var_rank.get().strip()} @ {self.var_resolution.get()}px "
+                f"| 云端 {acc_txt} / {self.var_kaggle_variant.get().upper()}"
+            )
+        except Exception:
+            pass
+
+    def _resolve_kaggle_identity(self, require_creds: bool = True) -> tuple:
+        """校验并返回规范化后的 (username, dataset_slug, kernel_slug, dataset_id, kernel_id)。"""
+        creds = read_kaggle_credentials()
+        username = (self.var_kaggle_username.get().strip() or creds.get("username", "")).strip()
+        if not username:
+            messagebox.showwarning("缺少 Kaggle 用户名", "请先在第 1 步导入 kaggle.json 或填写 Kaggle 用户名！")
+            return None
+        self.var_kaggle_username.set(username)
+        if require_creds and not (creds.get("exists") and creds.get("has_key")):
+            messagebox.showwarning("尚未保存 API 凭据", "请先点击【📥 导入 kaggle.json】或填入 API Key 后点击【💾 保存凭证】！")
+            return None
+
+        lora_name = self.var_lora_name.get().strip() or "my-moss-lora"
+        raw_ds = self.var_kaggle_dataset_slug.get().strip() or f"{lora_name}-data"
+        raw_kn = self.var_kaggle_kernel_slug.get().strip() or f"{lora_name}-train"
+        if "/" in raw_ds:
+            raw_ds = raw_ds.split("/", 1)[1]
+        if "/" in raw_kn:
+            raw_kn = raw_kn.split("/", 1)[1]
+        ds_slug = sanitize_kaggle_slug(raw_ds, prefix="moss-data")
+        kn_slug = sanitize_kaggle_slug(raw_kn, prefix="moss-train")
+        self.var_kaggle_dataset_slug.set(ds_slug)
+        self.var_kaggle_kernel_slug.set(kn_slug)
+        return username, ds_slug, kn_slug, f"{username}/{ds_slug}", f"{username}/{kn_slug}"
+
+    def auto_generate_cloud_slugs(self):
+        lora_name = self.var_lora_name.get().strip() or "my_moss_lora"
+        self.var_kaggle_dataset_slug.set(sanitize_kaggle_slug(f"{lora_name}-data", prefix="moss-data"))
+        self.var_kaggle_kernel_slug.set(sanitize_kaggle_slug(f"{lora_name}-train", prefix="moss-train"))
+        self.save_local_config()
+        self.monitor.log(
+            f"[云端 Slug] 已生成合法 Kaggle 标识：图集={self.var_kaggle_dataset_slug.get()} | 任务={self.var_kaggle_kernel_slug.get()}\n"
+        )
+
+    def import_kaggle_json_dialog(self):
+        src = filedialog.askopenfilename(
+            title="选择从 Kaggle 下载的 kaggle.json 凭证文件",
+            filetypes=[("Kaggle Token JSON", "*.json"), ("所有文件", "*.*")],
+        )
+        if not src:
+            return
+        ok, username, msg = import_kaggle_json(src)
+        if ok:
+            self.var_kaggle_username.set(username)
+            self.var_kaggle_api_key.set("")
+            self.save_local_config()
+            self.refresh_kaggle_env_status()
+            self.monitor.log(f"[Kaggle 凭证] {msg}\n")
+            messagebox.showinfo("导入成功", msg)
+        else:
+            messagebox.showerror("导入失败", msg)
+
+    def save_kaggle_credentials_ui(self):
+        user = self.var_kaggle_username.get().strip()
+        key = self.var_kaggle_api_key.get().strip()
+        ok, msg = save_kaggle_credentials(user, key)
+        if ok:
+            self.var_kaggle_api_key.set("")
+            self.save_local_config()
+            self.refresh_kaggle_env_status()
+            self.monitor.log(f"[Kaggle 凭证] {msg}\n")
+            messagebox.showinfo("保存成功", msg)
+        else:
+            messagebox.showwarning("凭证信息不完整", msg)
+
+    def test_kaggle_connection_ui(self):
+        def _worker():
+            self._enqueue_ui(lambda: self.monitor.log("[Kaggle 诊断] 正在测试 Kaggle API 连通性与账户权限...\n"))
+            ok, msg = test_kaggle_connection(cli_info=self._kaggle_cli_info)
+            self._enqueue_ui(lambda m=msg: self.monitor.log(f"[Kaggle 诊断] {m}\n"))
+            if ok:
+                self._enqueue_ui(lambda m=msg: self.var_kaggle_status.set(m))
+                self._enqueue_ui(lambda m=msg: messagebox.showinfo("连通性检测通过", m))
+            else:
+                self._enqueue_ui(lambda m=msg: messagebox.showwarning("连通性检测未通过", m))
+
+        self._run_cloud_worker("⏳ 正在检测 Kaggle API 连通性...", _worker)
+
+    def install_kaggle_cli_ui(self):
+        def _worker():
+            ok, msg = install_kaggle_cli(on_log=lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt)))
+            self._enqueue_ui(self.refresh_kaggle_env_status)
+            self._enqueue_ui(lambda m=msg: self.monitor.log(f"[Kaggle CLI] {m}\n"))
+            if ok:
+                self._enqueue_ui(lambda m=msg: messagebox.showinfo("安装成功", m))
+            else:
+                self._enqueue_ui(lambda m=msg: messagebox.showerror("安装失败", m))
+
+        self._run_cloud_worker("⏳ 正在安装官方 Kaggle CLI...", _worker)
+
+    def cloud_upload_dataset_only(self):
+        if not self._check_dataset_inputs_ready():
+            return
+
+        ident = self._resolve_kaggle_identity(require_creds=True)
+        if not ident:
+            return
+        username, ds_slug, _kn_slug, ds_id, _kn_id = ident
+        raw_params = self._collect_raw_params()
+        self.save_local_config()
+
+        def _worker():
+            log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
+            log_cb(f"\n[云端流水线 1/2] 正在打包本地图集为 Kaggle 私有数据集 {ds_id}...\n")
+            stage_dir, stats = stage_dataset_bundle(raw_params, username, ds_slug)
+            log_cb(
+                f"[图集打包完成] 模式={stats['mode']} | {stats['images']} 张图 / {stats['captions']} 份标注 "
+                f"| 约 {stats['total_mb']} MB -> {stage_dir}\n"
+            )
+            ok, msg = upload_kaggle_dataset(
+                stage_dir,
+                ds_id,
+                version_notes=f"MOSS-Image GUI sync ({stats['images']} images)",
+                cli_info=self._kaggle_cli_info,
+                on_log=log_cb,
+            )
+            if ok:
+                self._enqueue_ui(lambda m=msg: self.var_cloud_job_status.set(f"✅ {m}（下一步可点【2️⃣ 仅推送参数开炼】）"))
+                self._enqueue_ui(lambda m=msg: messagebox.showinfo("图集上传成功", f"{m}\n\n共打包 {stats['images']} 张图 / {stats['captions']} 份标注。"))
+            else:
+                self._enqueue_ui(lambda m=msg: self.var_cloud_job_status.set("🔴 图集上传失败，请查看控制台报错"))
+                self._enqueue_ui(lambda m=msg: messagebox.showerror("图集上传失败", m))
+
+        self._run_cloud_worker(f"⏳ 正在打包并上传图集 {ds_id}...", _worker)
+
+    def cloud_push_kernel_only(self):
+        ident = self._resolve_kaggle_identity(require_creds=True)
+        if not ident:
+            return
+        username, _ds_slug, kn_slug, ds_id, _kn_id = ident
+        raw_params = self._collect_raw_params()
+        cleaned, err_msg = validate_training_params(raw_params)
+        if err_msg:
+            messagebox.showerror("参数格式错误", err_msg)
+            return
+        cloud_opts = self._cloud_opts()
+        self.save_local_config()
+
+        def _worker():
+            log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
+            stage_dir, info = stage_kernel_bundle(cleaned, cloud_opts, username, ds_id, kn_slug)
+            log_cb(f"\n[云端流水线 2/2] 已注入 Tab 1/2 全量超参数，准备推送 {info['kernel_id']} (算力: {cloud_opts['accelerator']})...\n")
+            ok, url, msg = push_kaggle_kernel(
+                stage_dir,
+                accelerator=cloud_opts["accelerator"],
+                cli_info=self._kaggle_cli_info,
+                on_log=log_cb,
+            )
+            if ok:
+                self._enqueue_ui(lambda m=msg: self.var_cloud_job_status.set(f"🟡 已提交至 Kaggle 云端队列：{m}"))
+                self._enqueue_ui(
+                    lambda u=url, m=msg: messagebox.showinfo(
+                        "云端开炼已启动",
+                        f"{m}\n\n可在第 4 步开启【自动轮询 (30s)】等待完工，也可打开任务页实时查看日志：\n{u}",
+                    )
+                )
+            else:
+                self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 推送任务失败，请检查权限或 CLI 输出"))
+                self._enqueue_ui(lambda m=msg: messagebox.showerror("推送云端任务失败", m))
+
+        self._run_cloud_worker(f"⏳ 正在推送训练内核至 Kaggle...", _worker)
+
+    def cloud_one_click_deploy(self):
+        if not self._check_dataset_inputs_ready():
+            return
+
+        ident = self._resolve_kaggle_identity(require_creds=True)
+        if not ident:
+            return
+        username, ds_slug, kn_slug, ds_id, kn_id = ident
+        raw_params = self._collect_raw_params()
+        cleaned, err_msg = validate_training_params(raw_params)
+        if err_msg:
+            messagebox.showerror("参数格式错误", err_msg)
+            return
+        cloud_opts = self._cloud_opts()
+        self.save_local_config()
+
+        def _worker():
+            log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
+            log_cb(f"\n{'='*70}\n🚀 [一键云端流水线] 1/2 打包并上传图集 -> {ds_id}\n")
+            ds_stage, stats = stage_dataset_bundle(raw_params, username, ds_slug)
+            ok_ds, msg_ds = upload_kaggle_dataset(
+                ds_stage,
+                ds_id,
+                version_notes=f"Auto-sync {stats['images']} imgs from GUI",
+                cli_info=self._kaggle_cli_info,
+                on_log=log_cb,
+            )
+            if not ok_ds:
+                self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 第一步上传图集失败，已中止推送"))
+                self._enqueue_ui(lambda m=msg_ds: messagebox.showerror("上传图集失败", m))
+                return
+
+            log_cb(f"\n🚀 [一键云端流水线] 2/2 同步参数并推送训练队列 -> {kn_id} ({cloud_opts['accelerator']})\n")
+            kn_stage, _info = stage_kernel_bundle(cleaned, cloud_opts, username, ds_id, kn_slug)
+            ok_kn, url, msg_kn = push_kaggle_kernel(
+                kn_stage,
+                accelerator=cloud_opts["accelerator"],
+                cli_info=self._kaggle_cli_info,
+                on_log=log_cb,
+            )
+            if ok_kn:
+                self._enqueue_ui(lambda m=msg_kn: self.var_cloud_job_status.set(f"🟡 云端训练已排队：{m}（建议打开下方 30s 自动轮询）"))
+                self._enqueue_ui(
+                    lambda u=url, st=stats: messagebox.showinfo(
+                        "🚀 云端全自动部署成功！",
+                        f"已上传 {st['images']} 张图至私有数据集 {ds_id}，\n"
+                        f"并成功推送任务 {kn_id} 至 Kaggle 云端 GPU 队列！\n\n"
+                        f"现在你可以关闭电脑或最小化窗口；待状态变为【🟢 COMPLETE】后点【3️⃣ 一键拉回成品权重】。\n"
+                        f"任务直达：{u}",
+                    )
+                )
+            else:
+                self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 图集已上传，但推送训练任务失败"))
+                self._enqueue_ui(lambda m=msg_kn: messagebox.showerror("推送训练任务失败", m))
+
+        self._run_cloud_worker(f"⏳ 全自动流水线执行中：传图集 + 推云端...", _worker)
+
+    def cloud_refresh_status(self, silent: bool = False):
+        ident = self._resolve_kaggle_identity(require_creds=True) if not silent else None
+        if silent:
+            creds = read_kaggle_credentials()
+            user = (self.var_kaggle_username.get().strip() or creds.get("username", "")).strip()
+            kn_slug = sanitize_kaggle_slug(
+                self.var_kaggle_kernel_slug.get().strip() or self.var_lora_name.get().strip() or "moss-train",
+                prefix="moss-train",
+            )
+            if not user:
+                return
+            kn_id = f"{user}/{kn_slug}"
+        else:
+            if not ident:
+                return
+            _u, _ds, _kn, _ds_id, kn_id = ident
+
+        def _worker():
+            st = fetch_kaggle_kernel_status(kn_id, cli_info=self._kaggle_cli_info)
+            self._enqueue_ui(lambda s=st: self.var_cloud_job_status.set(s["label"]))
+            if not silent:
+                self._enqueue_ui(lambda s=st: self.monitor.log(f"[Kaggle 状态] {kn_id} -> {s['label']}\n"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def toggle_cloud_auto_poll(self):
+        if self._cloud_poll_job is not None:
+            try:
+                self.root.after_cancel(self._cloud_poll_job)
+            except Exception:
+                pass
+            self._cloud_poll_job = None
+
+        if not self.var_cloud_auto_poll.get():
+            self.monitor.log("[Kaggle 监控] 已停止 30 秒自动轮询。\n")
+            return
+
+        self.monitor.log("[Kaggle 监控] 已开启每 30 秒自动查询云端作业状态。\n")
+        self.cloud_refresh_status(silent=True)
+
+        def _tick():
+            if self._closing or not self.var_cloud_auto_poll.get():
+                self._cloud_poll_job = None
+                return
+            self.cloud_refresh_status(silent=True)
+            self._cloud_poll_job = self.root.after(30000, _tick)
+
+        self._cloud_poll_job = self.root.after(30000, _tick)
+
+    def open_kaggle_kernel_page(self):
+        creds = read_kaggle_credentials()
+        user = (self.var_kaggle_username.get().strip() or creds.get("username", "")).strip()
+        kn_slug = self.var_kaggle_kernel_slug.get().strip()
+        if user and kn_slug:
+            webbrowser.open(f"https://www.kaggle.com/code/{user}/{sanitize_kaggle_slug(kn_slug, prefix='moss-train')}")
+        else:
+            webbrowser.open("https://www.kaggle.com/code")
+
+    def cloud_pull_outputs(self):
+        ident = self._resolve_kaggle_identity(require_creds=True)
+        if not ident:
+            return
+        _u, _ds, _kn, _ds_id, kn_id = ident
+        lora_name = self.var_lora_name.get().strip() or "my_moss_lora"
+        output_dir = self.var_output_dir.get().strip() or str((PROJECT_ROOT / "output").resolve())
+        comfy_dir = self.var_comfy_dir.get().strip()
+        copy_comfy = bool(self.var_copy_comfy.get())
+        self.save_local_config()
+
+        def _worker():
+            log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
+            res = pull_and_extract_kaggle_outputs(
+                kn_id,
+                lora_name=lora_name,
+                output_dir=output_dir,
+                comfy_models_dir=comfy_dir,
+                copy_to_comfy=copy_comfy,
+                cli_info=self._kaggle_cli_info,
+                on_log=log_cb,
+            )
+            if not res.get("ok"):
+                err = res.get("error", "拉回失败，请先点击【刷新云端状态】确认云端任务是否显示 COMPLETE。")
+                self._enqueue_ui(lambda m=err: self.var_cloud_job_status.set("🔴 拉回云端产物失败"))
+                self._enqueue_ui(lambda m=err: messagebox.showerror("拉回产物失败", m))
+                return
+
+            def _on_ok():
+                self.var_cloud_job_status.set(f"🟢 已成功拉回 {len(res['safetensors'])} 个权重至 {res['output_dir']}")
+                if res.get("metrics_path"):
+                    self.monitor.load_metrics_from_path(Path(res["metrics_path"]), label=f"云端 {lora_name}", silent=False)
+                comfy_note = f"\n已自动同步 ComfyUI loras：{len(res['comfy_synced'])} 个文件" if res["comfy_synced"] else ""
+                messagebox.showinfo(
+                    "🎉 云端成品拉回成功！",
+                    f"已完成解压并归档至：\n{res['output_dir']}\n\n"
+                    f"权重文件数：{len(res['safetensors'])} 个{comfy_note}\n"
+                    f"{'已同步在右侧绘出云端 Loss 收敛曲线！' if res.get('metrics_path') else ''}",
+                )
+
+            self._enqueue_ui(_on_ok)
+
+        self._run_cloud_worker(f"⏳ 正在拉回并解压 {kn_id} 成果...", _worker)
+
+    def cloud_export_manual_bundle(self):
+        if not self._check_dataset_inputs_ready():
+            return
+
+        raw_params = self._collect_raw_params()
+        cleaned, err_msg = validate_training_params(raw_params)
+        if err_msg:
+            messagebox.showerror("参数格式错误", err_msg)
+            return
+        cloud_opts = self._cloud_opts()
+        self.save_local_config()
+        try:
+            res = export_manual_upload_bundle(cleaned, raw_params, cloud_opts)
+            self.monitor.log(
+                f"\n[免 API 导出包] 已生成手动上传包：\n"
+                f" • 图集 ZIP: {res['zip_path']}\n"
+                f" • 预填参数本: {res['notebook_path']}\n"
+                f" • 四步操作指南: {res['guide_path']}\n"
+            )
+            open_in_explorer(res["export_dir"])
+            messagebox.showinfo(
+                "📦 免 API 手动上传包已就绪",
+                f"已自动打开导出目录：\n{res['export_dir']}\n\n"
+                f"目录内含：{Path(res['zip_path']).name}、{Path(res['notebook_path']).name} 与 README_操作步骤.txt。\n"
+                f"无需配置 Kaggle API，按文本里的 4 步直接上传 Kaggle 网页即可开炼！",
+            )
+        except Exception as err:
+            messagebox.showerror("导出失败", str(err))
+
     # ==================== 启动、优雅暂停、强杀与收尾工作 ====================
+    def _check_dataset_inputs_ready(self) -> bool:
+        """校验单图集或多子集目录与有效图片就绪状态，不通过时自动跳转并提示。"""
+        if bool(self.var_multi_subset.get()):
+            enabled_subs = [s for s in self.subsets if s.get("enabled", True)]
+            if not enabled_subs:
+                messagebox.showwarning("未启用子集", "多子集模式下至少需要启用 1 个包含有效图片的子集！")
+                self.select_tab(1)
+                return False
+            for sub in enabled_subs:
+                if not Path(sub.get("path", "")).is_dir() or count_images_in_dir(sub.get("path", "")) == 0:
+                    messagebox.showwarning("子集无图片", f"子集 [{sub.get('name', '')}] 目录无效或无图片，请前往【📂 数据与续炼】修正！")
+                    self.select_tab(1)
+                    return False
+            return True
+
+        d_dir = self.var_data_dir.get().strip()
+        if not Path(d_dir).exists() or count_images_in_dir(d_dir) == 0:
+            messagebox.showwarning("图集为空", f"目录 {d_dir} 中未找到图片（支持 jpg/png/webp/bmp），请先选择包含图片与 .txt 标注的文件夹！")
+            self.select_tab(1)
+            return False
+        return True
+
     def start_training(self):
         if self.is_training:
             return
@@ -1365,24 +1886,10 @@ class ModernLocalTrainerGUI:
             self.select_tab(2)
             return
 
+        if not self._check_dataset_inputs_ready():
+            return
+
         multi_mode = bool(self.var_multi_subset.get())
-        if multi_mode:
-            enabled_subs = [s for s in self.subsets if s.get("enabled", True)]
-            if not enabled_subs:
-                messagebox.showwarning("未启用子集", "多子集模式下至少需要启用 1 个包含有效图片的子集！")
-                self.select_tab(1)
-                return
-            for sub in enabled_subs:
-                if not Path(sub.get("path", "")).is_dir() or count_images_in_dir(sub.get("path", "")) == 0:
-                    messagebox.showwarning("子集无图片", f"子集 [{sub.get('name', '')}] 目录无效或无图片，请前往【📂 数据与续炼】修正！")
-                    self.select_tab(1)
-                    return
-        else:
-            d_dir = self.var_data_dir.get().strip()
-            if not Path(d_dir).exists() or count_images_in_dir(d_dir) == 0:
-                messagebox.showwarning("图集为空", f"目录 {d_dir} 中未找到图片（支持 jpg/png/webp/bmp），请先选择包含图片与 .txt 标注的文件夹！")
-                self.select_tab(1)
-                return
 
         cleaned, err_msg = validate_training_params(self._collect_raw_params())
         if err_msg:

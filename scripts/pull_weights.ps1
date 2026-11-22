@@ -27,8 +27,9 @@ if (-not (Test-Path $OutputDir)) {
 kaggle kernels output $Kernel -p "$OutputDir"
 
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "`nWeights downloaded successfully to: $OutputDir" -ForegroundColor Green
+    Write-Host "`nWeights downloaded successfully to: $OutputDir (ZIP contains .safetensors + training_summary.json + metrics.jsonl)" -ForegroundColor Green
     Get-ChildItem -Recurse -Path "$OutputDir" -Filter "*.safetensors" | Select-Object Name, Length, LastWriteTime
+    Get-ChildItem -Recurse -Path "$OutputDir" -Filter "metrics.jsonl" | Select-Object Name, Length, LastWriteTime
 } else {
     Write-Host "`nFailed to download kernel output. Ensure kernel status is COMPLETE." -ForegroundColor Red
 }

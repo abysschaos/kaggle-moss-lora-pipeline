@@ -1,9 +1,10 @@
-param (
+﻿param (
     [string]$KernelPath = (Get-Item $PSScriptRoot\..).FullName
 )
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host ">>> Pushing OpenMOSS LoRA Training Pipeline to Kaggle <<<" -ForegroundColor Cyan
+Write-Host "    (提示: v1.6.0 起可直接在桌面 GUI【☁️ 云端遥控】零代码一键推送)" -ForegroundColor DarkGray
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 $metaFile = Join-Path $KernelPath "kernel-metadata.json"

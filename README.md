@@ -34,8 +34,8 @@
 
 - **全谱系底模与显存弹性档位**：本地与云端双轨同步支持 `MOSS-Image-Base`、`MOSS-Image-heal` 与 `MOSS-Image-SFT` 三大变体自动探测，提供 `auto / 6g / 8g / 12g / 16g` 五档精准校准显存配置（`MAX_TOKENS = 4352 / 6144 / 8192`）与 `1024 / 896 / 768 / 512` 动态分桶分辨率；支持 `--base_precision`（含 RTX 40 系+ `fp8_compute` + `FP8_DGRAD="16bit"` 守卫）与非 Heal 底模 `FP16_FIX="online"` 防溢出保护。
 - **三阶时序解耦与零重复消费下载**：支持全盘宽域扫描并零拷贝复用现有 ComfyUI 模型库，按需路由 Qwen3.5-9B 至主机内存执行 CPU 离线文本特征提取（当主机内存 ≥22GB 或 GPU ≥15GB 时智能优先选用全精度 BF16 文本编码器），随后由 GPU 提取 FLUX.2 VAE 潜向量并释放，最终在仅载入 5B DiT 与轻量适配器的状态下完成高精度微调。
-- **原生零黑框 Windows 桌面控制台与 5-Tab 分区看板 (`v1.7.1`)**：内建开源可审计 C# 启动器 [MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs)，1 秒无第三方依赖编译为原生 `MOSS_LoRA_Trainer.exe`；采用 `core/` + `ui/` 解耦架构与深色 `5-Tab` 选项卡工作区，支持在 Tab 1 顶部一键切换 **【目标算力】**（`💻 本机显卡 / ☁️ Kaggle 双卡 T4 / ⚡ Kaggle 单卡 T4`）并按双卡 `MAX_TOKENS=9216×2卡` 并发吞吐智能校准 8 套预设的 `GradAcc`、$\sqrt{B}$ 学习率、短步数 `EMA` 与存盘间隔（内置预估图数算步与推送前防过曝拦截）；右侧常驻纯原生 `tk.Canvas` 实时 Loss / EMA 折线图与 4 枚 KPI 卡片，内置 **【🩺 一键体检图集】**、**8 套实战预设模板**以及离线手册直读器。
-- **零代码 Kaggle 云端 API 一键遥控与成果回传 (`v1.7.0`)**：直接在本地 GUI 的【☁️ 云端遥控】选项卡完成 `kaggle.json` 凭据隔离保存，自由选择 **📦 本地打包上传至 Kaggle 私有数据集** 或 **🤗 云端直拉 Hugging Face 图集**（零本地上传，支持仓内子目录筛选与只读 Token 仅驻留内存），同步 Tab 1/2 全量超参数一键推送至 Kaggle `Dual-T4 DDP` / 单卡队列；内建 **超时自动存盘守护（默认 540 分钟触发优雅存盘并打包退出，严防 Kaggle 12h 硬中断白跑）**、**30 秒自动轮询**、**右侧实时拉取云端日志**、**🛑 停监控与网页 Stop 引导** 及高危二次确认 **🗑️ 强删云端任务**；完工后一键拉回并自动同步至 ComfyUI `models/loras/` 与右侧 Loss 曲线看板；另提供**零 API 手动上传导出包**，不写一行代码也能跑通云端炼丹。
+- **原生零黑框 Windows 桌面控制台与 5-Tab 分区看板 (`v1.7.2`)**：内建开源可审计 C# 启动器 [MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs)，1 秒无第三方依赖编译为原生 `MOSS_LoRA_Trainer.exe`；采用 `core/` + `ui/` 解耦架构与深色 `5-Tab` 选项卡工作区，支持在 Tab 1 顶部一键切换 **【目标算力】**（`💻 本机显卡 / ☁️ Kaggle 双卡 T4 / ⚡ Kaggle 单卡 T4`）并按双卡 `MAX_TOKENS=9216×2卡` 并发吞吐智能校准 8 套预设的 `GradAcc`、$\sqrt{B}$ 学习率、短步数 `EMA` 与存盘间隔（内置预估图数算步与推送前防过曝拦截）；右侧常驻纯原生 `tk.Canvas` 实时 Loss / EMA 折线图与 4 枚 KPI 卡片，内置 **【🩺 一键体检图集】**、**8 套实战预设模板**以及离线手册直读器。
+- **零代码 Kaggle 云端 API 一键遥控与成果回传 (`v1.7.2`)**：直接在本地 GUI 的【☁️ 云端遥控】选项卡完成 `kaggle.json` 凭据隔离保存，自由选择 **📦 本地打包上传至 Kaggle 私有数据集**（自动剔除隐藏/空文件并将图片与标注统一规范化为纯 ASCII 短名 `sample_XXXX`，解耦标题并在撞车时自动加随机后缀重试，清理过期上传缓存并透传真实服务端 HTTP 报错）或 **🤗 云端直拉 Hugging Face 图集**（零本地上传，支持仓内子目录筛选与只读 Token 仅驻留内存），同步 Tab 1/2 全量超参数一键推送至 Kaggle `Dual-T4 DDP` / 单卡队列；内建 **超时自动存盘守护（默认 540 分钟触发优雅存盘并打包退出，严防 Kaggle 12h 硬中断白跑）**、**30 秒自动轮询**、**右侧实时拉取云端日志**、**🛑 停监控与网页 Stop 引导** 及高危二次确认 **🗑️ 强删云端任务**；完工后一键拉回并自动同步至 ComfyUI `models/loras/` 与右侧 Loss 曲线看板；另提供**零 API 手动上传导出包**，不写一行代码也能跑通云端炼丹。
 - **全场景断点续炼与中途暂停存盘**：支持 `fresh / resume / init_from` 三大训练模式、双轨同步解析 `safetensors` 头部自动对齐已有架构（含 LoKr 因子与 `TRAIN_NORMS`）、训练中途随时点击【暂停并存盘】安全退出并保留权重，以及每 10 秒后台增量同步导出产物到专属目录与 ComfyUI `models/loras/`。
 - **高阶适配器防过拟合、多优化器与自适应调度体系**：双轨开放 LoKr 全参数（`--lokr_factor / --lokr_full_matrix / --lokr_decompose_both`）、`--train_norms`、三层 `DROPOUT`（含 DoRA `input_dropout` 强置 0 防护）、`AdamW / AdamW8bit Kernel / Muon` 优化器与 GPU 安全显存档位自动重映射、`Cosine / Constant` 调度、可配 `Warmup` 与 `EMA` 平滑、多种时间步分布（`moss / uniform / logit_normal`）、`--text_drop / --flip / --seed / --save_format`，以及默认折叠的 GUI 进阶抽屉兼顾小白零门槛与高阶精细微调。
 
@@ -79,7 +79,7 @@ flowchart LR
 ### 方式一：Windows 本地极速上手（3 步零黑框启动）
 
 #### 1. 获取项目代码与发行工具
-- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.7.1)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
+- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.7.2)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
 - **Git 命令行克隆**：
   ```bash
   git clone https://github.com/abysschaos/kaggle-moss-lora-pipeline.git
@@ -235,7 +235,7 @@ python train_local.py `
 
 ```text
 kaggle_moss_lora_pipeline/
-├── VERSION                                    # 单一版本信源 (1.7.1)
+├── VERSION                                    # 单一版本信源 (1.7.2)
 ├── LICENSE                                    # Apache License 2.0 开源协议
 ├── CHANGELOG.md                               # Keep a Changelog 1.1.0 演进记录
 ├── README.md                                  # 项目主文档与全双轨操作指南
@@ -254,7 +254,7 @@ kaggle_moss_lora_pipeline/
 ├── core/                                      # GUI 无界面业务逻辑内核包
 │   ├── __init__.py
 │   ├── config_store.py                        # 配置持久化、ComfyUI 宽域探测与曝光步数计算
-│   ├── kaggle_bridge.py                       # 零依赖 Kaggle CLI 桥接（上传/HF直拉配置/推送/实时日志/强删/回传/导出包）
+│   ├── kaggle_bridge.py                       # 零依赖 Kaggle CLI 桥接（安全短名打包/标题防撞车重试/HTTP抓包/HF直拉/推送/日志/强删/回传）
 │   ├── presets.py                             # 8 套声明式场景预设与默认高阶参数字典
 │   └── trainer_runner.py                      # 参数校验、54 参数 CLI 构建、优雅暂停与进程树强杀
 ├── ui/                                        # 5-Tab 桌面表现层组件包
@@ -323,16 +323,16 @@ kaggle_moss_lora_pipeline/
 
 ## 更新计划 (Roadmap)
 
-以下规划项已列入项目迭代路线图（当前稳定版本为 `v1.7.1`）：
+以下规划项已列入项目迭代路线图（当前稳定版本为 `v1.7.2`）：
 
 ### 1. v1.5.x 训练体验增强候选
 - **训练期定时样图预览 (`SAMPLE_EVERY` / `SAMPLE_PROMPTS`)**：配套显存安全守卫，在训练中途定期生成验证图以便直观评估收敛质量。
 - **扩展冷门适配器算法**：按需引入 `tlora` 与 `oft` 等专用微调结构。
 - **可选 `tags` 词表打标模式**：在坚持自然语言（`nl`）优先的前提下，为习惯 Danbooru 标签库的用户补充可选 `tags` 模板及 `shuffle` / `keep_first` 控制。
 
-### 2. 云端平台远程控制演进（v1.7.1+）
+### 2. 云端平台远程控制演进（v1.7.2+）
 - **✅ 已在 `v1.6.0` 交付 — Kaggle 无头一键云端引擎（[`core/kaggle_bridge.py`](core/kaggle_bridge.py) + Tab 4【☁️ 云端遥控】）**：支持本地图集（单目录/多子集）自动打包上传 Kaggle Private Dataset、全量 GUI 超参数自动注入并一键 `kernels push`、30 秒状态自动轮询、一键拉回解压与同步 ComfyUI/Loss 曲线，并附带零 API 手动上传导出包。
-- **✅ 已在 `v1.7.0 ~ v1.7.1` 交付 — HF 云端直拉、运行防护控台与双卡 T4 目标算力智能校准**：支持一键切换 `🤗 云端直拉 Hugging Face 图集`、`--max_run_minutes` 自动存盘守护、实时云端日志与停机/强删控制；支持 Tab 1/Tab 4 目标算力双向联动、8 套预设 Kaggle 双卡 T4 $\sqrt{B}$ 自适应缩放、HF 预估图数算步及推送前防过曝拦截。
+- **✅ 已在 `v1.7.0 ~ v1.7.2` 交付 — HF 云端直拉、运行防护控台、双卡 T4 目标算力智能校准与数据集上传加固**：支持一键切换 `🤗 云端直拉 Hugging Face 图集`、`--max_run_minutes` 自动存盘守护、实时云端日志与停机/强删控制；支持 Tab 1/Tab 4 目标算力双向联动、8 套预设 Kaggle 双卡 T4 $\sqrt{B}$ 自适应缩放、HF 预估图数算步及推送前防过曝拦截；`v1.7.2` 进一步新增纯 ASCII 短名打包 `sample_XXXX`、标题与 Slug 解耦及撞车自动加后缀重试、失效断点缓存清理与真实 HTTP 报错正文透传。
 - **后续候选 — 通用 SSH / SFTP 远端 GPU 控制台**：基于 `paramiko` 直连任意 Linux 云卡主机（AutoDL / RunPod / Vast.ai / 腾讯云 HAI），增量传图并实时流式回传 `metrics.jsonl`。
 
 ---

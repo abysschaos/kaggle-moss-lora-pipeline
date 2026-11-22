@@ -5,9 +5,12 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -411,23 +414,200 @@ def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict) -> dict:
 
 
 def _copy_image_txt_pairs(src_dir: Path, dst_dir: Path) -> tuple:
-    """将单目录中的有效图片及同名 .txt 标注复制到暂存目录，返回 (图片数, 标注数, 总字节数)。"""
+    """将单目录中的有效图片及同名 .txt 标注以纯 ASCII 安全短名复制到暂存目录，返回 (图片数, 标注数, 总字节数)。"""
     dst_dir.mkdir(parents=True, exist_ok=True)
     img_cnt, txt_cnt, total_bytes = 0, 0, 0
-    for item in sorted(src_dir.iterdir()):
+    for item in sorted(src_dir.iterdir(), key=lambda p: p.name.lower()):
+        if item.name.startswith(".") or item.name.startswith("._"):
+            continue
         if not item.is_file() or item.suffix.lower() not in SUPPORTED_IMAGE_EXTS:
             continue
-        dst_img = dst_dir / item.name
-        shutil.copy2(item, dst_img)
+        try:
+            if item.stat().st_size == 0:
+                continue
+        except OSError:
+            continue
+
         img_cnt += 1
+        stem = f"sample_{img_cnt:04d}"
+        dst_img = dst_dir / f"{stem}{item.suffix.lower()}"
+        shutil.copy2(item, dst_img)
         total_bytes += dst_img.stat().st_size
         src_txt = item.with_suffix(".txt")
         if src_txt.is_file():
-            dst_txt = dst_dir / src_txt.name
+            dst_txt = dst_dir / f"{stem}.txt"
             shutil.copy2(src_txt, dst_txt)
             txt_cnt += 1
             total_bytes += dst_txt.stat().st_size
     return img_cnt, txt_cnt, total_bytes
+
+
+def build_kaggle_dataset_title(slug: str, suffix: str = "") -> str:
+    """将连字符 Slug 转为合法且不易撞车的 Title Case 标题，确保总长严格处于 Kaggle 的 [6, 50] 区间。"""
+    tokens = re.findall(r"[A-Za-z0-9]+", str(slug or "").strip())
+    if tokens:
+        words = [tok.capitalize() for tok in tokens]
+        base = " ".join(words)
+        if words[0].lower() != "moss":
+            base = f"MOSS {base}"
+    else:
+        base = "MOSS LoRA Dataset"
+
+    sfx = re.sub(r"[^A-Za-z0-9]+", "", str(suffix or "").strip())
+    sfx_part = f" {sfx}" if sfx else ""
+    max_base_len = max(1, 50 - len(sfx_part))
+    clipped_base = base[:max_base_len].rstrip() or "MOSS"
+    title = f"{clipped_base}{sfx_part}".strip()
+    if len(title) < 6:
+        pad = " Dataset"
+        avail = max(1, 50 - len(pad) - len(sfx_part))
+        title = f"{clipped_base[:avail].rstrip()}{pad}{sfx_part}".strip()
+    return title[:50].rstrip()
+
+
+def _cleanup_stale_kaggle_upload_cache(cache_dir: Path = None) -> int:
+    """清理本地 .kaggle-uploads 中指向已失效临时压缩包的孤立断点缓存，返回清理文件数。"""
+    target_dir = Path(cache_dir) if cache_dir else (Path(tempfile.gettempdir()) / ".kaggle-uploads")
+    if not target_dir.is_dir():
+        return 0
+    removed = 0
+    for jf in target_dir.glob("*.json"):
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+            cached_path = str(data.get("path", "") or "").strip() if isinstance(data, dict) else ""
+            if not cached_path or not Path(cached_path).exists():
+                jf.unlink(missing_ok=True)
+                removed += 1
+        except Exception:
+            try:
+                jf.unlink(missing_ok=True)
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
+
+def _extract_kaggle_cli_error(output: str) -> str:
+    """识别 Kaggle CLI 在 rc=0 下的业务失败行及 HTTP 400 正文，命中则返回合并错误摘要。"""
+    markers = (
+        "dataset creation error:",
+        "dataset version creation error:",
+        "[kaggle api http ",
+        '"status":"error"',
+        '"status": "error"',
+    )
+    matched = []
+    seen = set()
+    for line in (output or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        low = stripped.lower()
+        if any(m in low for m in markers) and stripped not in seen:
+            seen.add(stripped)
+            matched.append(stripped)
+    return "\n".join(matched)[:500]
+
+
+def _resolve_kaggle_python_exe(cli: dict) -> str:
+    """若 CLI 为真实本机可执行的 Python Scripts\\kaggle.exe，返回同环境 python.exe 路径；否则返回空串回退 CLI。"""
+    cmd = cli.get("cmd") or []
+    if not cmd:
+        return ""
+    if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "kaggle":
+        return cmd[0] if Path(cmd[0]).is_file() else ""
+    exe = Path(cmd[0])
+    if not exe.is_file():
+        return ""
+    for cand in (
+        exe.parent.parent / "python.exe",
+        exe.parent / "python.exe",
+        exe.parent.parent / "bin" / "python",
+        exe.parent / "python",
+    ):
+        if cand.is_file():
+            return str(cand)
+    return ""
+
+
+_KAGGLE_DATASET_OP_RUNNER = """
+import sys
+import requests
+
+mode, folder, notes = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    from kagglesdk.kaggle_http_client import KaggleHttpClient
+    _orig_prep = KaggleHttpClient._prepare_response
+
+    def _dbg_prep(self, response_type, http_response):
+        if getattr(http_response, "status_code", 0) >= 400:
+            body = (getattr(http_response, "text", "") or "").strip()
+            if body:
+                print(f"[Kaggle API HTTP {http_response.status_code}] {body[:1000]}", flush=True)
+        return _orig_prep(self, response_type, http_response)
+
+    KaggleHttpClient._prepare_response = _dbg_prep
+except Exception:
+    pass
+
+from kaggle.api.kaggle_api_extended import KaggleApi
+
+api = KaggleApi()
+api.authenticate()
+try:
+    if mode == "version":
+        res = api.dataset_create_version(
+            folder=folder,
+            version_notes=notes,
+            quiet=False,
+            convert_to_csv=False,
+            delete_old_versions=False,
+            dir_mode="zip",
+        )
+    else:
+        res = api.dataset_create_new(
+            folder=folder,
+            public=False,
+            quiet=False,
+            convert_to_csv=False,
+            dir_mode="zip",
+        )
+except requests.exceptions.HTTPError as exc:
+    resp = getattr(exc, "response", None)
+    body = (getattr(resp, "text", "") or "").strip() if resp is not None else ""
+    if body:
+        print(f"[Kaggle API HTTP {getattr(resp, 'status_code', '?')}] {body[:1000]}", flush=True)
+    print(f"Dataset creation error: {exc}", flush=True)
+    sys.exit(1)
+
+status_str = str(getattr(res, "status", "") or "").lower()
+err_str = str(getattr(res, "error", "") or "").strip()
+if status_str != "ok":
+    print(f"Dataset creation error: {err_str or status_str or 'Unknown error'}", flush=True)
+    sys.exit(1)
+url_str = str(getattr(res, "url", "") or "").strip()
+if url_str:
+    print(f"Dataset operation succeeded: {url_str}", flush=True)
+""".strip()
+
+
+def _run_kaggle_dataset_op(mode: str, stage_dir: Path, notes: str, cli: dict, env: dict, on_log=None) -> tuple:
+    """优先使用带 HTTP 响应体抓包与 convert_to_csv=False 的 Python API 子进程；不可用时回退官方 CLI (-t)。"""
+    kaggle_py = _resolve_kaggle_python_exe(cli)
+    if kaggle_py:
+        cmd = [kaggle_py, "-u", "-c", _KAGGLE_DATASET_OP_RUNNER, mode, str(stage_dir), notes]
+    elif mode == "version":
+        cmd = [*cli["cmd"], "datasets", "version", "-p", str(stage_dir), "-m", notes, "-r", "zip", "-t"]
+    else:
+        cmd = [*cli["cmd"], "datasets", "create", "-p", str(stage_dir), "-r", "zip", "-t"]
+    return _stream_subprocess(cmd, stage_dir, on_log=on_log, env=env)
+
+
+def _format_dataset_error(prefix: str, rc: int, out: str, err_hint: str) -> str:
+    tail = (out or "").strip()[-600:]
+    if err_hint:
+        return f"{prefix} (Exit={rc})：\n{err_hint}\n\n{tail}"
+    return f"{prefix} (Exit={rc})：\n{tail}"
 
 
 def _build_subset_plan(raw_params: dict) -> list:
@@ -537,8 +717,9 @@ def stage_dataset_bundle(raw_params: dict, username: str, dataset_slug: str, sta
     stage_dir.mkdir(parents=True, exist_ok=True)
 
     stats = _populate_dataset_stage_dir(stage_dir, raw_params)
+    title = build_kaggle_dataset_title(slug)
     metadata = {
-        "title": slug,
+        "title": title,
         "id": f"{user}/{slug}",
         "licenses": [{"name": "CC0-1.0"}],
     }
@@ -548,6 +729,7 @@ def stage_dataset_bundle(raw_params: dict, username: str, dataset_slug: str, sta
     )
     stats["dataset_id"] = f"{user}/{slug}"
     stats["dataset_slug"] = slug
+    stats["dataset_title"] = title
     return stage_dir, stats
 
 
@@ -558,16 +740,18 @@ def upload_kaggle_dataset(
     cli_info: dict = None,
     kaggle_json_path: Path = None,
     on_log=None,
+    verify_poll_attempts: int = 3,
 ) -> tuple:
-    """智能创建或更新 Kaggle 私有数据集（若已存在则无缝转为推送新版本）。"""
+    """智能创建或更新 Kaggle 私有数据集：自动清洗缓存、防标题撞车重试、抓全报错正文并异步验活。"""
     cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
     if not cli.get("found"):
         return False, "未找到 Kaggle CLI，请先安装并配置凭证。"
 
+    _cleanup_stale_kaggle_upload_cache()
     env = _build_kaggle_env(kaggle_json_path=kaggle_json_path)
-    exists = False
-    try:
-        st_res = subprocess.run(
+
+    def _query_status():
+        return subprocess.run(
             [*cli["cmd"], "datasets", "status", dataset_id],
             capture_output=True,
             text=True,
@@ -577,38 +761,95 @@ def upload_kaggle_dataset(
             env=env,
             creationflags=NO_WINDOW,
         )
+
+    exists = False
+    try:
+        st_res = _query_status()
         exists = (st_res.returncode == 0)
     except Exception:
         exists = False
 
     notes = (version_notes or "Sync dataset from MOSS LoRA Trainer GUI").strip()
     if exists:
-        cmd = [*cli["cmd"], "datasets", "version", "-p", str(stage_dir), "-m", notes, "-r", "zip"]
         if on_log:
             on_log(f"[Kaggle 图集] 检测到私有数据集 {dataset_id} 已存在，正在推送新版本...\n")
-        rc, out = _stream_subprocess(cmd, stage_dir, on_log=on_log, env=env)
-        if rc == 0:
+        rc, out = _run_kaggle_dataset_op("version", Path(stage_dir), notes, cli, env, on_log=on_log)
+        err_hint = _extract_kaggle_cli_error(out)
+        if rc == 0 and not err_hint:
             return True, f"已成功更新私有数据集版本：{dataset_id}"
-        return False, f"更新数据集失败 (Exit={rc})：\n{out[-300:]}"
+        return False, _format_dataset_error("更新数据集失败", rc, out, err_hint)
 
-    create_cmd = [*cli["cmd"], "datasets", "create", "-p", str(stage_dir), "-r", "zip"]
     if on_log:
         on_log(f"[Kaggle 图集] 正在创建私有数据集 {dataset_id}...\n")
-    rc, out = _stream_subprocess(create_cmd, stage_dir, on_log=on_log, env=env)
-    if rc == 0:
-        return True, f"已成功创建并上传私有数据集：{dataset_id}"
+    rc, out = _run_kaggle_dataset_op("create", Path(stage_dir), notes, cli, env, on_log=on_log)
+    err_hint = _extract_kaggle_cli_error(out)
+    effective_ok = (rc == 0 and not err_hint)
 
-    lower = out.lower()
-    if "already exists" in lower or "409" in lower or "already in use" in lower:
+    if not effective_ok:
+        combined_lower = f"{err_hint}\n{out}".lower()
+        if "title" in combined_lower and "already in use" in combined_lower:
+            meta_file = Path(stage_dir) / "dataset-metadata.json"
+            slug_part = dataset_id.split("/", 1)[1] if "/" in dataset_id else dataset_id
+            new_title = build_kaggle_dataset_title(slug_part, suffix=secrets.token_hex(2))
+            if meta_file.is_file():
+                try:
+                    meta_obj = json.loads(meta_file.read_text(encoding="utf-8"))
+                    meta_obj["title"] = new_title
+                    meta_file.write_text(json.dumps(meta_obj, indent=2, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
+            if on_log:
+                on_log(f"[Kaggle 图集] 检测到标题占用，已自动更换防撞车标题 [{new_title}] 并重试创建...\n")
+            rc, out = _run_kaggle_dataset_op("create", Path(stage_dir), notes, cli, env, on_log=on_log)
+            err_hint = _extract_kaggle_cli_error(out)
+            effective_ok = (rc == 0 and not err_hint)
+            combined_lower = f"{err_hint}\n{out}".lower()
+
+        if not effective_ok and (
+            "already exists" in combined_lower
+            or "409" in combined_lower
+            or ("already in use" in combined_lower and "title" not in combined_lower)
+        ):
+            if on_log:
+                on_log(f"[Kaggle 图集] 数据集 {dataset_id} 已存在，自动切换为增量版本推送...\n")
+            rc2, out2 = _run_kaggle_dataset_op("version", Path(stage_dir), notes, cli, env, on_log=on_log)
+            err_hint2 = _extract_kaggle_cli_error(out2)
+            if rc2 == 0 and not err_hint2:
+                return True, f"已自动更新现有私有数据集版本：{dataset_id}"
+            return False, _format_dataset_error("增量更新数据集失败", rc2, out2, err_hint2)
+
+    if not effective_ok:
+        return False, _format_dataset_error("上传私有数据集失败", rc, out, err_hint)
+
+    # 创建受理后做轻量异步验活，确认云端解包是否真正进入 ready 状态
+    if int(verify_poll_attempts) > 0:
+        poll_delays = (3, 5, 6)
+        for idx in range(int(verify_poll_attempts)):
+            time.sleep(poll_delays[min(idx, len(poll_delays) - 1)])
+            try:
+                st_after = _query_status()
+                st_txt = f"{st_after.stdout or ''} {st_after.stderr or ''}".strip()
+                if st_after.returncode == 0:
+                    low_st = st_txt.lower()
+                    if "ready" in low_st:
+                        if on_log:
+                            on_log(f"[Kaggle 验活] 数据集 {dataset_id} 云端解包完成，状态：ready ✅\n")
+                        return True, f"已成功创建并就绪私有数据集：{dataset_id}"
+                    if "error" in low_st:
+                        return False, f"Kaggle 后台处理数据集失败：{st_txt}"
+            except Exception:
+                pass
         if on_log:
-            on_log(f"[Kaggle 图集] 数据集 {dataset_id} 已存在，自动切换为增量版本推送...\n")
-        ver_cmd = [*cli["cmd"], "datasets", "version", "-p", str(stage_dir), "-m", notes, "-r", "zip"]
-        rc2, out2 = _stream_subprocess(ver_cmd, stage_dir, on_log=on_log, env=env)
-        if rc2 == 0:
-            return True, f"已自动更新现有私有数据集版本：{dataset_id}"
-        return False, f"增量更新数据集失败 (Exit={rc2})：\n{out2[-300:]}"
+            on_log(
+                f"[Kaggle 验活] 数据集 {dataset_id} 已受理创建但云端仍在后台解包索引；"
+                f"如随即推送报错 403，请等待 15~30 秒后重试或查看 https://www.kaggle.com/datasets/{dataset_id}\n"
+            )
+        return (
+            True,
+            f"已提交创建私有数据集：{dataset_id}（云端正在后台索引，建议稍候 15~30 秒或访问 https://www.kaggle.com/datasets/{dataset_id} 确认就绪后再推送）",
+        )
 
-    return False, f"上传私有数据集失败 (Exit={rc})：\n{out[-300:]}"
+    return True, f"已成功创建并上传私有数据集：{dataset_id}"
 
 
 def inject_cloud_config_into_train_moss(source_script: Path, config_payload: dict) -> str:

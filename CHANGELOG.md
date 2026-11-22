@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
 
+## [1.7.2] - 2026-11-23
+
+### Fixed
+- **Kaggle 数据集上传防命名非法、标题撞车与虚假报错全面加固 (`core/kaggle_bridge.py`, `core/__init__.py`)**：
+  - `_copy_image_txt_pairs()` 自动忽略 `.`/`._` 隐藏文件及 0 字节损坏图片，并将打包入数据集的图集配对文件统一规范重命名为纯 ASCII 安全短名（`sample_0001.jpg` / `sample_0001.txt`），避免超长 Danbooru 原名及括号等特殊字符在 Kaggle 后端解析阶段触发异常。
+  - 新增并导出 `build_kaggle_dataset_title()`，将数据集展示 `title` 与标识 `slug` 解耦（去连字符标题化并限制在 6~50 字符），避免同名占用导致无法创建。
+  - 修复 `Kaggle CLI 2.2.5` 打印 `Dataset creation error: ...` 却依然退出 `returncode == 0` 以及 `kagglesdk` 吞掉 HTTP 400/4xx 响应正文的问题：新增 `_extract_kaggle_cli_error()`、`_resolve_kaggle_python_exe()` 与内置执行器 `_KAGGLE_DATASET_OP_RUNNER`，通过包装 `KaggleHttpClient._prepare_response` 透传 `[Kaggle API HTTP <code>] <body>` 真实响应并在创建/更新时显式关闭 `convert_to_csv=False`（CLI 回退自动附带 `-t`）；当捕捉到 `The requested title ... already in use` 冲突时自动追加随机 4 位十六进制后缀改写 `dataset-metadata.json` 并重试。
+  - 新增 `_cleanup_stale_kaggle_upload_cache()` 在打包上传前清理指向失效临时压缩包的 `.kaggle-uploads/*.json` 残留缓存；`upload_kaggle_dataset()` 新增 `verify_poll_attempts` 执行创建后短轮询校验。
+
 ## [1.7.1] - 2026-11-23
 
 ### Added
@@ -230,7 +239,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.1...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.2...HEAD
+[1.7.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.4...v1.6.0

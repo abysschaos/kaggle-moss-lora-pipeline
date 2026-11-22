@@ -28,6 +28,7 @@ from .presets import (
 from .kaggle_bridge import (
     KAGGLE_ACCELERATORS,
     build_cloud_config_payload,
+    build_kaggle_dataset_title,
     delete_kaggle_kernel,
     export_manual_upload_bundle,
     extract_kaggle_outputs_from_dir,
@@ -92,6 +93,7 @@ __all__ = [
     "import_kaggle_json",
     "test_kaggle_connection",
     "sanitize_kaggle_slug",
+    "build_kaggle_dataset_title",
     "build_cloud_config_payload",
     "normalize_hf_dataset_repo",
     "stage_dataset_bundle",

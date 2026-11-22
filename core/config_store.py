@@ -26,7 +26,7 @@ COMPUTE_TARGET_PROFILES = {
 }
 
 
-def load_app_version(fallback: str = "1.7.1") -> str:
+def load_app_version(fallback: str = "1.7.2") -> str:
     """读取项目根目录 VERSION 单一版本信源，缺失时安全回退。"""
     ver_file = PROJECT_ROOT / "VERSION"
     try:

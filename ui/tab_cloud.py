@@ -1,4 +1,4 @@
-"""Tab 4 (☁️ 云端遥控): Foolproof Kaggle Cloud API remote workbench (Local / HF direct pull, live logs, runtime guard & stop controls)."""
+"""Tab 4 (☁️ 云端遥控): Foolproof Kaggle Cloud API remote workbench (6-Mirror Temp URL / HF Private / Cloudflare R2 / Kaggle Dataset)."""
 
 import tkinter as tk
 from tkinter import ttk
@@ -201,11 +201,65 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
         src_row,
         variable=app.var_kaggle_dataset_source,
         options=[
-            ("local", "📦 本地打包上传到 Kaggle", c["accent_blue"]),
-            ("hf", "🤗 云端直拉 Hugging Face 图集", c["accent_green"]),
+            ("url", "🔗 临时外链 (6站免配)", c["accent_green"]),
+            ("hf", "🤗 HF 私有仓库", c["accent_yellow"]),
+            ("r2", "☁️ R2 私有存储", c["accent_peach"]),
+            ("local", "📦 Kaggle 私有集", c["accent_blue"]),
         ],
         command=app.on_cloud_dataset_source_changed,
     ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    # 动态源区 U：外链自动中转直拉（6 站高可用容灾）
+    app.cloud_url_frame = tk.Frame(cfg_card, bg=c["card_bg"], padx=8, pady=6)
+    app.cloud_url_frame.columnconfigure(1, weight=1)
+
+    tk.Label(
+        app.cloud_url_frame,
+        text="外链 ZIP 直拉地址:",
+        bg=c["card_bg"],
+        fg=c["accent_green"],
+        font=(c["font_family"], 8, "bold"),
+    ).grid(row=0, column=0, sticky="w", padx=(0, 6), pady=(0, 4))
+    ent_ext_url = tk.Entry(
+        app.cloud_url_frame,
+        textvariable=app.var_external_dataset_url,
+        bg=c["input_bg"],
+        fg=c["text_main"],
+        insertbackground=c["text_main"],
+        relief=tk.FLAT,
+        font=("Consolas", 8),
+    )
+    ent_ext_url.grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(0, 4))
+    ent_ext_url.bind("<KeyRelease>", lambda _e: app.refresh_cloud_sync_summary())
+    HoverTooltip(
+        ent_ext_url,
+        "可留空自动生成，或手动粘贴外部图集 .zip 直链（支持 | 分隔多镜像）。\n"
+        "自动上传按 temp.sh / x0.at / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org 顺序选取 3 条可用线路容灾。",
+    )
+    FlatButton(
+        app.cloud_url_frame,
+        text="🧹 清空以重新上传",
+        bg=c["input_bg"],
+        fg=c["accent_peach"],
+        font=(c["font_family"], 8),
+        padx=7,
+        pady=3,
+        command=app.clear_external_dataset_url,
+    ).grid(row=0, column=2, pady=(0, 4))
+
+    url_hint_lbl = tk.Label(
+        app.cloud_url_frame,
+        text="💡 可留空：点【📤 1. 仅打包图集上传外链】或【🚀 一键全自动】自动打包上传至 6 站容灾节点"
+             "（temp.sh / x0.at / filebin.net / whalebone / trystocare / tmpfiles），Kaggle 开机 curl 直拉进 /tmp/，免建 Kaggle 数据集。",
+        bg=c["card_bg"],
+        fg=c["text_sub"],
+        font=(c["font_family"], 8),
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=540,
+    )
+    url_hint_lbl.grid(row=1, column=0, columnspan=3, sticky="ew")
+    scroll.register_wrap_label(url_hint_lbl)
 
     # 动态源区 A：本地打包上传时的私有图集 Slug
     app.cloud_local_slug_frame = tk.Frame(cfg_card, bg=c["bg_dark"])
@@ -223,12 +277,12 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
     ent_ds.grid(row=0, column=1, sticky="ew", pady=(0, 4))
     HoverTooltip(ent_ds, "Kaggle 私有数据集标识：仅小写字母/数字/连字符(-)，6~50位；点下方【自动生成】自动转换。")
 
-    # 动态源区 B：免本地上传直拉 Hugging Face Dataset
+    # 动态源区 B：永久私有仓库一（Hugging Face Private Dataset 创建/上传 + 直拉）
     app.cloud_hf_frame = tk.Frame(cfg_card, bg=c["card_bg"], padx=8, pady=6)
     app.cloud_hf_frame.columnconfigure(1, weight=2)
     app.cloud_hf_frame.columnconfigure(3, weight=1)
 
-    tk.Label(app.cloud_hf_frame, text="HF 仓库 / 链接:", bg=c["card_bg"], fg=c["accent_green"], font=(c["font_family"], 8, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 5), pady=(0, 4))
+    tk.Label(app.cloud_hf_frame, text="HF 仓库 / 链接:", bg=c["card_bg"], fg=c["accent_yellow"], font=(c["font_family"], 8, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 5), pady=(0, 4))
     ent_hf_repo = tk.Entry(
         app.cloud_hf_frame,
         textvariable=app.var_hf_dataset_repo,
@@ -242,8 +296,8 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
     ent_hf_repo.bind("<KeyRelease>", lambda _e: app.refresh_cloud_sync_summary())
     HoverTooltip(
         ent_hf_repo,
-        "填写 Hugging Face Dataset 仓库 ID（如 owner/my-dataset）或完整网页 URL。\n"
-        "仓库内放图片+同名 .txt（也可直接放多子集文件夹 + subsets_cloud.json），云端开机直拉免本地上传！",
+        "填写 Hugging Face Dataset 仓库 ID（如 你的用户名/my-private-style）或完整网页 URL。\n"
+        "免费账号享 100GB 永久私有空间；开启下方自动上传后会自动建立 Private 私有仓库并上传图集与 .txt / subsets_cloud.json。",
     )
 
     tk.Label(app.cloud_hf_frame, text="仓内子目录:", bg=c["card_bg"], fg=c["text_main"], font=(c["font_family"], 8)).grid(row=0, column=2, sticky="w", padx=(0, 5), pady=(0, 4))
@@ -257,9 +311,9 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
         font=("Consolas", 8),
     )
     ent_hf_sub.grid(row=0, column=3, sticky="ew", pady=(0, 4))
-    HoverTooltip(ent_hf_sub, "可选：如果一个 HF 仓库下分了好几个子文件夹，填写其中一个（如 chars/makima）；整个仓库都是图集则留空。")
+    HoverTooltip(ent_hf_sub, "可选：如果共用同一个 HF 私有仓库分画风存放（如 chars/makima），填子目录路径；单独建库则留空。")
 
-    tk.Label(app.cloud_hf_frame, text="HF 只读 Token:", bg=c["card_bg"], fg=c["text_main"], font=(c["font_family"], 8)).grid(row=1, column=0, sticky="w", padx=(0, 5))
+    tk.Label(app.cloud_hf_frame, text="HF Access Token:", bg=c["card_bg"], fg=c["text_main"], font=(c["font_family"], 8)).grid(row=1, column=0, sticky="w", padx=(0, 5), pady=(0, 5))
     ent_hf_tok = tk.Entry(
         app.cloud_hf_frame,
         textvariable=app.var_hf_token,
@@ -270,11 +324,142 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
         relief=tk.FLAT,
         font=("Consolas", 8),
     )
-    ent_hf_tok.grid(row=1, column=1, columnspan=3, sticky="ew")
+    ent_hf_tok.grid(row=1, column=1, columnspan=3, sticky="ew", pady=(0, 5))
     HoverTooltip(
         ent_hf_tok,
-        "公开仓库留空即可；私有 HF 数据集请填只读 Access Token（绝不写入 local_config.json，仅注入私有 Kaggle 脚本运行期使用；也可改在 Kaggle Secrets 配置 HF_TOKEN）。",
+        "自动建库并上传本地图集需填入具备 Write 权限的 HF Token；仅拉取已有私有仓库填 Read Token 即可。\n"
+        "Token 绝不写入 local_config.json，仅驻留内存并在私有 Kaggle 内核运行时拉取使用。",
     )
+
+    ToggleButton(
+        app.cloud_hf_frame,
+        variable=app.var_hf_upload_local,
+        text_on="📤 开炼前自动将本地图集上传至该 HF 私有仓库",
+        text_off="⚡ 仅直拉已有 HF 仓库 (免本地重传)",
+        on_bg=c["accent_yellow"],
+        padx=8,
+        pady=3,
+        command=app.on_cloud_hf_upload_toggle,
+    ).grid(row=2, column=0, columnspan=4, sticky="w")
+
+    # 动态源区 R：永久私有仓库二（Cloudflare R2 对象存储私有桶 + SigV4 预签名直链）
+    app.cloud_r2_frame = tk.Frame(cfg_card, bg=c["card_bg"], padx=8, pady=6)
+    app.cloud_r2_frame.columnconfigure(1, weight=2)
+    app.cloud_r2_frame.columnconfigure(3, weight=2)
+    app.cloud_r2_frame.columnconfigure(5, weight=1)
+
+    tk.Label(app.cloud_r2_frame, text="Account ID:", bg=c["card_bg"], fg=c["accent_peach"], font=(c["font_family"], 8, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
+    ent_r2_acct = tk.Entry(
+        app.cloud_r2_frame,
+        textvariable=app.var_r2_account_id,
+        bg=c["input_bg"],
+        fg=c["text_main"],
+        insertbackground=c["text_main"],
+        relief=tk.FLAT,
+        font=("Consolas", 8),
+    )
+    ent_r2_acct.grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(0, 4))
+    ent_r2_acct.bind("<KeyRelease>", lambda _e: app.refresh_cloud_sync_summary())
+
+    tk.Label(app.cloud_r2_frame, text="Bucket 桶名:", bg=c["card_bg"], fg=c["text_main"], font=(c["font_family"], 8)).grid(row=0, column=2, sticky="w", padx=(0, 4), pady=(0, 4))
+    ent_r2_bkt = tk.Entry(
+        app.cloud_r2_frame,
+        textvariable=app.var_r2_bucket,
+        bg=c["input_bg"],
+        fg=c["text_main"],
+        insertbackground=c["text_main"],
+        relief=tk.FLAT,
+        font=("Consolas", 8),
+    )
+    ent_r2_bkt.grid(row=0, column=3, sticky="ew", padx=(0, 6), pady=(0, 4))
+    ent_r2_bkt.bind("<KeyRelease>", lambda _e: app.refresh_cloud_sync_summary())
+
+    tk.Label(app.cloud_r2_frame, text="前缀:", bg=c["card_bg"], fg=c["text_main"], font=(c["font_family"], 8)).grid(row=0, column=4, sticky="w", padx=(0, 4), pady=(0, 4))
+    tk.Entry(
+        app.cloud_r2_frame,
+        textvariable=app.var_r2_prefix,
+        bg=c["input_bg"],
+        fg=c["text_main"],
+        insertbackground=c["text_main"],
+        relief=tk.FLAT,
+        font=("Consolas", 8),
+    ).grid(row=0, column=5, sticky="ew", pady=(0, 4))
+
+    tk.Label(app.cloud_r2_frame, text="Access Key ID:", bg=c["card_bg"], fg=c["text_main"], font=(c["font_family"], 8)).grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
+    tk.Entry(
+        app.cloud_r2_frame,
+        textvariable=app.var_r2_access_key_id,
+        bg=c["input_bg"],
+        fg=c["text_main"],
+        insertbackground=c["text_main"],
+        relief=tk.FLAT,
+        font=("Consolas", 8),
+    ).grid(row=1, column=1, sticky="ew", padx=(0, 6), pady=(0, 4))
+
+    tk.Label(app.cloud_r2_frame, text="Secret Key:", bg=c["card_bg"], fg=c["text_main"], font=(c["font_family"], 8)).grid(row=1, column=2, sticky="w", padx=(0, 4), pady=(0, 4))
+    ent_r2_sec = tk.Entry(
+        app.cloud_r2_frame,
+        textvariable=app.var_r2_secret_access_key,
+        show="*",
+        bg=c["input_bg"],
+        fg=c["text_main"],
+        insertbackground=c["text_main"],
+        relief=tk.FLAT,
+        font=("Consolas", 8),
+    )
+    ent_r2_sec.grid(row=1, column=3, sticky="ew", padx=(0, 6), pady=(0, 4))
+    HoverTooltip(
+        ent_r2_sec,
+        "Cloudflare R2 S3 API Secret Access Key（绝不写入 local_config.json；点击右侧保存将写入 ~/.kaggle/r2_credentials.json 供本机复用）。",
+    )
+
+    FlatButton(
+        app.cloud_r2_frame,
+        text="💾 保存 R2 密钥",
+        bg=c["input_bg"],
+        fg=c["accent_green"],
+        font=(c["font_family"], 8, "bold"),
+        padx=7,
+        pady=3,
+        command=app.save_r2_credentials_ui,
+    ).grid(row=1, column=4, columnspan=2, sticky="ew", pady=(0, 4))
+
+    tk.Label(app.cloud_r2_frame, text="R2 预签名直链:", bg=c["card_bg"], fg=c["text_main"], font=(c["font_family"], 8)).grid(row=2, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
+    ent_r2_url = tk.Entry(
+        app.cloud_r2_frame,
+        textvariable=app.var_r2_dataset_url,
+        bg=c["input_bg"],
+        fg=c["text_main"],
+        insertbackground=c["text_main"],
+        relief=tk.FLAT,
+        font=("Consolas", 8),
+    )
+    ent_r2_url.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(0, 6), pady=(0, 4))
+    ent_r2_url.bind("<KeyRelease>", lambda _e: app.refresh_cloud_sync_summary())
+
+    FlatButton(
+        app.cloud_r2_frame,
+        text="🧹 清空重传",
+        bg=c["input_bg"],
+        fg=c["accent_peach"],
+        font=(c["font_family"], 8),
+        padx=7,
+        pady=3,
+        command=app.clear_r2_dataset_url,
+    ).grid(row=2, column=4, columnspan=2, sticky="ew", pady=(0, 4))
+
+    r2_hint_lbl = tk.Label(
+        app.cloud_r2_frame,
+        text="💡 R2 免费含 10GB 永久私有空间且零出站流量费；桶可完全保持私有，上传后自动签发 7 天有效 AWS4 预签名 GET 直链（密钥仅存 ~/.kaggle/r2_credentials.json）。",
+        bg=c["card_bg"],
+        fg=c["text_sub"],
+        font=(c["font_family"], 8),
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=540,
+    )
+    r2_hint_lbl.grid(row=3, column=0, columnspan=6, sticky="ew")
+    scroll.register_wrap_label(r2_hint_lbl)
 
     # 共享云端任务 Slug 行（锚点位于动态区下方）
     app.cloud_kernel_slug_anchor = tk.Frame(cfg_card, bg=c["bg_dark"])

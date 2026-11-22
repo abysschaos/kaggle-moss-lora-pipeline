@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
 
+## [1.8.0] - 2026-11-23
+
+### Added
+- **四模多源云端图集直拉引擎（6 站临时外链容灾 / HF 私有仓库一键上传与直拉 / Cloudflare R2 私有存储 / Kaggle Dataset，[`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`train_moss.py`](train_moss.py) / [`ui/tab_cloud.py`](ui/tab_cloud.py) / [`ui/app.py`](ui/app.py)）**：
+  - **6 站免登录外链自动中转直拉 (`url` 模式)**：新增 `stage_external_dataset_zip()`、`upload_zip_to_external_mirrors()` 与 `upload_external_dataset()`，将单/多子集图集打包为纯 ASCII 短名 `_direct.zip` 并按 `temp.sh -> x0.at -> filebin.net -> transfer.whalebone.io -> ul.sto.care (trystocare.com) -> tmpfiles.org` 优先级选取多达 3 条可用线路生成 `|` 容灾直链；`train_moss.py` 新增 `_download_dataset_archive()`（支持 `temp.sh` POST 穿透、`filebin.net` `verified` Cookie 直拉、`tmpfiles.org` 动态 `/dl/` 提取与 `curl -g` 通用 GET，并前置校验 `zipfile.is_zipfile` 且自动探测单目录 `images/` 与多子集 `subsets_cloud.json`）。
+  - **永久私有仓库一 · Hugging Face Private Dataset 一键创建/上传 + 直拉 (`hf` 模式升级)**：新增 `upload_dataset_to_hf_repo()`（缺失本地 `huggingface_hub` 时自动探测桥接 ComfyUI/系统已装环境），Tab 4 新增【开炼前自动将本地图集上传至该 HF 私有仓库】开关，一键调用 `HfApi(private=True, exist_ok=True)` 创建私有仓库并同步图片与 `.txt` / `subsets_cloud.json` 后由 Kaggle 容器直拉训练。
+  - **永久私有仓库二 · Cloudflare R2 私有对象存储 (`r2` 模式)**：纯 Python 标准库零依赖实现 AWS Signature Version 4 (`AWS4-HMAC-SHA256`, `region="auto"`, `UNSIGNED-PAYLOAD`) 预签名生成器 `generate_r2_presigned_url()` 与 `upload_dataset_to_cloudflare_r2()`，存储桶保持 100% 私有，上传 ZIP 后自动签发 7 天有效 `GET` 预签名直链注入 Kaggle 执行（支持 `r2_credentials.json` 密钥单独隔离保存）。
+  - `stage_kernel_bundle()` 在 `url / hf / r2` 三种云端直拉模式下统一将 `kernel-metadata.json` 中的 `dataset_sources` 置为空列表 `[]`，彻底规避 Kaggle Dataset 创建审核阻塞与误报。
+- **自动化测试套件 (`tests/test_external_url_flow.py`)**：新增 8 项 `unittest` 单元测试覆盖单/多子集 ZIP 打包、6 站镜像响应解析、SigV4 预签名与 `--dry_config_check` 签名脱敏、R2/HF 私有上传链路、403 `datasets.get` 预检误报抑制以及本地 HTTP 服务多镜像容灾回退。
+
+### Fixed & Security
+- **修复 Kaggle 新建数据集 403 `datasets.get` 误报弹窗**：改进 `_KAGGLE_DATASET_OP_RUNNER` 仅在实际失败时输出捕获的 HTTP 错误并忽略 `KaggleApi.dataset_create_new` 内部捕获的已知 `datasets.get` 403 预检请求，确保创建成功时不再误报失败。
+- **密钥与预签名参数脱敏**：R2 Secret Key 单独存至 `~/.kaggle/r2_credentials.json`（`0o600`）且 `.gitignore` 新增 `r2_credentials.json`；`train_moss.py --dry_config_check` 自动对 `dataset_url` 中的 `X-Amz-Signature=...` 执行 `***` 掩码输出；`notebooks/kaggle_moss_lora_training.ipynb` 同步支持 `DATASET_URL` 参数。
+
 ## [1.7.2] - 2026-11-23
 
 ### Fixed
@@ -239,7 +253,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.2...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.2...v1.8.0
 [1.7.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.6.0...v1.7.0

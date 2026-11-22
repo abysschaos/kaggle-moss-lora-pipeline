@@ -23,7 +23,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.7.2"
+    return "1.8.0"
 
 
 def _normalize_hf_dataset_repo(raw: str) -> str:
@@ -39,6 +39,88 @@ def _normalize_hf_dataset_repo(raw: str) -> str:
     if len(parts) >= 2:
         return f"{parts[0]}/{parts[1]}"
     return text
+
+
+def _run_curl_download(curl_args: list, dest_zip: str) -> None:
+    """运行 curl 下载外链文件；对不支持 --retry-all-errors 的旧版 curl 自动降级重试。"""
+    if os.path.exists(dest_zip):
+        try:
+            os.remove(dest_zip)
+        except OSError:
+            pass
+    base_cmd = ["curl", "-g", "-sSL", "--connect-timeout", "20", "--max-time", "600", "--retry", "3", "--retry-delay", "2"]
+    res = subprocess.run([*base_cmd, "--retry-all-errors", *curl_args, "-o", dest_zip], capture_output=True, text=True)
+    if res.returncode == 2:
+        res = subprocess.run([*base_cmd, *curl_args, "-o", dest_zip], capture_output=True, text=True)
+    if res.returncode != 0 and res.stderr:
+        print(f" [External URL] curl stderr ({res.returncode}): {res.stderr.strip()[:200]}", flush=True)
+
+
+def _download_dataset_archive(raw_url_spec: str, dest_zip: str) -> str:
+    """
+    下载外链数据集 ZIP 归档；支持以 '|' 分隔的多镜像容灾，并自动适配 temp.sh / filebin.net / tmpfiles.org 与通用直链。
+    返回实际下载成功的镜像 URL；全部失败时抛出 RuntimeError。
+    """
+    candidates = [u.strip() for u in str(raw_url_spec or "").split("|") if u.strip()]
+    if not candidates:
+        raise ValueError("Empty --dataset_url specification.")
+
+    Path(dest_zip).parent.mkdir(parents=True, exist_ok=True)
+    errors = []
+
+    for idx, url in enumerate(candidates, start=1):
+        print(f"\n>>> Fetching dataset archive from external URL [{idx}/{len(candidates)}]: {url} ...", flush=True)
+        low = url.lower()
+        attempts = []
+        if "temp.sh/" in low:
+            attempts = [
+                ("temp.sh POST", ["-X", "POST", url]),
+                ("temp.sh GET", [url]),
+            ]
+        elif "filebin.net/" in low:
+            attempts = [("filebin cookie GET", ["-b", "verified=2024-05-24", url])]
+        elif "tmpfiles.org/" in low:
+            dl_url = url
+            if "/dl/" not in low:
+                page_res = subprocess.run(
+                    ["curl", "-sSL", "--connect-timeout", "20", "--max-time", "60", "--retry", "3", url],
+                    capture_output=True,
+                    text=True,
+                    errors="ignore",
+                )
+                m = re.search(r'href=["\'](https?://tmpfiles\.org/dl/[^"\']+)["\']', page_res.stdout or "", re.IGNORECASE)
+                if m:
+                    dl_url = m.group(1)
+                else:
+                    dl_url = re.sub(r"(https?://tmpfiles\.org)/", r"\1/dl/", url, count=1, flags=re.IGNORECASE)
+            attempts = [("tmpfiles GET", [dl_url])]
+        else:
+            attempts = [("direct GET", [url])]
+
+        for mode_label, c_args in attempts:
+            try:
+                _run_curl_download(c_args, dest_zip)
+                if os.path.exists(dest_zip) and os.path.getsize(dest_zip) > 256 and zipfile.is_zipfile(dest_zip):
+                    mb = os.path.getsize(dest_zip) / (1024**2)
+                    print(f"Downloaded valid ZIP archive via {mode_label}: {dest_zip} ({mb:.2f} MB)", flush=True)
+                    return url
+                size_b = os.path.getsize(dest_zip) if os.path.exists(dest_zip) else 0
+                head_preview = ""
+                if os.path.exists(dest_zip):
+                    with open(dest_zip, "rb") as hf:
+                        head_preview = repr(hf.read(120))
+                errors.append(f"{url} ({mode_label}): invalid ZIP (size={size_b}, head={head_preview})")
+            except Exception as exc:
+                errors.append(f"{url} ({mode_label}): {exc}")
+
+        if os.path.exists(dest_zip):
+            try:
+                os.remove(dest_zip)
+            except OSError:
+                pass
+        print(f"Warning: mirror {url} did not return a valid ZIP archive, trying next fallback if any...", flush=True)
+
+    raise RuntimeError("All external dataset URL mirrors failed:\n - " + "\n - ".join(errors))
 
 
 def _start_max_runtime_guard(max_minutes: int, pause_file_path: str, start_monotonic: float):
@@ -304,6 +386,13 @@ if args.dry_config_check:
     safe_dump = dict(vars(args))
     if safe_dump.get("hf_token"):
         safe_dump["hf_token"] = "***"
+    if safe_dump.get("dataset_url"):
+        safe_dump["dataset_url"] = re.sub(
+            r"(X-Amz-Signature=)[^&|\s]+",
+            r"\1***",
+            str(safe_dump["dataset_url"]),
+            flags=re.IGNORECASE,
+        )
     print(json.dumps(safe_dump, indent=2, ensure_ascii=False))
     sys.exit(0)
 
@@ -628,6 +717,42 @@ if hf_repo_arg:
             args.dataset_dir = hf_candidates[0][0]
             print(f"Auto-selected HF dataset folder ({hf_candidates[0][1]} images): {args.dataset_dir}")
 
+url_arg = str(getattr(args, "dataset_url", "") or "").strip()
+if not hf_repo_arg and url_arg:
+    ext_zip = "/tmp/external_dataset.zip"
+    used_url = _download_dataset_archive(url_arg, ext_zip)
+    url_dl_dir = "/tmp/url_dataset"
+    shutil.rmtree(url_dl_dir, ignore_errors=True)
+    os.makedirs(url_dl_dir, exist_ok=True)
+    print(f"Unpacking external dataset archive -> {url_dl_dir}...")
+    with zipfile.ZipFile(ext_zip, "r") as zf:
+        zf.extractall(url_dl_dir)
+    try:
+        os.remove(ext_zip)
+    except OSError:
+        pass
+    dataset_source_desc = f"url:{used_url[:120]}"
+
+    if not (args.subsets_json and args.subsets_json.strip()):
+        url_manifests = sorted(
+            glob.glob(os.path.join(url_dl_dir, "**", "subsets_cloud.json"), recursive=True),
+            key=lambda p: (p.count(os.sep), len(p)),
+        )
+        if url_manifests:
+            args.subsets_json = url_manifests[0]
+            print(f"Auto-detected external multi-subset manifest: {args.subsets_json}")
+
+    if not (args.subsets_json and args.subsets_json.strip()) and not (args.dataset_dir and args.dataset_dir.strip()):
+        url_candidates = []
+        for root_p, _dirs, files in os.walk(url_dl_dir):
+            imgs = [f for f in files if os.path.splitext(f)[1].lower() in valid_img_exts]
+            if imgs:
+                url_candidates.append((root_p, len(imgs)))
+        if url_candidates:
+            url_candidates.sort(key=lambda x: x[1], reverse=True)
+            args.dataset_dir = url_candidates[0][0]
+            print(f"Auto-selected external dataset folder ({url_candidates[0][1]} images): {args.dataset_dir}")
+
 subsets_base_dir = None
 if not (args.subsets_json and args.subsets_json.strip()) and os.path.exists("/kaggle/input"):
     found_manifests = sorted(
@@ -778,19 +903,8 @@ else:
             chosen_zip = found_zips[0]
             print(f"Found local dataset archive candidate: {chosen_zip}")
         elif args.dataset_url:
-            print(f"Fetching dataset archive via curl from --dataset_url: {args.dataset_url}...")
-            curl_cmd = [
-                "curl", "-s", "-L",
-                "--retry", "3",
-                "--retry-delay", "2",
-                "--retry-all-errors",
-                args.dataset_url,
-                "-o", local_zip
-            ]
-            subprocess.run(curl_cmd, check=True)
-            if os.path.exists(local_zip) and os.path.getsize(local_zip) > 1024:
-                chosen_zip = local_zip
-                print(f"Downloaded dataset archive: {chosen_zip} ({os.path.getsize(chosen_zip) / (1024**2):.2f} MB)")
+            _download_dataset_archive(args.dataset_url.strip(), local_zip)
+            chosen_zip = local_zip
 
         if not chosen_zip or not os.path.exists(chosen_zip):
             raise RuntimeError(

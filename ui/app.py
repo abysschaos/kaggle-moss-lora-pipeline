@@ -45,6 +45,7 @@ from core import (
     pull_and_extract_kaggle_outputs,
     push_kaggle_kernel,
     read_kaggle_credentials,
+    read_r2_credentials,
     recommend_save_every_and_ema,
     request_graceful_pause,
     rescue_latest_weights,
@@ -55,9 +56,13 @@ from core import (
     sanitize_kaggle_slug,
     save_kaggle_credentials,
     save_local_config,
+    save_r2_credentials,
     stage_dataset_bundle,
     stage_kernel_bundle,
     test_kaggle_connection,
+    upload_dataset_to_cloudflare_r2,
+    upload_dataset_to_hf_repo,
+    upload_external_dataset,
     upload_kaggle_dataset,
     validate_training_params,
 )
@@ -248,13 +253,24 @@ class ModernLocalTrainerGUI:
         self.var_kaggle_variant = tk.StringVar(value=k_var_init)
         self.var_kaggle_base_quant = tk.StringVar(value=k_quant_init)
         k_src_init = str(saved_cfg.get("kaggle_dataset_source", "local") or "local").strip().lower()
-        if k_src_init not in ("local", "hf"):
+        if k_src_init not in ("local", "hf", "url", "r2"):
             k_src_init = "local"
         self.var_kaggle_dataset_source = tk.StringVar(value=k_src_init)
+        self.var_external_dataset_url = tk.StringVar(value=str(saved_cfg.get("external_dataset_url", "") or "").strip())
         self.var_hf_dataset_repo = tk.StringVar(value=str(saved_cfg.get("hf_dataset_repo", "") or "").strip())
         self.var_hf_dataset_subdir = tk.StringVar(value=str(saved_cfg.get("hf_dataset_subdir", "") or "").strip())
-        # HF Read-Only Token 仅驻留内存，绝不序列化写入 local_config.json 或导出包
+        self.var_hf_upload_local = tk.BooleanVar(value=bool(saved_cfg.get("hf_upload_local", True)))
+        # HF Access Token 仅驻留内存，绝不序列化写入 local_config.json 或导出包
         self.var_hf_token = tk.StringVar(value="")
+
+        # Cloudflare R2 对象存储变量（Secret 仅保存在 ~/.kaggle/r2_credentials.json，绝不写入 local_config.json）
+        r2_snap = read_r2_credentials()
+        self.var_r2_account_id = tk.StringVar(value=str(saved_cfg.get("r2_account_id") or r2_snap.get("account_id", "") or "").strip())
+        self.var_r2_bucket = tk.StringVar(value=str(saved_cfg.get("r2_bucket") or r2_snap.get("bucket", "") or "").strip())
+        self.var_r2_prefix = tk.StringVar(value=str(saved_cfg.get("r2_prefix", "moss-datasets") or "moss-datasets").strip())
+        self.var_r2_access_key_id = tk.StringVar(value=str(saved_cfg.get("r2_access_key_id") or r2_snap.get("access_key_id", "") or "").strip())
+        self.var_r2_secret_access_key = tk.StringVar(value=str(r2_snap.get("secret_access_key", "") or "").strip())
+        self.var_r2_dataset_url = tk.StringVar(value="")
         self.var_kaggle_max_run_min = tk.StringVar(
             value=str(saved_cfg.get("kaggle_max_run_min", "540") or "540").strip()
         )
@@ -506,8 +522,14 @@ class ModernLocalTrainerGUI:
             "kaggle_variant": self.var_kaggle_variant.get().strip(),
             "kaggle_base_quant": self.var_kaggle_base_quant.get().strip(),
             "kaggle_dataset_source": self.var_kaggle_dataset_source.get().strip().lower() or "local",
+            "external_dataset_url": self.var_external_dataset_url.get().strip(),
             "hf_dataset_repo": self.var_hf_dataset_repo.get().strip(),
             "hf_dataset_subdir": self.var_hf_dataset_subdir.get().strip(),
+            "hf_upload_local": bool(self.var_hf_upload_local.get()),
+            "r2_account_id": self.var_r2_account_id.get().strip(),
+            "r2_bucket": self.var_r2_bucket.get().strip(),
+            "r2_prefix": self.var_r2_prefix.get().strip(),
+            "r2_access_key_id": self.var_r2_access_key_id.get().strip(),
             "kaggle_max_run_min": self.var_kaggle_max_run_min.get().strip() or "540",
             "target_compute": self.var_target_compute.get().strip().lower() or "local",
             "manual_img_count": self.var_manual_img_count.get().strip(),
@@ -1603,8 +1625,79 @@ class ModernLocalTrainerGUI:
         messagebox.showinfo("本机环境自检完成", report.strip())
 
     # ==================== Kaggle 云端 API 一键遥控方法区 ====================
+    def _cloud_source(self) -> str:
+        src = self.var_kaggle_dataset_source.get().strip().lower()
+        return src if src in ("local", "hf", "url", "r2") else "local"
+
     def _is_hf_cloud_source(self) -> bool:
-        return self.var_kaggle_dataset_source.get().strip().lower() == "hf"
+        return self._cloud_source() == "hf"
+
+    def _is_url_cloud_source(self) -> bool:
+        return self._cloud_source() == "url"
+
+    def _is_r2_cloud_source(self) -> bool:
+        return self._cloud_source() == "r2"
+
+    def on_cloud_hf_upload_toggle(self):
+        self._sync_cloud_source_buttons()
+        self.refresh_cloud_sync_summary()
+
+    def clear_external_dataset_url(self):
+        self.var_external_dataset_url.set("")
+        self.save_local_config()
+        self.refresh_cloud_sync_summary()
+
+    def clear_r2_dataset_url(self):
+        self.var_r2_dataset_url.set("")
+        self.refresh_cloud_sync_summary()
+
+    def _collect_r2_config(self) -> dict:
+        saved = read_r2_credentials()
+        return {
+            "account_id": self.var_r2_account_id.get().strip() or saved.get("account_id", ""),
+            "bucket": self.var_r2_bucket.get().strip() or saved.get("bucket", ""),
+            "prefix": self.var_r2_prefix.get().strip() or "moss-datasets",
+            "access_key_id": self.var_r2_access_key_id.get().strip() or saved.get("access_key_id", ""),
+            "secret_access_key": self.var_r2_secret_access_key.get().strip() or saved.get("secret_access_key", ""),
+            "public_base_url": saved.get("public_base_url", ""),
+        }
+
+    def save_r2_credentials_ui(self):
+        r2_cfg = self._collect_r2_config()
+        ok, msg = save_r2_credentials(
+            r2_cfg["account_id"],
+            r2_cfg["access_key_id"],
+            r2_cfg["secret_access_key"],
+            bucket=r2_cfg["bucket"],
+            public_base_url=r2_cfg.get("public_base_url", ""),
+        )
+        if ok:
+            self.save_local_config()
+            self.monitor.log(f"[Cloudflare R2] {msg}\n")
+            messagebox.showinfo("R2 密钥保存成功", msg)
+        else:
+            messagebox.showwarning("R2 配置不完整", msg)
+
+    def _validate_r2_config_ui(self) -> dict:
+        cfg = self._collect_r2_config()
+        if not cfg["account_id"] or not cfg["bucket"] or not cfg["access_key_id"] or not cfg["secret_access_key"]:
+            messagebox.showwarning(
+                "缺少 Cloudflare R2 凭据",
+                "请完整填写 Cloudflare R2 的 Account ID、Bucket 桶名、Access Key ID 与 Secret Access Key！\n"
+                "（点击右侧【💾 保存 R2 密钥】可将密钥安全存入 ~/.kaggle/r2_credentials.json 以便下次免填）",
+            )
+            return {}
+        return cfg
+
+    def _has_local_dataset_images(self) -> bool:
+        if bool(self.var_multi_subset.get()):
+            enabled_subs = [s for s in self.subsets if s.get("enabled", True)]
+            return bool(enabled_subs) and all(
+                Path(s.get("path", "")).is_dir() and count_images_in_dir(s.get("path", "")) > 0
+                for s in enabled_subs
+            )
+        d_dir = self.var_data_dir.get().strip()
+        return bool(d_dir) and Path(d_dir).exists() and count_images_in_dir(d_dir) > 0
 
     def _parse_max_run_minutes(self) -> int:
         raw = str(self.var_kaggle_max_run_min.get() or "540").strip()
@@ -1614,7 +1707,7 @@ class ModernLocalTrainerGUI:
         except Exception:
             return 540
 
-    def _validate_hf_repo_ui(self):
+    def _validate_hf_repo_ui(self, require_token: bool = False):
         """校验并规范化 Hugging Face 数据集仓库输入，返回 (repo_id, subdir, token) 或 None。"""
         repo = normalize_hf_dataset_repo(self.var_hf_dataset_repo.get())
         if not repo or "/" not in repo:
@@ -1627,10 +1720,17 @@ class ModernLocalTrainerGUI:
         self.var_hf_dataset_repo.set(repo)
         subdir = self.var_hf_dataset_subdir.get().strip().strip("/")
         token = self.var_hf_token.get().strip()
+        if require_token and not token:
+            messagebox.showwarning(
+                "缺少 HF Write Token",
+                "自动创建并上传至 Hugging Face 私有仓库需要填写具备 Write 权限的 HF Access Token！\n"
+                "（若图集已提前传好，请取消勾选下方【开炼前自动上传】Toggle 开关。）",
+            )
+            return None
         return repo, subdir, token
 
     def _cloud_opts(self) -> dict:
-        src = "hf" if self._is_hf_cloud_source() else "local"
+        src = self._cloud_source()
         opts = {
             "accelerator": self.var_kaggle_accelerator.get().strip() or "NvidiaTeslaT4",
             "variant": self.var_kaggle_variant.get().strip() or "heal",
@@ -1645,32 +1745,52 @@ class ModernLocalTrainerGUI:
             tok = self.var_hf_token.get().strip()
             if tok:
                 opts["hf_token"] = tok
+        elif src == "url":
+            opts["dataset_url"] = self.var_external_dataset_url.get().strip()
+        elif src == "r2":
+            opts["dataset_url"] = self.var_r2_dataset_url.get().strip()
         return opts
 
     def _sync_cloud_source_buttons(self):
-        """非忙碌状态下同步主按钮文案及【上传本地图集】按钮启用状态。"""
-        is_hf = self._is_hf_cloud_source()
+        """非忙碌状态下同步主按钮文案及【上传图集】按钮启用状态。"""
+        src = self._cloud_source()
+        hf_auto_up = bool(self.var_hf_upload_local.get())
         if hasattr(self, "btn_cloud_master"):
             try:
-                self.btn_cloud_master.config(
-                    text=(
-                        "🚀 云端直拉 HF 图集 + 一键推送开炼（免传本地图）"
-                        if is_hf
-                        else "🚀 一键全自动：打包上传图集 + 同步当前参数推送云端开炼"
+                if src == "url":
+                    master_txt = "🚀 一键全自动：图集上传 6 站外链 + 推送 Kaggle 直拉开炼 (免审核)"
+                elif src == "hf":
+                    master_txt = (
+                        "🚀 一键全自动：上传 HF 私有仓库 + 推送 Kaggle 云端直拉开炼"
+                        if hf_auto_up
+                        else "🚀 云端直拉 HF 图集 + 一键推送开炼（免传本地图）"
                     )
-                )
+                elif src == "r2":
+                    master_txt = "🚀 一键全自动：上传 Cloudflare R2 私有桶 + 推送 Kaggle 直拉开炼"
+                else:
+                    master_txt = "🚀 一键全自动：打包上传图集 + 同步当前参数推送云端开炼"
+                self.btn_cloud_master.config(text=master_txt)
             except Exception:
                 pass
         if not self._cloud_busy and hasattr(self, "btn_cloud_upload_ds"):
             try:
-                self.btn_cloud_upload_ds.config(state=(tk.DISABLED if is_hf else tk.NORMAL))
+                if src == "url":
+                    ds_btn_txt, ds_state = "📤 1. 仅打包图集上传外链", tk.NORMAL
+                elif src == "hf":
+                    ds_btn_txt = "📤 1. 上传图集至 HF 私有仓"
+                    ds_state = tk.NORMAL if hf_auto_up else tk.DISABLED
+                elif src == "r2":
+                    ds_btn_txt, ds_state = "📤 1. 上传图集至 R2 私有桶", tk.NORMAL
+                else:
+                    ds_btn_txt, ds_state = "1️⃣ 打包并上传图集", tk.NORMAL
+                self.btn_cloud_upload_ds.config(text=ds_btn_txt, state=ds_state)
             except Exception:
                 pass
 
     def on_cloud_dataset_source_changed(self):
-        """在【本地打包上传 Kaggle】与【云端直拉 Hugging Face 图集】之间切换动态面板。"""
-        is_hf = self._is_hf_cloud_source()
-        for attr in ("cloud_local_slug_frame", "cloud_hf_frame"):
+        """在【临时外链(6站)】、【HF私有仓库】、【Cloudflare R2私有存储】与【Kaggle私有Dataset】间切换面板。"""
+        src = self._cloud_source()
+        for attr in ("cloud_url_frame", "cloud_local_slug_frame", "cloud_hf_frame", "cloud_r2_frame"):
             widget = getattr(self, attr, None)
             if widget is not None:
                 try:
@@ -1681,8 +1801,12 @@ class ModernLocalTrainerGUI:
         anchor = getattr(self, "cloud_kernel_slug_anchor", None)
         if anchor is not None:
             try:
-                if is_hf and hasattr(self, "cloud_hf_frame"):
+                if src == "url" and hasattr(self, "cloud_url_frame"):
+                    self.cloud_url_frame.pack(fill=tk.X, pady=(0, 8), before=anchor)
+                elif src == "hf" and hasattr(self, "cloud_hf_frame"):
                     self.cloud_hf_frame.pack(fill=tk.X, pady=(0, 8), before=anchor)
+                elif src == "r2" and hasattr(self, "cloud_r2_frame"):
+                    self.cloud_r2_frame.pack(fill=tk.X, pady=(0, 8), before=anchor)
                 elif hasattr(self, "cloud_local_slug_frame"):
                     self.cloud_local_slug_frame.pack(fill=tk.X, pady=(0, 4), before=anchor)
             except Exception:
@@ -1690,6 +1814,11 @@ class ModernLocalTrainerGUI:
 
         self._sync_cloud_source_buttons()
         self.refresh_cloud_sync_summary()
+        if hasattr(self, "tab_scrolls") and len(self.tab_scrolls) > 3:
+            try:
+                self.root.after_idle(self.tab_scrolls[3].refresh_scroll_region)
+            except Exception:
+                pass
 
     def _set_cloud_busy(self, busy: bool):
         self._cloud_busy = busy
@@ -1748,18 +1877,33 @@ class ModernLocalTrainerGUI:
         """实时在 Tab 4 展示即将推送至 Kaggle 的 Tab 1/2 参数与算力摘要。"""
         try:
             lora_name = self.var_lora_name.get().strip() or "my_moss_lora"
-            if self._is_hf_cloud_source():
+            src = self._cloud_source()
+            if self.var_multi_subset.get():
+                enabled_subs = [s for s in self.subsets if s.get("enabled", True)]
+                imgs = sum(count_images_in_dir(s.get("path", "")) for s in enabled_subs)
+                base_ds = f"{len(enabled_subs)}子集/{imgs}图"
+            else:
+                imgs = count_images_in_dir(self.var_data_dir.get().strip())
+                base_ds = f"单图集/{imgs}图"
+
+            if src == "hf":
                 repo_norm = normalize_hf_dataset_repo(self.var_hf_dataset_repo.get()) or "(待填 HF 仓库)"
                 subdir = self.var_hf_dataset_subdir.get().strip().strip("/")
                 sub_note = f"/{subdir}" if subdir else ""
-                ds_txt = f"🤗 HF 直拉 ({repo_norm}{sub_note})"
-            elif self.var_multi_subset.get():
-                enabled_subs = [s for s in self.subsets if s.get("enabled", True)]
-                imgs = sum(count_images_in_dir(s.get("path", "")) for s in enabled_subs)
-                ds_txt = f"多子集 ({len(enabled_subs)} 个/{imgs} 张)"
+                if self.var_hf_upload_local.get():
+                    ds_txt = f"🤗 HF 私有上传→直拉 ({base_ds} → {repo_norm}{sub_note})"
+                else:
+                    ds_txt = f"🤗 HF 直拉 ({repo_norm}{sub_note})"
+            elif src == "r2":
+                bkt = self.var_r2_bucket.get().strip() or "(待填 Bucket)"
+                r2_ready = "已签发7天链" if self.var_r2_dataset_url.get().strip() else "待上传R2"
+                ds_txt = f"☁️ R2 私有 ({base_ds} → {bkt} · {r2_ready})"
+            elif src == "url":
+                cur_url = self.var_external_dataset_url.get().strip()
+                url_state = "已就绪外链" if cur_url else "自动传6站"
+                ds_txt = f"🔗 外链直拉 ({base_ds} · {url_state})"
             else:
-                imgs = count_images_in_dir(self.var_data_dir.get().strip())
-                ds_txt = f"单图集 ({imgs} 张)"
+                ds_txt = f"📦 Kaggle私有 ({base_ds})"
             acc_val = self.var_kaggle_accelerator.get().strip()
             acc_map = {"NvidiaTeslaT4": "双卡 T4 DDP", "default_gpu": "单卡 GPU", "NvidiaTeslaP100": "兼容队列"}
             acc_txt = acc_map.get(acc_val, "双卡 T4 DDP")
@@ -1866,15 +2010,158 @@ class ModernLocalTrainerGUI:
 
         self._run_cloud_worker("⏳ 正在安装官方 Kaggle CLI...", _worker)
 
+    def _upload_external_step(self, raw_params: dict, ds_slug: str, log_cb) -> tuple:
+        """打包本地图集并上传 6 站外链中转矩阵，成功后在 UI 线程回填直链并持久化配置。"""
+        log_cb("\n[云端流水线 · 6站外链中转] 正在打包本地图集并上传多线路外链中转站...\n")
+        ok, url_or_err, stats = upload_external_dataset(raw_params, dataset_slug=ds_slug, on_log=log_cb)
+        if ok:
+            def _save_url():
+                self.var_external_dataset_url.set(url_or_err)
+                self.save_local_config()
+                self.refresh_cloud_sync_summary()
+
+            self._enqueue_ui(_save_url)
+        return ok, url_or_err, stats
+
+    def _upload_r2_step(self, raw_params: dict, r2_cfg: dict, ds_slug: str, log_cb) -> tuple:
+        """打包本地图集并上传至私有 Cloudflare R2 桶，成功后在 UI 线程回填 7 天预签名直链。"""
+        log_cb("\n[云端流水线 · Cloudflare R2] 正在打包本地图集并上传至 R2 私有存储桶...\n")
+        ok, url_or_err, stats = upload_dataset_to_cloudflare_r2(raw_params, r2_cfg, dataset_slug=ds_slug, on_log=log_cb)
+        if ok:
+            def _save_r2_url():
+                self.var_r2_dataset_url.set(url_or_err)
+                self.save_local_config()
+                self.refresh_cloud_sync_summary()
+
+            self._enqueue_ui(_save_r2_url)
+        return ok, url_or_err, stats
+
+    def _upload_hf_step(self, raw_params: dict, repo_id: str, hf_token: str, subdir: str, log_cb) -> tuple:
+        """创建或更新 Hugging Face Private Dataset 永久私有仓库。"""
+        log_cb(f"\n[云端流水线 · HF 私有仓库] 正在创建并上传至私有数据集 {repo_id}...\n")
+        ok, repo_or_err, stats = upload_dataset_to_hf_repo(
+            raw_params,
+            repo_id=repo_id,
+            hf_token=hf_token,
+            subdir=subdir,
+            private=True,
+            on_log=log_cb,
+        )
+        if ok:
+            self._enqueue_ui(lambda r=repo_or_err: self.var_hf_dataset_repo.set(r))
+            self._enqueue_ui(self.save_local_config)
+            self._enqueue_ui(self.refresh_cloud_sync_summary)
+        return ok, repo_or_err, stats
+
     def cloud_upload_dataset_only(self):
-        if self._is_hf_cloud_source():
-            messagebox.showinfo(
-                "当前为 Hugging Face 云端直拉模式",
-                "Hugging Face 模式下无需从本机打包上传图片！\n"
-                "请直接点击绿色主按钮或【2️⃣ 仅推送参数开炼】，Kaggle 容器会自动拉取目标 HF 数据集。",
-            )
+        src = self._cloud_source()
+        if src == "hf":
+            if not self.var_hf_upload_local.get():
+                messagebox.showinfo(
+                    "当前为 HF 免上传直拉模式",
+                    "您取消勾选了【自动上传本地图集至 HF 私有仓】。\n"
+                    "若需将当前本地图集上传至 Hugging Face Private 仓库，请先勾选该开关后重试，或直接点【🚀 云端直拉 HF 图集】。",
+                )
+                return
+            if not self._check_dataset_inputs_ready():
+                return
+            hf_check = self._validate_hf_repo_ui(require_token=True)
+            if not hf_check:
+                return
+            repo_id, subdir, hf_tok = hf_check
+            raw_params = self._collect_raw_params()
+            self.save_local_config()
+
+            def _hf_worker():
+                log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
+                ok, repo_or_err, stats = self._upload_hf_step(raw_params, repo_id, hf_tok, subdir, log_cb)
+                if ok:
+                    self._enqueue_ui(
+                        lambda r=repo_or_err: self.var_cloud_job_status.set(
+                            f"✅ 已同步至 HF 私有仓库 {r}（下一步可点【2️⃣ 仅推送参数开炼】）"
+                        )
+                    )
+                    self._enqueue_ui(
+                        lambda r=repo_or_err, st=stats: messagebox.showinfo(
+                            "🤗 HF 私有仓库同步成功",
+                            f"已将 {st['images']} 张图 / {st['captions']} 份标注（{st['total_mb']} MB）"
+                            f"同步至 Hugging Face Private 数据集仓库：\n\nhttps://huggingface.co/datasets/{r}",
+                        )
+                    )
+                else:
+                    self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 上传至 HF 私有仓库失败，请查看控制台报错"))
+                    self._enqueue_ui(lambda m=repo_or_err: messagebox.showerror("HF 私有仓上传失败", m))
+
+            self._run_cloud_worker(f"⏳ 正在上传本地图集至 HF 私有仓 {repo_id}...", _hf_worker)
             return
+
         if not self._check_dataset_inputs_ready():
+            return
+
+        if src == "r2":
+            r2_cfg = self._validate_r2_config_ui()
+            if not r2_cfg:
+                return
+            raw_params = self._collect_raw_params()
+            ds_slug = sanitize_kaggle_slug(
+                self.var_kaggle_dataset_slug.get().strip() or raw_params.get("lora_name", "") or "moss-data",
+                prefix="moss-data",
+            )
+            self.save_local_config()
+
+            def _r2_worker():
+                log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
+                ok, url_or_err, stats = self._upload_r2_step(raw_params, r2_cfg, ds_slug, log_cb)
+                if ok:
+                    self._enqueue_ui(
+                        lambda: self.var_cloud_job_status.set(
+                            "✅ 已上传至 Cloudflare R2 私有桶并生成 7 天预签名直链（下一步可点【2️⃣ 仅推送参数开炼】）"
+                        )
+                    )
+                    self._enqueue_ui(
+                        lambda st=stats: messagebox.showinfo(
+                            "☁️ Cloudflare R2 私有上传成功",
+                            f"已将 {st['images']} 张图 / {st['captions']} 份标注（{st['zip_mb']} MB）"
+                            f"上传至私有 R2 对象：\nr2://{st.get('r2_bucket')}/{st.get('r2_object_key')}\n\n"
+                            f"已自动回填 7 天有效预签名直链至面板！",
+                        )
+                    )
+                else:
+                    self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 上传至 Cloudflare R2 失败，请查看控制台报错"))
+                    self._enqueue_ui(lambda m=url_or_err: messagebox.showerror("Cloudflare R2 上传失败", m))
+
+            self._run_cloud_worker("⏳ 正在打包并上传至 Cloudflare R2 私有存储...", _r2_worker)
+            return
+
+        if src == "url":
+            raw_params = self._collect_raw_params()
+            ds_slug = sanitize_kaggle_slug(
+                self.var_kaggle_dataset_slug.get().strip() or raw_params.get("lora_name", "") or "moss-data",
+                prefix="moss-data",
+            )
+            self.save_local_config()
+
+            def _url_worker():
+                log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
+                ok, url_or_err, stats = self._upload_external_step(raw_params, ds_slug, log_cb)
+                if ok:
+                    self._enqueue_ui(
+                        lambda: self.var_cloud_job_status.set(
+                            "✅ 外链图集已上传并回填（下一步可点【2️⃣ 仅推送参数开炼】）"
+                        )
+                    )
+                    self._enqueue_ui(
+                        lambda u=url_or_err, st=stats: messagebox.showinfo(
+                            "🔗 外链图集上传成功",
+                            f"已打包 {st['images']} 张图 / {st['captions']} 份标注（{st['zip_mb']} MB），\n"
+                            f"并已上传至 {len(st.get('mirrors', []))} 条外链中转站：\n\n{u}",
+                        )
+                    )
+                else:
+                    self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 外链图集上传失败，请查看控制台报错"))
+                    self._enqueue_ui(lambda m=url_or_err: messagebox.showerror("外链上传失败", m))
+
+            self._run_cloud_worker("⏳ 正在打包并上传图集至 6 站外链中转站...", _url_worker)
             return
 
         ident = self._resolve_kaggle_identity(require_creds=True)
@@ -1968,14 +2255,63 @@ class ModernLocalTrainerGUI:
             )
         return True
 
+    def _push_kernel_and_report(
+        self,
+        cleaned: dict,
+        cloud_opts: dict,
+        username: str,
+        ds_id: str,
+        kn_slug: str,
+        src_note: str,
+        queued_prefix: str,
+        success_title: str,
+        success_summary: str,
+        fail_status: str,
+        log_cb,
+    ):
+        """统一执行阶段化内核组装、推送至 Kaggle 队列及界面状态回执弹窗。"""
+        stage_dir, info = stage_kernel_bundle(cleaned, cloud_opts, username, ds_id, kn_slug)
+        log_cb(
+            f"\n[云端流水线 2/2] 已注入 Tab 1/2 全量超参数，准备推送 {info['kernel_id']} "
+            f"(算力: {cloud_opts['accelerator']} | {src_note} | 自动存盘时限: {cloud_opts['max_run_minutes']} 分钟)...\n"
+        )
+        ok, url, msg = push_kaggle_kernel(
+            stage_dir,
+            accelerator=cloud_opts["accelerator"],
+            cli_info=self._kaggle_cli_info,
+            on_log=log_cb,
+        )
+        if ok:
+            self._enqueue_ui(lambda m=msg, p=queued_prefix: self.var_cloud_job_status.set(f"{p}{m}"))
+            self._enqueue_ui(
+                lambda u=url, m=msg, t=success_title, body=success_summary: messagebox.showinfo(
+                    t,
+                    f"{body}\n\n{m}\n\n可在第 4 步开启【自动轮询 (30s)】或点【📜 拉取云端日志】追踪进度：\n{u}",
+                )
+            )
+        else:
+            self._enqueue_ui(lambda fs=fail_status: self.var_cloud_job_status.set(fs))
+            self._enqueue_ui(lambda m=msg: messagebox.showerror("推送训练任务失败", m))
+
     def cloud_push_kernel_only(self):
-        is_hf = self._is_hf_cloud_source()
-        if is_hf and not self._validate_hf_repo_ui():
+        src = self._cloud_source()
+        if src == "hf" and not self._validate_hf_repo_ui(require_token=False):
             return
+        r2_cfg = {}
+        if src == "url" and not self.var_external_dataset_url.get().strip():
+            if not self._check_dataset_inputs_ready():
+                return
+        elif src == "r2" and not self.var_r2_dataset_url.get().strip():
+            if not self._check_dataset_inputs_ready():
+                return
+            r2_cfg = self._validate_r2_config_ui()
+            if not r2_cfg:
+                return
+
         ident = self._resolve_kaggle_identity(require_creds=True)
         if not ident:
             return
-        username, _ds_slug, kn_slug, ds_id, _kn_id = ident
+        username, ds_slug, kn_slug, ds_id, _kn_id = ident
         raw_params = self._collect_raw_params()
         cleaned, err_msg = validate_training_params(raw_params)
         if err_msg:
@@ -1988,40 +2324,67 @@ class ModernLocalTrainerGUI:
 
         def _worker():
             log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
-            stage_dir, info = stage_kernel_bundle(cleaned, cloud_opts, username, ds_id, kn_slug)
-            src_note = (
-                f"🤗 云端直拉 HF: {cloud_opts.get('hf_dataset_repo')}"
-                if is_hf
-                else f"📦 挂载 Kaggle 图集: {ds_id}"
-            )
-            log_cb(
-                f"\n[云端流水线 2/2] 已注入 Tab 1/2 全量超参数，准备推送 {info['kernel_id']} "
-                f"(算力: {cloud_opts['accelerator']} | {src_note} | 自动存盘时限: {cloud_opts['max_run_minutes']} 分钟)...\n"
-            )
-            ok, url, msg = push_kaggle_kernel(
-                stage_dir,
-                accelerator=cloud_opts["accelerator"],
-                cli_info=self._kaggle_cli_info,
-                on_log=log_cb,
-            )
-            if ok:
-                self._enqueue_ui(lambda m=msg: self.var_cloud_job_status.set(f"🟡 已提交至 Kaggle 云端队列：{m}"))
-                self._enqueue_ui(
-                    lambda u=url, m=msg: messagebox.showinfo(
-                        "云端开炼已启动",
-                        f"{m}\n\n可在第 4 步开启【自动轮询 (30s)】等待完工，也可点【📜 拉取云端日志】实时看输出：\n{u}",
-                    )
-                )
+            if src == "url" and not cloud_opts.get("dataset_url"):
+                ok_ext, url_or_err, _ext_stats = self._upload_external_step(raw_params, ds_slug, log_cb)
+                if not ok_ext:
+                    self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 自动上传外链图集失败，已中止推送"))
+                    self._enqueue_ui(lambda m=url_or_err: messagebox.showerror("外链上传失败", m))
+                    return
+                cloud_opts["dataset_url"] = url_or_err
+            elif src == "r2" and not cloud_opts.get("dataset_url"):
+                ok_r2, url_or_err, _r2_stats = self._upload_r2_step(raw_params, r2_cfg, ds_slug, log_cb)
+                if not ok_r2:
+                    self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 自动上传 R2 图集失败，已中止推送"))
+                    self._enqueue_ui(lambda m=url_or_err: messagebox.showerror("R2 上传失败", m))
+                    return
+                cloud_opts["dataset_url"] = url_or_err
+
+            if src == "hf":
+                src_note = f"🤗 云端直拉 HF: {cloud_opts.get('hf_dataset_repo')}"
+            elif src == "r2":
+                src_note = "☁️ Cloudflare R2 私有预签名直拉 (dataset_sources=[])"
+            elif src == "url":
+                src_note = f"🔗 6站外链直拉 ({len(cloud_opts.get('dataset_url', '').split('|'))}条线路, dataset_sources=[])"
             else:
-                self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 推送任务失败，请检查权限或 CLI 输出"))
-                self._enqueue_ui(lambda m=msg: messagebox.showerror("推送云端任务失败", m))
+                src_note = f"📦 挂载 Kaggle 图集: {ds_id}"
+
+            self._push_kernel_and_report(
+                cleaned, cloud_opts, username, ds_id, kn_slug,
+                src_note=src_note,
+                queued_prefix="🟡 已提交至 Kaggle 云端队列：",
+                success_title="云端开炼已启动",
+                success_summary=f"数据来源：{src_note}",
+                fail_status="🔴 推送任务失败，请检查权限或 CLI 输出",
+                log_cb=log_cb,
+            )
 
         self._run_cloud_worker("⏳ 正在推送训练内核至 Kaggle...", _worker)
 
     def cloud_one_click_deploy(self):
-        is_hf = self._is_hf_cloud_source()
-        if is_hf:
-            if not self._validate_hf_repo_ui():
+        src = self._cloud_source()
+        hf_auto_up = bool(self.var_hf_upload_local.get())
+        has_local = self._has_local_dataset_images()
+        r2_cfg = {}
+
+        if src == "hf":
+            if hf_auto_up and not self._check_dataset_inputs_ready():
+                return
+            hf_check = self._validate_hf_repo_ui(require_token=hf_auto_up)
+            if not hf_check:
+                return
+            hf_repo_target, hf_sub_target, hf_tok_target = hf_check
+        elif src == "r2":
+            has_r2_url = bool(self.var_r2_dataset_url.get().strip())
+            if not has_local and not has_r2_url:
+                self._check_dataset_inputs_ready()
+                return
+            if has_local:
+                r2_cfg = self._validate_r2_config_ui()
+                if not r2_cfg:
+                    return
+        elif src == "url":
+            if not has_local and not bool(self.var_external_dataset_url.get().strip()):
+                self._check_dataset_inputs_ready()
                 return
         elif not self._check_dataset_inputs_ready():
             return
@@ -2042,41 +2405,84 @@ class ModernLocalTrainerGUI:
 
         def _worker():
             log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
-            if is_hf:
-                hf_repo = cloud_opts.get("hf_dataset_repo", "")
-                hf_sub = cloud_opts.get("hf_dataset_subdir", "")
-                sub_hint = f" (子目录: {hf_sub})" if hf_sub else ""
-                log_cb(
-                    f"\n{'='*70}\n🚀 [一键 HF 直拉流水线] 免上传本地图集 -> 容器将直拉 {hf_repo}{sub_hint}\n"
-                    f"🚀 同步参数并推送训练队列 -> {kn_id} ({cloud_opts['accelerator']} | "
-                    f"自动存盘时限: {cloud_opts['max_run_minutes']} 分钟)\n"
-                )
-                kn_stage, _info = stage_kernel_bundle(cleaned, cloud_opts, username, ds_id, kn_slug)
-                ok_kn, url, msg_kn = push_kaggle_kernel(
-                    kn_stage,
-                    accelerator=cloud_opts["accelerator"],
-                    cli_info=self._kaggle_cli_info,
-                    on_log=log_cb,
-                )
-                if ok_kn:
-                    self._enqueue_ui(
-                        lambda m=msg_kn: self.var_cloud_job_status.set(
-                            f"🟡 云端 HF 直拉任务已排队：{m}（建议开启 30s 自动轮询）"
-                        )
+            if src == "hf":
+                sub_hint = f" (子目录: {hf_sub_target})" if hf_sub_target else ""
+                if hf_auto_up:
+                    log_cb(f"\n{'='*70}\n🤗 [一键 HF 私有仓库流水线] 1/2 创建并同步图集至私有仓 `{hf_repo_target}`{sub_hint}\n")
+                    ok_hf, repo_or_err, hf_stats = self._upload_hf_step(
+                        raw_params, hf_repo_target, hf_tok_target, hf_sub_target, log_cb
                     )
-                    self._enqueue_ui(
-                        lambda u=url: messagebox.showinfo(
-                            "🚀 云端 HF 直拉部署成功！",
-                            f"已跳过本地上传，并成功推送任务 {kn_id} 至 Kaggle 云端 GPU 队列！\n"
-                            f"• 云端图集来源：Hugging Face `{hf_repo}`{sub_hint}\n"
-                            f"• 超时存盘保护：{cloud_opts['max_run_minutes']} 分钟自动保存并打包退出\n\n"
-                            f"现在你可以关闭本机电脑或最小化窗口；待状态变为【🟢 COMPLETE】后点【3️⃣ 一键拉回成品权重】。\n"
-                            f"任务直达：{u}",
-                        )
-                    )
+                    if not ok_hf:
+                        self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 上传 HF 私有仓失败，已中止推送"))
+                        self._enqueue_ui(lambda m=repo_or_err: messagebox.showerror("HF 私有仓上传失败", m))
+                        return
+                    cloud_opts["hf_dataset_repo"] = repo_or_err
+                    summary_txt = f"已将 {hf_stats['images']} 张图同步至 Hugging Face Private 仓库 `{repo_or_err}`{sub_hint}，\n并跳过 Kaggle Dataset 审核推入云端队列！"
                 else:
-                    self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 推送 HF 直拉训练任务失败"))
-                    self._enqueue_ui(lambda m=msg_kn: messagebox.showerror("推送训练任务失败", m))
+                    summary_txt = f"已跳过本地上传，并配置容器开机直拉 Hugging Face `{hf_repo_target}`{sub_hint}！"
+
+                self._push_kernel_and_report(
+                    cleaned, cloud_opts, username, ds_id, kn_slug,
+                    src_note=f"🤗 云端直拉 HF: {cloud_opts.get('hf_dataset_repo')}{sub_hint}",
+                    queued_prefix="🟡 云端 HF 直拉任务已排队：",
+                    success_title="🚀 云端 HF 私有直拉部署成功！",
+                    success_summary=summary_txt,
+                    fail_status="🔴 推送 HF 直拉训练任务失败",
+                    log_cb=log_cb,
+                )
+                return
+
+            if src == "r2":
+                r2_stats = None
+                if has_local:
+                    log_cb(f"\n{'='*70}\n☁️ [一键 R2 私有存储流水线] 1/2 打包图集并上传至 Cloudflare R2 私有桶\n")
+                    ok_r2, url_or_err, r2_stats = self._upload_r2_step(raw_params, r2_cfg, ds_slug, log_cb)
+                    if not ok_r2:
+                        self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 上传至 Cloudflare R2 失败，已中止推送"))
+                        self._enqueue_ui(lambda m=url_or_err: messagebox.showerror("R2 上传失败", m))
+                        return
+                    cloud_opts["dataset_url"] = url_or_err
+                summary_txt = (
+                    f"已将 {r2_stats['images']} 张图上传至私有 Cloudflare R2（r2://{r2_stats.get('r2_bucket')}/{r2_stats.get('r2_object_key')}），\n并签发 7 天免密预签名直链推送 Kaggle 开炼（dataset_sources=[]）！"
+                    if r2_stats
+                    else "已使用当前 R2 预签名直链推送无数据集挂载训练任务至 Kaggle！"
+                )
+                self._push_kernel_and_report(
+                    cleaned, cloud_opts, username, ds_id, kn_slug,
+                    src_note="☁️ Cloudflare R2 私有预签名直拉 (dataset_sources=[])",
+                    queued_prefix="🟡 R2 私有直拉训练已排队：",
+                    success_title="🚀 Cloudflare R2 私有直拉部署成功！",
+                    success_summary=summary_txt,
+                    fail_status="🔴 R2 已上传，但推送训练任务失败",
+                    log_cb=log_cb,
+                )
+                return
+
+            if src == "url":
+                ext_stats = None
+                if has_local:
+                    log_cb(f"\n{'='*70}\n🔗 [一键 6 站外链直拉流水线] 1/2 打包图集并上传多线路外链中转站（免 Kaggle 审核）\n")
+                    ok_ext, url_or_err, ext_stats = self._upload_external_step(raw_params, ds_slug, log_cb)
+                    if not ok_ext:
+                        self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 第一步上传外链失败，已中止推送"))
+                        self._enqueue_ui(lambda m=url_or_err: messagebox.showerror("外链上传失败", m))
+                        return
+                    cloud_opts["dataset_url"] = url_or_err
+                mirror_cnt = len(cloud_opts.get("dataset_url", "").split("|"))
+                summary_txt = (
+                    f"已将 {ext_stats['images']} 张图上传至 {mirror_cnt} 条外链容灾镜像，并推送无数据集挂载（dataset_sources=[]）训练任务！"
+                    if ext_stats
+                    else f"已注入外链直拉地址（{mirror_cnt} 条镜像）并推送任务！"
+                )
+                self._push_kernel_and_report(
+                    cleaned, cloud_opts, username, ds_id, kn_slug,
+                    src_note=f"🔗 6站外链直拉 ({mirror_cnt}条镜像, dataset_sources=[])",
+                    queued_prefix="🟡 外链直拉训练已排队：",
+                    success_title="🚀 外链直拉云端部署成功！",
+                    success_summary=summary_txt,
+                    fail_status="🔴 外链已就绪，但推送训练任务失败",
+                    log_cb=log_cb,
+                )
                 return
 
             log_cb(f"\n{'='*70}\n🚀 [一键云端流水线] 1/2 打包并上传图集 -> {ds_id}\n")
@@ -2093,38 +2499,23 @@ class ModernLocalTrainerGUI:
                 self._enqueue_ui(lambda m=msg_ds: messagebox.showerror("上传图集失败", m))
                 return
 
-            log_cb(
-                f"\n🚀 [一键云端流水线] 2/2 同步参数并推送训练队列 -> {kn_id} "
-                f"({cloud_opts['accelerator']} | 自动存盘时限: {cloud_opts['max_run_minutes']} 分钟)\n"
+            self._push_kernel_and_report(
+                cleaned, cloud_opts, username, ds_id, kn_slug,
+                src_note=f"📦 挂载 Kaggle 图集: {ds_id}",
+                queued_prefix="🟡 云端训练已排队：",
+                success_title="🚀 云端全自动部署成功！",
+                success_summary=f"已上传 {stats['images']} 张图至私有数据集 {ds_id} 并推送任务 {kn_id}！",
+                fail_status="🔴 图集已上传，但推送训练任务失败",
+                log_cb=log_cb,
             )
-            kn_stage, _info = stage_kernel_bundle(cleaned, cloud_opts, username, ds_id, kn_slug)
-            ok_kn, url, msg_kn = push_kaggle_kernel(
-                kn_stage,
-                accelerator=cloud_opts["accelerator"],
-                cli_info=self._kaggle_cli_info,
-                on_log=log_cb,
-            )
-            if ok_kn:
-                self._enqueue_ui(lambda m=msg_kn: self.var_cloud_job_status.set(f"🟡 云端训练已排队：{m}（建议打开下方 30s 自动轮询）"))
-                self._enqueue_ui(
-                    lambda u=url, st=stats: messagebox.showinfo(
-                        "🚀 云端全自动部署成功！",
-                        f"已上传 {st['images']} 张图至私有数据集 {ds_id}，\n"
-                        f"并成功推送任务 {kn_id} 至 Kaggle 云端 GPU 队列（{cloud_opts['max_run_minutes']}m 自动存盘）！\n\n"
-                        f"现在你可以关闭电脑或最小化窗口；待状态变为【🟢 COMPLETE】后点【3️⃣ 一键拉回成品权重】。\n"
-                        f"任务直达：{u}",
-                    )
-                )
-            else:
-                self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 图集已上传，但推送训练任务失败"))
-                self._enqueue_ui(lambda m=msg_kn: messagebox.showerror("推送训练任务失败", m))
 
-        worker_title = (
-            f"⏳ 正在推送 HF 直拉训练任务 ({cloud_opts.get('hf_dataset_repo', '')})..."
-            if is_hf
-            else "⏳ 全自动流水线执行中：传图集 + 推云端..."
-        )
-        self._run_cloud_worker(worker_title, _worker)
+        title_map = {
+            "hf": f"⏳ 正在执行 HF 私有仓流水线 ({cloud_opts.get('hf_dataset_repo', '')})...",
+            "r2": "⏳ 正在执行 Cloudflare R2 私有上传 + 推云端...",
+            "url": "⏳ 正在执行 6 站外链中转 + 推云端直拉开炼...",
+            "local": "⏳ 全自动流水线执行中：传图集 + 推云端...",
+        }
+        self._run_cloud_worker(title_map.get(src, title_map["local"]), _worker)
 
     def cloud_refresh_status(self, silent: bool = False):
         ident = self._resolve_kaggle_identity(require_creds=True) if not silent else None
@@ -2324,9 +2715,27 @@ class ModernLocalTrainerGUI:
         self._run_cloud_worker(f"⏳ 正在拉回并解压 {kn_id} 成果...", _worker)
 
     def cloud_export_manual_bundle(self):
-        is_hf = self._is_hf_cloud_source()
+        src = self._cloud_source()
+        is_hf = (src == "hf")
+        is_url = (src == "url")
+        is_r2 = (src == "r2")
         if is_hf:
-            if not self._validate_hf_repo_ui():
+            if not self._validate_hf_repo_ui(require_token=False):
+                return
+        elif is_url:
+            if not self.var_external_dataset_url.get().strip():
+                messagebox.showwarning(
+                    "尚未填写或生成外链直拉地址",
+                    "请先点击【📤 1. 仅打包图集上传外链】生成外链，或手动填入 .zip 直拉链接后再导出免本地传图 Notebook；\n"
+                    "若需导出传统本地 ZIP 上传包，请切回【📦 Kaggle 私有集】。",
+                )
+                return
+        elif is_r2:
+            if not self.var_r2_dataset_url.get().strip():
+                messagebox.showwarning(
+                    "尚未生成 R2 预签名直链",
+                    "请先点击【📤 1. 上传图集至 R2 私有桶】生成 7 天预签名直链，或粘贴有效 R2 直链后再导出 Notebook。",
+                )
                 return
         elif not self._check_dataset_inputs_ready():
             return
@@ -2342,7 +2751,14 @@ class ModernLocalTrainerGUI:
         self.save_local_config()
         try:
             res = export_manual_upload_bundle(cleaned, raw_params, cloud_opts)
-            zip_note = f" • 图集 ZIP: {res['zip_path']}\n" if res.get("zip_path") else " • 图集模式: 🤗 HF 云端直拉（免导出本地图集 ZIP）\n"
+            if res.get("zip_path"):
+                zip_note = f" • 图集 ZIP: {res['zip_path']}\n"
+            elif is_r2:
+                zip_note = " • 图集模式: ☁️ Cloudflare R2 预签名直拉（请注意预签名直链有效期为 7 天）\n"
+            elif is_url:
+                zip_note = " • 图集模式: 🔗 外链 ZIP 云端直拉（免导出本地图集 ZIP）\n"
+            else:
+                zip_note = " • 图集模式: 🤗 HF 云端直拉（免导出本地图集 ZIP）\n"
             tok_warn = (
                 " • ⚠️ 安全提示：导出包未内置您填写的 HF Token；若为私有仓库，请在 Kaggle Add-ons -> Secrets 中配置 `HF_TOKEN`。\n"
                 if (is_hf and self.var_hf_token.get().strip())
@@ -2359,7 +2775,8 @@ class ModernLocalTrainerGUI:
             if res.get("zip_path"):
                 files_desc = f"{Path(res['zip_path']).name}、{Path(res['notebook_path']).name} 与 README_操作步骤.txt"
             else:
-                files_desc = f"{Path(res['notebook_path']).name} 与 README_操作步骤.txt（已预填 HF 云端直拉仓库，无需上传图片）"
+                direct_desc = "Cloudflare R2 直拉地址" if is_r2 else ("外链 ZIP 直拉地址" if is_url else "HF 云端直拉仓库")
+                files_desc = f"{Path(res['notebook_path']).name} 与 README_操作步骤.txt（已预填{direct_desc}，无需上传图片）"
             messagebox.showinfo(
                 "📦 免 API 手动上传包已就绪",
                 f"已自动打开导出目录：\n{res['export_dir']}\n\n"

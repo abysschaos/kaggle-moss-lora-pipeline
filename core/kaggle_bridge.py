@@ -1,6 +1,8 @@
 """Zero-dependency Kaggle CLI & Cloud API bridge for headless dataset upload, kernel push, status polling, output sync, and offline bundle export."""
 
+import datetime
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -11,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import zipfile
 from pathlib import Path
 
@@ -19,6 +22,7 @@ from .trainer_runner import NO_WINDOW
 
 KAGGLE_CONFIG_DIR = Path.home() / ".kaggle"
 KAGGLE_JSON_PATH = KAGGLE_CONFIG_DIR / "kaggle.json"
+R2_CREDENTIALS_PATH = KAGGLE_CONFIG_DIR / "r2_credentials.json"
 KAGGLE_ACCELERATORS = [
     ("NvidiaTeslaT4", "🔥 双卡 T4 DDP (推荐)"),
     ("default_gpu", "⚡ 单卡默认 GPU"),
@@ -324,13 +328,14 @@ def normalize_hf_dataset_repo(raw: str) -> str:
     return text
 
 
-def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict) -> dict:
+def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict = None) -> dict:
     """将本地 Tab 1~3 清洗参数与云端算力选项映射为与 train_moss.py 完全一致的配置载荷。"""
-    acc = (cloud_opts.get("accelerator") or "NvidiaTeslaT4").strip()
-    variant = (cloud_opts.get("variant") or "heal").strip().lower()
+    opts = cloud_opts or {}
+    acc = (opts.get("accelerator") or "NvidiaTeslaT4").strip()
+    variant = (opts.get("variant") or "heal").strip().lower()
     if variant not in ("heal", "base", "sft"):
         variant = "heal"
-    base_quant = (cloud_opts.get("base_quant") or "auto").strip().lower()
+    base_quant = (opts.get("base_quant") or "auto").strip().lower()
     if base_quant not in ("auto", "int8", "full"):
         base_quant = "auto"
 
@@ -396,19 +401,23 @@ def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict) -> dict:
         "parallel": parallel_val,
         "max_tokens": 0,
         "train_mode": "fresh",
-        "max_run_minutes": max(0, int(float(str(cloud_opts.get("max_run_minutes", 540) or 540).strip()))),
+        "max_run_minutes": max(0, int(float(str(opts.get("max_run_minutes", 540) or 540).strip()))),
     }
 
-    ds_source = str(cloud_opts.get("dataset_source", "local") or "local").strip().lower()
+    ds_source = str(opts.get("dataset_source", "local") or "local").strip().lower()
     if ds_source == "hf":
-        hf_repo = normalize_hf_dataset_repo(str(cloud_opts.get("hf_dataset_repo", "")))
+        hf_repo = normalize_hf_dataset_repo(str(opts.get("hf_dataset_repo", "")))
         if hf_repo:
             payload["hf_dataset_repo"] = hf_repo
-            payload["hf_dataset_subdir"] = str(cloud_opts.get("hf_dataset_subdir", "") or "").strip().strip("/")
-            payload["hf_dataset_revision"] = str(cloud_opts.get("hf_dataset_revision", "main") or "main").strip() or "main"
-            hf_tok = str(cloud_opts.get("hf_token", "") or "").strip()
+            payload["hf_dataset_subdir"] = str(opts.get("hf_dataset_subdir", "") or "").strip().strip("/")
+            payload["hf_dataset_revision"] = str(opts.get("hf_dataset_revision", "main") or "main").strip() or "main"
+            hf_tok = str(opts.get("hf_token", "") or "").strip()
             if hf_tok:
                 payload["hf_token"] = hf_tok
+    elif ds_source in ("url", "r2"):
+        ds_url = str(opts.get("dataset_url", "") or "").strip()
+        if ds_url:
+            payload["dataset_url"] = ds_url
 
     return payload
 
@@ -535,6 +544,7 @@ import sys
 import requests
 
 mode, folder, notes = sys.argv[1], sys.argv[2], sys.argv[3]
+_captured_http_errors = []
 try:
     from kagglesdk.kaggle_http_client import KaggleHttpClient
     _orig_prep = KaggleHttpClient._prepare_response
@@ -543,12 +553,21 @@ try:
         if getattr(http_response, "status_code", 0) >= 400:
             body = (getattr(http_response, "text", "") or "").strip()
             if body:
-                print(f"[Kaggle API HTTP {http_response.status_code}] {body[:1000]}", flush=True)
+                _captured_http_errors.append((http_response.status_code, body[:1000]))
         return _orig_prep(self, response_type, http_response)
 
     KaggleHttpClient._prepare_response = _dbg_prep
 except Exception:
     pass
+
+
+def _dump_http_errors():
+    for code, body in _captured_http_errors:
+        # KaggleApi.dataset_create_new 会先调用 dataset_status 检查是否存在，新数据集固定返回被捕获的 403 datasets.get
+        if int(code) == 403 and "datasets.get" in body:
+            continue
+        print(f"[Kaggle API HTTP {code}] {body}", flush=True)
+
 
 from kaggle.api.kaggle_api_extended import KaggleApi
 
@@ -573,16 +592,22 @@ try:
             dir_mode="zip",
         )
 except requests.exceptions.HTTPError as exc:
+    _dump_http_errors()
     resp = getattr(exc, "response", None)
     body = (getattr(resp, "text", "") or "").strip() if resp is not None else ""
-    if body:
+    if body and not _captured_http_errors:
         print(f"[Kaggle API HTTP {getattr(resp, 'status_code', '?')}] {body[:1000]}", flush=True)
+    print(f"Dataset creation error: {exc}", flush=True)
+    sys.exit(1)
+except Exception as exc:
+    _dump_http_errors()
     print(f"Dataset creation error: {exc}", flush=True)
     sys.exit(1)
 
 status_str = str(getattr(res, "status", "") or "").lower()
 err_str = str(getattr(res, "error", "") or "").strip()
 if status_str != "ok":
+    _dump_http_errors()
     print(f"Dataset creation error: {err_str or status_str or 'Unknown error'}", flush=True)
     sys.exit(1)
 url_str = str(getattr(res, "url", "") or "").strip()
@@ -770,12 +795,27 @@ def upload_kaggle_dataset(
         exists = False
 
     notes = (version_notes or "Sync dataset from MOSS LoRA Trainer GUI").strip()
+
+    def _is_op_success(exit_code: int, text: str, err_text: str) -> bool:
+        if exit_code != 0:
+            return False
+        if not err_text:
+            return True
+        low_text = (text or "").lower()
+        if "dataset operation succeeded:" in low_text and "dataset creation error:" not in low_text:
+            remaining = [
+                ln for ln in err_text.splitlines()
+                if not ("403" in ln.lower() and "datasets.get" in ln.lower())
+            ]
+            return len(remaining) == 0
+        return False
+
     if exists:
         if on_log:
             on_log(f"[Kaggle 图集] 检测到私有数据集 {dataset_id} 已存在，正在推送新版本...\n")
         rc, out = _run_kaggle_dataset_op("version", Path(stage_dir), notes, cli, env, on_log=on_log)
         err_hint = _extract_kaggle_cli_error(out)
-        if rc == 0 and not err_hint:
+        if _is_op_success(rc, out, err_hint):
             return True, f"已成功更新私有数据集版本：{dataset_id}"
         return False, _format_dataset_error("更新数据集失败", rc, out, err_hint)
 
@@ -783,7 +823,7 @@ def upload_kaggle_dataset(
         on_log(f"[Kaggle 图集] 正在创建私有数据集 {dataset_id}...\n")
     rc, out = _run_kaggle_dataset_op("create", Path(stage_dir), notes, cli, env, on_log=on_log)
     err_hint = _extract_kaggle_cli_error(out)
-    effective_ok = (rc == 0 and not err_hint)
+    effective_ok = _is_op_success(rc, out, err_hint)
 
     if not effective_ok:
         combined_lower = f"{err_hint}\n{out}".lower()
@@ -802,7 +842,7 @@ def upload_kaggle_dataset(
                 on_log(f"[Kaggle 图集] 检测到标题占用，已自动更换防撞车标题 [{new_title}] 并重试创建...\n")
             rc, out = _run_kaggle_dataset_op("create", Path(stage_dir), notes, cli, env, on_log=on_log)
             err_hint = _extract_kaggle_cli_error(out)
-            effective_ok = (rc == 0 and not err_hint)
+            effective_ok = _is_op_success(rc, out, err_hint)
             combined_lower = f"{err_hint}\n{out}".lower()
 
         if not effective_ok and (
@@ -814,7 +854,7 @@ def upload_kaggle_dataset(
                 on_log(f"[Kaggle 图集] 数据集 {dataset_id} 已存在，自动切换为增量版本推送...\n")
             rc2, out2 = _run_kaggle_dataset_op("version", Path(stage_dir), notes, cli, env, on_log=on_log)
             err_hint2 = _extract_kaggle_cli_error(out2)
-            if rc2 == 0 and not err_hint2:
+            if _is_op_success(rc2, out2, err_hint2):
                 return True, f"已自动更新现有私有数据集版本：{dataset_id}"
             return False, _format_dataset_error("增量更新数据集失败", rc2, out2, err_hint2)
 
@@ -850,6 +890,596 @@ def upload_kaggle_dataset(
         )
 
     return True, f"已成功创建并上传私有数据集：{dataset_id}"
+
+
+def stage_external_dataset_zip(
+    raw_params: dict,
+    dataset_slug: str = "",
+    stage_root: Path = None,
+    on_log=None,
+) -> tuple:
+    """将单图集或多子集图片与 .txt 标注整洁打包为单一 ZIP 归档供外链中转站上传。"""
+    raw_slug = dataset_slug or str(raw_params.get("lora_name", "") or "moss-data")
+    slug_base = sanitize_kaggle_slug(raw_slug, prefix="moss-data")
+    root = Path(stage_root) if stage_root else (PROJECT_ROOT / "workspace" / "kaggle_dataset_stage")
+    root.mkdir(parents=True, exist_ok=True)
+
+    ext_stage_dir = root / f"{slug_base}_ext_stage"
+    if ext_stage_dir.exists():
+        shutil.rmtree(ext_stage_dir, ignore_errors=True)
+    ext_stage_dir.mkdir(parents=True, exist_ok=True)
+
+    stats = _populate_dataset_stage_dir(ext_stage_dir, raw_params)
+    zip_path = root / f"{slug_base}_direct.zip"
+    if zip_path.exists():
+        zip_path.unlink(missing_ok=True)
+
+    if on_log:
+        on_log(f"[外链打包] 正在压缩 {stats['images']} 张图与 {stats['captions']} 份标注 -> {zip_path.name}...\n")
+
+    try:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+            for fp in sorted(ext_stage_dir.rglob("*")):
+                if fp.is_file():
+                    zf.write(fp, fp.relative_to(ext_stage_dir).as_posix())
+    finally:
+        shutil.rmtree(ext_stage_dir, ignore_errors=True)
+
+    stats["zip_path"] = str(zip_path)
+    stats["zip_mb"] = round(zip_path.stat().st_size / (1024**2), 2)
+    return zip_path, stats
+
+
+def upload_zip_to_external_mirrors(
+    zip_path: Path,
+    on_log=None,
+    max_mirrors: int = 3,
+) -> tuple:
+    """将本地数据集 ZIP 依次上传至 6 个实测免登录外链站（temp.sh / x0.at / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org），返回 (ok, '|' 拼接直链或报错, 明细列表)。"""
+    zpath = Path(zip_path).resolve()
+    if not zpath.is_file() or zpath.stat().st_size == 0:
+        return False, f"待上传 ZIP 文件不存在或为空：{zpath}", []
+
+    curl_bin = shutil.which("curl.exe") or shutil.which("curl") or "curl"
+    posix_zip = zpath.as_posix()
+    size_mb = zpath.stat().st_size / (1024**2)
+    mirrors = []
+    errors = []
+
+    def _run_upload(label: str, cmd: list):
+        if on_log:
+            on_log(f"[外链上传] 正在向 {label} 上传 {zpath.name} ({size_mb:.2f} MB)...\n")
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=320,
+            creationflags=NO_WINDOW,
+        )
+
+    # 1. temp.sh（72 小时有效，单文件最高 4GB）
+    if len(mirrors) < max_mirrors:
+        try:
+            res = _run_upload(
+                "temp.sh (72h/4GB)",
+                [curl_bin, "-sS", "--connect-timeout", "20", "--max-time", "300", "-F", f"file=@{posix_zip}", "https://temp.sh/upload"],
+            )
+            url_out = (res.stdout or "").strip().splitlines()[0].strip() if (res.stdout or "").strip() else ""
+            if res.returncode == 0 and re.match(r"^https?://temp\.sh/[A-Za-z0-9]+/", url_out, re.IGNORECASE):
+                mirrors.append({"host": "temp.sh", "url": url_out})
+                if on_log:
+                    on_log(f"  ✅ temp.sh 直链就绪: {url_out}\n")
+            else:
+                errors.append(f"temp.sh: rc={res.returncode} out={url_out[:120]} err={(res.stderr or '')[:120]}")
+        except Exception as exc:
+            errors.append(f"temp.sh: {exc}")
+
+    # 2. x0.at（1 GiB 上限，留存 3~100 天，纯静态 GET 直链）
+    if len(mirrors) < max_mirrors and size_mb <= 1000.0:
+        try:
+            res = _run_upload(
+                "x0.at (3~100d/1GB)",
+                [curl_bin, "-sS", "--connect-timeout", "20", "--max-time", "300", "-F", f"file=@{posix_zip}", "https://x0.at/"],
+            )
+            url_out = (res.stdout or "").strip().splitlines()[0].strip() if (res.stdout or "").strip() else ""
+            if res.returncode == 0 and re.match(r"^https?://x0\.at/[A-Za-z0-9_.-]+", url_out, re.IGNORECASE):
+                mirrors.append({"host": "x0.at", "url": url_out})
+                if on_log:
+                    on_log(f"  ✅ x0.at 直链就绪: {url_out}\n")
+            else:
+                errors.append(f"x0.at: rc={res.returncode} out={url_out[:120]} err={(res.stderr or '')[:120]}")
+        except Exception as exc:
+            errors.append(f"x0.at: {exc}")
+
+    # 3. filebin.net（6 天有效）
+    if len(mirrors) < max_mirrors:
+        try:
+            bin_id = f"moss-{secrets.token_hex(4)}"
+            target_url = f"https://filebin.net/{bin_id}/{zpath.name}"
+            res = _run_upload(
+                "filebin.net (6d)",
+                [
+                    curl_bin, "-sS", "--connect-timeout", "20", "--max-time", "300",
+                    "-X", "PUT", "--data-binary", f"@{posix_zip}", "-H", "cid: moss",
+                    target_url,
+                ],
+            )
+            raw_out = (res.stdout or "").strip()
+            parsed = json.loads(raw_out) if raw_out.startswith("{") else {}
+            if res.returncode == 0 and isinstance(parsed, dict) and ("bin" in parsed or "file" in parsed):
+                mirrors.append({"host": "filebin.net", "url": target_url})
+                if on_log:
+                    on_log(f"  ✅ filebin.net 直链就绪: {target_url}\n")
+            else:
+                errors.append(f"filebin.net: rc={res.returncode} out={raw_out[:140]} err={(res.stderr or '')[:120]}")
+        except Exception as exc:
+            errors.append(f"filebin.net: {exc}")
+
+    # 4. transfer.whalebone.io（transfer.sh 开源兼容镜像）
+    if len(mirrors) < max_mirrors:
+        try:
+            res = _run_upload(
+                "transfer.whalebone.io",
+                [curl_bin, "-sS", "--connect-timeout", "20", "--max-time", "300", "-T", posix_zip, f"https://transfer.whalebone.io/{zpath.name}"],
+            )
+            url_out = (res.stdout or "").strip().splitlines()[0].strip() if (res.stdout or "").strip() else ""
+            if res.returncode == 0 and re.match(r"^https?://transfer\.whalebone\.io/[A-Za-z0-9]+/", url_out, re.IGNORECASE):
+                mirrors.append({"host": "transfer.whalebone.io", "url": url_out})
+                if on_log:
+                    on_log(f"  ✅ transfer.whalebone.io 直链就绪: {url_out}\n")
+            else:
+                errors.append(f"transfer.whalebone.io: rc={res.returncode} out={url_out[:120]} err={(res.stderr or '')[:120]}")
+        except Exception as exc:
+            errors.append(f"transfer.whalebone.io: {exc}")
+
+    # 5. ul.sto.care / trystocare.com（API 上限 100MB，72 小时有效）
+    if len(mirrors) < max_mirrors and size_mb <= 98.0:
+        try:
+            res = _run_upload(
+                "ul.sto.care (72h/100MB)",
+                [curl_bin, "-sS", "--connect-timeout", "20", "--max-time", "300", "-T", posix_zip, f"https://ul.sto.care/{zpath.name}"],
+            )
+            raw_out = (res.stdout or "").strip()
+            parsed = json.loads(raw_out) if raw_out.startswith("{") else {}
+            sto_url = str((parsed.get("url", "")) or "").strip()
+            if res.returncode == 0 and re.match(r"^https?://trystocare\.com/[A-Za-z0-9_-]+", sto_url, re.IGNORECASE):
+                mirrors.append({"host": "trystocare.com", "url": sto_url})
+                if on_log:
+                    on_log(f"  ✅ trystocare.com 直链就绪: {sto_url}\n")
+            else:
+                errors.append(f"ul.sto.care: rc={res.returncode} out={raw_out[:140]} err={(res.stderr or '')[:120]}")
+        except Exception as exc:
+            errors.append(f"ul.sto.care: {exc}")
+
+    # 6. tmpfiles.org（60 分钟有效，上限 100MB）
+    if len(mirrors) < max_mirrors and size_mb <= 98.0:
+        try:
+            res = _run_upload(
+                "tmpfiles.org (1h/100MB)",
+                [curl_bin, "-sS", "--connect-timeout", "20", "--max-time", "300", "-F", f"file=@{posix_zip}", "https://tmpfiles.org/api/v1/upload"],
+            )
+            raw_out = (res.stdout or "").strip()
+            parsed = json.loads(raw_out) if raw_out.startswith("{") else {}
+            page_url = str(((parsed.get("data") or {}).get("url", "")) or "").strip()
+            if res.returncode == 0 and page_url.startswith("http"):
+                mirrors.append({"host": "tmpfiles.org", "url": page_url})
+                if on_log:
+                    on_log(f"  ✅ tmpfiles.org 直链就绪: {page_url}\n")
+            else:
+                errors.append(f"tmpfiles.org: rc={res.returncode} out={raw_out[:140]} err={(res.stderr or '')[:120]}")
+        except Exception as exc:
+            errors.append(f"tmpfiles.org: {exc}")
+
+    if mirrors:
+        combined_url = "|".join(m["url"] for m in mirrors)
+        return True, combined_url, mirrors
+
+    err_msg = "所有外链中转站均上传失败，请检查网络连接或改填自定义 ZIP 直链：\n" + "\n".join(f"• {e}" for e in errors)
+    return False, err_msg, []
+
+
+def upload_external_dataset(
+    raw_params: dict,
+    dataset_slug: str = "",
+    stage_root: Path = None,
+    on_log=None,
+) -> tuple:
+    """打包本地单/多子集图集并自动上传至外链中转站，返回 (ok, '|' 拼接直链或报错, 统计详情)。"""
+    zip_path, stats = stage_external_dataset_zip(
+        raw_params,
+        dataset_slug=dataset_slug,
+        stage_root=stage_root,
+        on_log=on_log,
+    )
+    if on_log:
+        on_log(
+            f"[外链打包完成] 模式={stats['mode']} | {stats['images']} 张图 / {stats['captions']} 份标注 "
+            f"| 压缩包 {stats['zip_mb']} MB -> {zip_path}\n"
+        )
+    ok, url_or_err, mirrors = upload_zip_to_external_mirrors(zip_path, on_log=on_log)
+    stats["mirrors"] = mirrors
+    return ok, url_or_err, stats
+
+
+def _resolve_hf_hub_python() -> str:
+    """定位安装有 huggingface_hub 的 Python 解释器（用于当前精简宿主缺少该包时自动桥接上传）。"""
+    for cand in (resolve_cli_python(), sys.executable):
+        if cand and Path(cand).is_file():
+            try:
+                chk = subprocess.run(
+                    [cand, "-c", "import huggingface_hub"],
+                    capture_output=True,
+                    timeout=5,
+                    creationflags=NO_WINDOW,
+                )
+                if chk.returncode == 0:
+                    return cand
+            except Exception:
+                pass
+    detect_py = PROJECT_ROOT / "scripts" / "detect_env.py"
+    if detect_py.is_file():
+        try:
+            res = subprocess.run(
+                [resolve_cli_python(), str(detect_py)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=8,
+                creationflags=NO_WINDOW,
+            )
+            found = (res.stdout or "").strip()
+            if found and Path(found).is_file():
+                return found
+        except Exception:
+            pass
+    return ""
+
+
+def upload_dataset_to_hf_repo(
+    raw_params: dict,
+    repo_id: str,
+    hf_token: str,
+    subdir: str = "",
+    private: bool = True,
+    stage_root: Path = None,
+    on_log=None,
+) -> tuple:
+    """将本地单/多子集图集整理后一键创建并上传至 Hugging Face Private Dataset 永久私有仓库。"""
+    repo_norm = normalize_hf_dataset_repo(repo_id)
+    if not repo_norm or "/" not in repo_norm:
+        return False, "请填写有效的 Hugging Face Dataset 仓库 ID（如 owner/my-dataset）。", {}
+
+    tok = (hf_token or os.environ.get("HF_TOKEN", "") or "").strip()
+    if not tok:
+        return False, "上传至 Hugging Face 私有仓库必须提供具备 Write 权限的 Access Token。", {}
+
+    clean_sub = str(subdir or "").strip().strip("/")
+    safe_slug = sanitize_kaggle_slug(repo_norm.replace("/", "-"), prefix="hf-data")
+    root = Path(stage_root) if stage_root else (PROJECT_ROOT / "workspace" / "kaggle_dataset_stage")
+    hf_stage_dir = root / f"{safe_slug}_hf_stage"
+    if hf_stage_dir.exists():
+        shutil.rmtree(hf_stage_dir, ignore_errors=True)
+    hf_stage_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        stats = _populate_dataset_stage_dir(hf_stage_dir, raw_params)
+        if on_log:
+            on_log(
+                f"[HF 私有仓] 已整理 {stats['images']} 张图 / {stats['captions']} 份标注 ({stats['total_mb']} MB)，"
+                f"正在同步至私有仓库 `{repo_norm}`" + (f" (子目录: {clean_sub})" if clean_sub else "") + "...\n"
+            )
+
+        commit_msg = f"Sync {stats['images']} images from MOSS LoRA Trainer GUI"
+        try:
+            from huggingface_hub import HfApi
+
+            api = HfApi(token=tok)
+            api.create_repo(repo_id=repo_norm, repo_type="dataset", private=bool(private), exist_ok=True)
+            upload_kwargs = {
+                "folder_path": str(hf_stage_dir),
+                "repo_id": repo_norm,
+                "repo_type": "dataset",
+                "commit_message": commit_msg,
+            }
+            if clean_sub:
+                upload_kwargs["path_in_repo"] = clean_sub
+            api.upload_folder(**upload_kwargs)
+        except ImportError:
+            py_hf = _resolve_hf_hub_python()
+            if not py_hf:
+                return (
+                    False,
+                    "当前 Python 环境及已探测环境均未安装 huggingface_hub，请执行 `pip install huggingface_hub` 后重试。",
+                    stats,
+                )
+            helper_code = (
+                "import os, sys\n"
+                "from huggingface_hub import HfApi\n"
+                "repo_id, folder, sub, msg = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]\n"
+                "priv = sys.argv[5] == '1'\n"
+                "api = HfApi(token=os.environ['HF_TOKEN'])\n"
+                "api.create_repo(repo_id=repo_id, repo_type='dataset', private=priv, exist_ok=True)\n"
+                "kw = {'folder_path': folder, 'repo_id': repo_id, 'repo_type': 'dataset', 'commit_message': msg}\n"
+                "if sub: kw['path_in_repo'] = sub\n"
+                "api.upload_folder(**kw)\n"
+                "print('HF_UPLOAD_OK')\n"
+            )
+            env = _build_kaggle_env()
+            env["HF_TOKEN"] = tok
+            res = subprocess.run(
+                [py_hf, "-c", helper_code, repo_norm, str(hf_stage_dir), clean_sub, commit_msg, "1" if private else "0"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=600,
+                env=env,
+                creationflags=NO_WINDOW,
+            )
+            if res.returncode != 0 or "HF_UPLOAD_OK" not in (res.stdout or ""):
+                err_txt = (res.stderr or res.stdout or "").strip()[-400:]
+                return False, f"Hugging Face 私有仓库上传失败：{err_txt}", stats
+
+        if on_log:
+            on_log(f"  ✅ 已完成私有仓库同步：https://huggingface.co/datasets/{repo_norm}\n")
+        stats["repo_id"] = repo_norm
+        stats["subdir"] = clean_sub
+        stats["private"] = bool(private)
+        return True, repo_norm, stats
+    except Exception as exc:
+        return False, f"上传至 Hugging Face 私有仓库失败：{exc}", {}
+    finally:
+        shutil.rmtree(hf_stage_dir, ignore_errors=True)
+
+
+def get_r2_json_path() -> Path:
+    """返回 Cloudflare R2 凭据保存路径，优先尊重 R2_CREDENTIALS_PATH 环境变量。"""
+    env_path = os.environ.get("R2_CREDENTIALS_PATH", "").strip()
+    if env_path:
+        return Path(env_path)
+    return R2_CREDENTIALS_PATH
+
+
+def read_r2_credentials(r2_json_path: Path = None) -> dict:
+    """安全读取 Cloudflare R2 S3 凭据文件（Secret 仅用于内存签名，展示侧提供脱敏掩码）。"""
+    path = Path(r2_json_path) if r2_json_path else get_r2_json_path()
+    result = {
+        "exists": False,
+        "account_id": "",
+        "access_key_id": "",
+        "secret_access_key": "",
+        "has_secret": False,
+        "secret_masked": "",
+        "bucket": "",
+        "public_base_url": "",
+        "path": str(path),
+    }
+    if not path.is_file():
+        return result
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        if isinstance(data, dict):
+            sec = str(data.get("secret_access_key", "") or "").strip()
+            result["exists"] = True
+            result["account_id"] = str(data.get("account_id", "") or "").strip()
+            result["access_key_id"] = str(data.get("access_key_id", "") or "").strip()
+            result["secret_access_key"] = sec
+            result["has_secret"] = bool(sec)
+            result["secret_masked"] = mask_api_key(sec)
+            result["bucket"] = str(data.get("bucket", "") or "").strip()
+            result["public_base_url"] = str(data.get("public_base_url", "") or "").strip()
+    except Exception:
+        result["exists"] = True
+    return result
+
+
+def save_r2_credentials(
+    account_id: str,
+    access_key_id: str,
+    secret_access_key: str,
+    bucket: str = "",
+    public_base_url: str = "",
+    r2_json_path: Path = None,
+) -> tuple:
+    """将 Cloudflare R2 S3 API 凭据保存至用户目录 ~/.kaggle/r2_credentials.json（严禁写入仓库目录）。"""
+    acct = (account_id or "").strip()
+    ak = (access_key_id or "").strip()
+    sk = (secret_access_key or "").strip()
+    bkt = (bucket or "").strip()
+    pub = (public_base_url or "").strip().rstrip("/")
+    if not acct or not ak or not sk or not bkt:
+        return False, "请完整填写 R2 Account ID、Bucket 名称、Access Key ID 与 Secret Access Key。"
+
+    path = Path(r2_json_path) if r2_json_path else get_r2_json_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "account_id": acct,
+            "access_key_id": ak,
+            "secret_access_key": sk,
+            "bucket": bkt,
+            "public_base_url": pub,
+        }
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+        return True, f"R2 凭据已安全保存至 {path}（Bucket: {bkt}）"
+    except Exception as err:
+        return False, f"保存 R2 凭据失败: {err}"
+
+
+def _aws_v4_sign(key_bytes: bytes, msg: str) -> bytes:
+    return hmac.new(key_bytes, msg.encode("utf-8"), hashlib.sha256).digest()
+
+
+def generate_r2_presigned_url(
+    account_id: str,
+    access_key_id: str,
+    secret_access_key: str,
+    bucket: str,
+    object_key: str,
+    method: str = "GET",
+    expires_seconds: int = 604800,
+    endpoint_url: str = "",
+    now_utc: datetime.datetime = None,
+) -> str:
+    """
+    零第三方依赖生成 Cloudflare R2 S3 兼容 AWS4-HMAC-SHA256 预签名 URL（region=auto, service=s3, UNSIGNED-PAYLOAD）。
+    """
+    acct = (account_id or "").strip()
+    ak = (access_key_id or "").strip()
+    sk = (secret_access_key or "").strip()
+    bkt = (bucket or "").strip("/")
+    key = (object_key or "").lstrip("/")
+    if not acct or not ak or not sk or not bkt or not key:
+        raise ValueError("Cloudflare R2 预签名缺少必要参数（account_id / access_key_id / secret_access_key / bucket / object_key）。")
+
+    if endpoint_url and endpoint_url.strip():
+        parsed_ep = urllib.parse.urlparse(endpoint_url.strip())
+        scheme = parsed_ep.scheme or "https"
+        host = parsed_ep.netloc or parsed_ep.path.strip("/")
+    else:
+        scheme = "https"
+        host = f"{acct}.r2.cloudflarestorage.com"
+
+    http_method = (method or "GET").strip().upper()
+    region = "auto"
+    service = "s3"
+    expires = max(60, min(604800, int(expires_seconds)))
+
+    ts = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=datetime.timezone.utc)
+    amz_date = ts.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = ts.strftime("%Y%m%d")
+    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+
+    canonical_uri = f"/{urllib.parse.quote(bkt, safe='')}/{urllib.parse.quote(key, safe='/~_.-')}"
+    query_params = {
+        "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+        "X-Amz-Credential": f"{ak}/{credential_scope}",
+        "X-Amz-Date": amz_date,
+        "X-Amz-Expires": str(expires),
+        "X-Amz-SignedHeaders": "host",
+    }
+    canonical_qs = "&".join(
+        f"{urllib.parse.quote(k, safe='-_.~')}={urllib.parse.quote(v, safe='-_.~')}"
+        for k, v in sorted(query_params.items())
+    )
+    canonical_request = f"{http_method}\n{canonical_uri}\n{canonical_qs}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD"
+    req_hash = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{req_hash}"
+
+    k_date = _aws_v4_sign(f"AWS4{sk}".encode("utf-8"), date_stamp)
+    k_region = _aws_v4_sign(k_date, region)
+    k_service = _aws_v4_sign(k_region, service)
+    k_signing = _aws_v4_sign(k_service, "aws4_request")
+    signature = hmac.new(k_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    return f"{scheme}://{host}{canonical_uri}?{canonical_qs}&X-Amz-Signature={signature}"
+
+
+def upload_dataset_to_cloudflare_r2(
+    raw_params: dict,
+    r2_config: dict,
+    dataset_slug: str = "",
+    stage_root: Path = None,
+    on_log=None,
+) -> tuple:
+    """将本地图集打包为 ZIP 并通过 SigV4 预签名 PUT 上传至私有 Cloudflare R2 桶，返回 7 天有效期预签名直拉链接。"""
+    saved_r2 = read_r2_credentials()
+    acct = str(r2_config.get("account_id") or saved_r2.get("account_id") or "").strip()
+    ak = str(r2_config.get("access_key_id") or saved_r2.get("access_key_id") or "").strip()
+    sk = str(r2_config.get("secret_access_key") or saved_r2.get("secret_access_key") or "").strip()
+    bkt = str(r2_config.get("bucket") or saved_r2.get("bucket") or "").strip("/")
+    prefix = str(r2_config.get("prefix", "moss-datasets") or "moss-datasets").strip("/")
+    pub_base = str(r2_config.get("public_base_url") or saved_r2.get("public_base_url") or "").strip().rstrip("/")
+    endpoint_url = str(r2_config.get("endpoint_url", "") or "").strip()
+
+    if not acct or not ak or not sk or not bkt:
+        return False, "Cloudflare R2 配置不完整，请填写 Account ID、Bucket、Access Key ID 与 Secret Access Key。", {}
+
+    zip_path, stats = stage_external_dataset_zip(
+        raw_params,
+        dataset_slug=dataset_slug,
+        stage_root=stage_root,
+        on_log=on_log,
+    )
+
+    slug_part = sanitize_kaggle_slug(dataset_slug or str(raw_params.get("lora_name", "") or "moss-data"), prefix="moss-data")
+    ts_tag = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+    obj_name = f"{slug_part}_{ts_tag}.zip"
+    object_key = f"{prefix}/{obj_name}" if prefix else obj_name
+
+    put_url = generate_r2_presigned_url(
+        account_id=acct,
+        access_key_id=ak,
+        secret_access_key=sk,
+        bucket=bkt,
+        object_key=object_key,
+        method="PUT",
+        expires_seconds=3600,
+        endpoint_url=endpoint_url,
+    )
+
+    curl_bin = shutil.which("curl.exe") or shutil.which("curl") or "curl"
+    posix_zip = Path(zip_path).resolve().as_posix()
+    if on_log:
+        on_log(f"[R2 上传] 正在上传 {stats['zip_mb']} MB -> r2://{bkt}/{object_key} ...\n")
+
+    try:
+        res = subprocess.run(
+            [
+                curl_bin, "-sS", "-g",
+                "--connect-timeout", "20",
+                "--max-time", "600",
+                "-w", "\n__HTTP_CODE__:%{http_code}",
+                "-X", "PUT",
+                "--upload-file", posix_zip,
+                put_url,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=620,
+            creationflags=NO_WINDOW,
+        )
+    except Exception as exc:
+        return False, f"Cloudflare R2 PUT 上传异常：{exc}", stats
+
+    raw_out = res.stdout or ""
+    http_code = 0
+    m_code = re.search(r"__HTTP_CODE__:(\d+)", raw_out)
+    if m_code:
+        http_code = int(m_code.group(1))
+    body_clean = re.sub(r"\s*__HTTP_CODE__:\d+\s*", "", raw_out).strip()
+
+    if res.returncode != 0 or http_code not in (200, 201, 204):
+        err_detail = body_clean[:300] or (res.stderr or "")[:200]
+        return False, f"Cloudflare R2 上传失败 (curl rc={res.returncode}, HTTP {http_code})：{err_detail}", stats
+
+    get_url = generate_r2_presigned_url(
+        account_id=acct,
+        access_key_id=ak,
+        secret_access_key=sk,
+        bucket=bkt,
+        object_key=object_key,
+        method="GET",
+        expires_seconds=604800,
+        endpoint_url=endpoint_url,
+    )
+    final_url = f"{pub_base}/{urllib.parse.quote(object_key, safe='/~_.-')}|{get_url}" if pub_base else get_url
+    stats["r2_bucket"] = bkt
+    stats["r2_object_key"] = object_key
+    if on_log:
+        on_log(f"  ✅ Cloudflare R2 私有上传完成：r2://{bkt}/{object_key}（已签发 7 天免密预签名直链）\n")
+    return True, final_url, stats
 
 
 def inject_cloud_config_into_train_moss(source_script: Path, config_payload: dict) -> str:
@@ -888,7 +1518,7 @@ def stage_kernel_bundle(
 
     acc = (cloud_opts.get("accelerator") or "NvidiaTeslaT4").strip()
     ds_source = str(cloud_opts.get("dataset_source", "local") or "local").strip().lower()
-    ds_sources = [] if ds_source == "hf" else ([dataset_id.strip()] if (dataset_id and "/" in dataset_id) else [])
+    ds_sources = [] if ds_source in ("hf", "url", "r2") else ([dataset_id.strip()] if (dataset_id and "/" in dataset_id) else [])
     meta = {
         "id": f"{user}/{slug}",
         "title": slug,
@@ -1229,6 +1859,7 @@ def _build_configured_notebook_json(template_ipynb: Path, payload: dict, raw_par
         "HF_DATASET_REPO": repr(payload.get("hf_dataset_repo", "")),
         "HF_DATASET_SUBDIR": repr(payload.get("hf_dataset_subdir", "")),
         "HF_DATASET_REVISION": repr(payload.get("hf_dataset_revision", "main")),
+        "DATASET_URL": repr(payload.get("dataset_url", "")),
         "MAX_RUN_MINUTES": repr(payload.get("max_run_minutes", 540)),
     }
 
@@ -1273,7 +1904,9 @@ def export_manual_upload_bundle(
 
     ds_source = str(cloud_opts.get("dataset_source", "local") or "local").strip().lower()
     hf_repo = normalize_hf_dataset_repo(str(cloud_opts.get("hf_dataset_repo", "")))
+    ext_url = str(cloud_opts.get("dataset_url", "") or "").strip()
     use_hf_direct = (ds_source == "hf" and bool(hf_repo))
+    use_url_direct = (ds_source in ("url", "r2") and bool(ext_url))
 
     payload = build_cloud_config_payload(cleaned_params, cloud_opts)
     nb_obj = _build_configured_notebook_json(
@@ -1284,26 +1917,35 @@ def export_manual_upload_bundle(
     nb_path = base_out / f"kaggle_moss_lora_{safe_name}.ipynb"
     nb_path.write_text(json.dumps(nb_obj, indent=1, ensure_ascii=False), encoding="utf-8")
 
-    if use_hf_direct:
+    if use_hf_direct or use_url_direct:
+        mode_tag = "hf_direct" if use_hf_direct else "url_direct"
         stats = {
-            "mode": "hf_direct",
-            "hf_dataset_repo": hf_repo,
+            "mode": mode_tag,
+            "hf_dataset_repo": hf_repo if use_hf_direct else "",
+            "dataset_url": ext_url if use_url_direct else "",
             "images": 0,
             "captions": 0,
             "total_mb": 0.0,
         }
         zip_path_str = ""
+        src_line = f" • 目标 HF 数据集：{hf_repo}\n" if use_hf_direct else f" • 外链 ZIP 直拉地址：{ext_url}\n"
+        src_desc = "Hugging Face" if use_hf_direct else "外部 ZIP 直链"
+        extra_note = (
+            "   （若该 HF 数据集为 Private 私有仓库，请在 Kaggle 顶部 Add-ons -> Secrets 中添加只读 HF_TOKEN）\n"
+            if use_hf_direct
+            else ""
+        )
         guide_text = (
             f"================================================================\n"
             f"OpenMOSS MOSS-Image Kaggle 免本地传图上传包 ({lora_name})\n"
             f"================================================================\n\n"
-            f"本包已配置为【云端直接从 Hugging Face 拉取图集】，无需上传本地数据集压缩包：\n"
-            f" • 目标 HF 数据集：{hf_repo}\n"
+            f"本包已配置为【云端直接从{src_desc}拉取图集】，无需在 Kaggle 上传数据集压缩包：\n"
+            f"{src_line}"
             f" • 超时自动存盘保护：{payload['max_run_minutes']} 分钟\n\n"
             f"【三步完成云端训练】：\n"
             f"1. 导入训练本：登录 https://www.kaggle.com -> 左侧【+ Create】->【New Notebook】->\n"
             f"   顶部 File -> Import Notebook，导入 `{nb_path.name}`（参数已全部自动填好）。\n"
-            f"   （若该 HF 数据集为 Private 私有仓库，请在 Kaggle 顶部 Add-ons -> Secrets 中添加只读 HF_TOKEN）\n"
+            f"{extra_note}"
             f"2. 开启算力与联网：\n"
             f"   - 右侧/顶部 Settings -> Accelerator 选【GPU T4 x2】（双卡加速）；\n"
             f"   - Settings -> Internet 选【Internet on】。\n"

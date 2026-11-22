@@ -8,7 +8,11 @@ import subprocess
 import time
 import json
 import argparse
+import threading
 from pathlib import Path
+
+SCRIPT_START_MONOTONIC = time.monotonic()
+
 
 def _load_app_version() -> str:
     """读取项目根目录 VERSION 单一版本信源，缺失时安全回退默认版本号。"""
@@ -19,7 +23,51 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.6.0"
+    return "1.7.0"
+
+
+def _normalize_hf_dataset_repo(raw: str) -> str:
+    """将完整 Hugging Face 数据集链接或含后缀字符串规范化为 owner/repo 标识。"""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^https?://huggingface\.co/datasets/", "", text, flags=re.IGNORECASE).strip("/")
+    for sep in ("/tree/", "/blob/", "/resolve/"):
+        if sep in text:
+            text = text.split(sep, 1)[0]
+    parts = [p for p in text.split("/") if p]
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return text
+
+
+def _start_max_runtime_guard(max_minutes: int, pause_file_path: str, start_monotonic: float):
+    """当 max_minutes > 0 时启动后台计时器，超时后写入暂停文件触发优雅存盘打包退出。"""
+    stop_evt = threading.Event()
+    state = {"triggered": False}
+    if int(max_minutes) <= 0:
+        return stop_evt, state
+
+    deadline = float(start_monotonic) + max(1, int(max_minutes)) * 60.0
+
+    def _watcher():
+        while not stop_evt.wait(15.0):
+            if time.monotonic() >= deadline:
+                state["triggered"] = True
+                try:
+                    Path(pause_file_path).parent.mkdir(parents=True, exist_ok=True)
+                    Path(pause_file_path).write_text("max_run_minutes_guard\n", encoding="utf-8")
+                    print(
+                        f"\n[Auto-Save Guard] Reached max_run_minutes={max_minutes}m limit! "
+                        f"Triggered {pause_file_path} to save latest checkpoint and archive before Kaggle timeout...",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(f"\n[Auto-Save Guard] Failed to write pause signal: {exc}", flush=True)
+                return
+
+    threading.Thread(target=_watcher, daemon=True).start()
+    return stop_evt, state
 
 
 def _env_bool(*keys: str, default: bool = False) -> bool:
@@ -165,6 +213,16 @@ parser.add_argument("--dataset_dir", type=str, default=os.environ.get("DATASET_D
                     help="Path to training dataset folder or archive")
 parser.add_argument("--dataset_url", type=str, default=os.environ.get("DATASET_URL", ""),
                     help="Optional direct download URL for a dataset .zip archive if not mounted under /kaggle/input")
+parser.add_argument("--hf_dataset_repo", type=str, default=os.environ.get("HF_DATASET_REPO", ""),
+                    help="Optional Hugging Face Dataset repo ID (owner/repo) or URL for zero-upload cloud pull")
+parser.add_argument("--hf_dataset_subdir", type=str, default=os.environ.get("HF_DATASET_SUBDIR", ""),
+                    help="Optional subfolder path inside the Hugging Face Dataset repo")
+parser.add_argument("--hf_dataset_revision", type=str, default=os.environ.get("HF_DATASET_REVISION", "main"),
+                    help="Branch, tag, or commit revision for --hf_dataset_repo (default: main)")
+parser.add_argument("--hf_token", type=str, default="",
+                    help="Optional Hugging Face access token (prefer HF_TOKEN env or Kaggle Secrets)")
+parser.add_argument("--max_run_minutes", type=int, default=int(os.environ.get("MAX_RUN_MINUTES", "540")),
+                    help="Graceful auto-save & exit time limit in minutes before Kaggle 12h timeout (0=disable, default: 540)")
 parser.add_argument("--config_json", type=str, default=os.environ.get("CLOUD_CONFIG_JSON", ""),
                     help="Optional JSON file path or JSON object string of GUI hyperparameter overrides")
 parser.add_argument("--dry_config_check", action="store_true", default=False,
@@ -231,6 +289,8 @@ def _apply_cloud_config_overrides(arg_parser: argparse.ArgumentParser) -> argpar
             arg_parser.set_defaults(**coerced_defaults)
 
     resolved, _ = arg_parser.parse_known_args()
+    if getattr(resolved, "hf_dataset_repo", ""):
+        resolved.hf_dataset_repo = _normalize_hf_dataset_repo(resolved.hf_dataset_repo)
     return resolved
 
 
@@ -241,7 +301,10 @@ if args.dry_config_check:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
-    print(json.dumps(vars(args), indent=2, ensure_ascii=False))
+    safe_dump = dict(vars(args))
+    if safe_dump.get("hf_token"):
+        safe_dump["hf_token"] = "***"
+    print(json.dumps(safe_dump, indent=2, ensure_ascii=False))
     sys.exit(0)
 
 print("=" * 75)
@@ -413,8 +476,10 @@ if not HF_TOKEN:
         HF_TOKEN = UserSecretsClient().get_secret("HF_TOKEN")
     except Exception:
         pass
+if not HF_TOKEN and getattr(args, "hf_token", "") and str(args.hf_token).strip():
+    HF_TOKEN = str(args.hf_token).strip()
 if not HF_TOKEN:
-    HF_TOKEN = None  # 允许匿名访问公开模型，或通过环境变量注入自定义 Token
+    HF_TOKEN = None  # 允许匿名访问公开模型与数据集，或通过 Secret/环境变量注入自定义 Token
 if HF_TOKEN:
     os.environ["HF_TOKEN"] = str(HF_TOKEN)
     os.environ["HUGGING_FACE_HUB_TOKEN"] = str(HF_TOKEN)
@@ -428,6 +493,13 @@ os.makedirs("/tmp/huggingface", exist_ok=True)
 os.makedirs("/tmp/models/diffusion_models", exist_ok=True)
 os.makedirs("/tmp/models/text_encoders", exist_ok=True)
 os.makedirs("/tmp/models/vae", exist_ok=True)
+
+# 前置安装外围高速传输与训练工具（保证 Section 3 云端直拉 Hugging Face 图集可直接启用 hf-transfer）
+print("\n>>> Installing auxiliary utilities (huggingface_hub, hf-transfer, safetensors, bitsandbytes)...")
+subprocess.run([
+    sys.executable, "-m", "pip", "install", "-q",
+    "huggingface_hub", "hf-transfer", "safetensors", "bitsandbytes", "ftfy"
+], check=True)
 
 workspace_data_root = "/tmp/workspace_dataset"
 os.makedirs(workspace_data_root, exist_ok=True)
@@ -505,7 +577,57 @@ def _audit_cloud_dataset_folders(folder_paths: list, max_tokens: int, resolution
     return stats
 
 
-# 3. 智能发现与准备数据集 (支持多子集独立配比 --subsets_json / subsets_cloud.json，或单图集 /kaggle/input/ 挂载与解压)
+# 3. 智能发现与准备数据集 (支持 Hugging Face 云端直拉、多子集配比、/kaggle/input/ 挂载与 ZIP 解压)
+dataset_source_desc = "kaggle_input"
+if args.dataset_url and args.dataset_url.strip():
+    dataset_source_desc = f"url:{args.dataset_url.strip()[:120]}"
+
+hf_repo_arg = _normalize_hf_dataset_repo(getattr(args, "hf_dataset_repo", ""))
+if hf_repo_arg:
+    from huggingface_hub import snapshot_download
+
+    hf_subdir_arg = str(getattr(args, "hf_dataset_subdir", "") or "").strip().strip("/")
+    hf_rev_arg = str(getattr(args, "hf_dataset_revision", "") or "").strip() or "main"
+    hf_dl_dir = "/tmp/hf_dataset"
+    shutil.rmtree(hf_dl_dir, ignore_errors=True)
+    os.makedirs(hf_dl_dir, exist_ok=True)
+    print(f"\n>>> Pulling dataset directly from Hugging Face Hub: {hf_repo_arg} (rev={hf_rev_arg}, subdir='{hf_subdir_arg or '/'}')...")
+    dl_kwargs = {
+        "repo_id": hf_repo_arg,
+        "repo_type": "dataset",
+        "revision": hf_rev_arg,
+        "local_dir": hf_dl_dir,
+        "max_workers": 8,
+    }
+    if HF_TOKEN:
+        dl_kwargs["token"] = HF_TOKEN
+    if hf_subdir_arg:
+        dl_kwargs["allow_patterns"] = [f"{hf_subdir_arg}/**"]
+    snapshot_download(**dl_kwargs)
+
+    hf_root = os.path.join(hf_dl_dir, hf_subdir_arg) if (hf_subdir_arg and os.path.isdir(os.path.join(hf_dl_dir, hf_subdir_arg))) else hf_dl_dir
+    dataset_source_desc = f"hf:{hf_repo_arg}" + (f"/{hf_subdir_arg}" if hf_subdir_arg else "")
+
+    if not (args.subsets_json and args.subsets_json.strip()):
+        hf_manifests = sorted(
+            glob.glob(os.path.join(hf_root, "**", "subsets_cloud.json"), recursive=True),
+            key=lambda p: (p.count(os.sep), len(p)),
+        )
+        if hf_manifests:
+            args.subsets_json = hf_manifests[0]
+            print(f"Auto-detected HF multi-subset manifest: {args.subsets_json}")
+
+    if not (args.subsets_json and args.subsets_json.strip()) and not (args.dataset_dir and args.dataset_dir.strip()):
+        hf_candidates = []
+        for root_p, _dirs, files in os.walk(hf_root):
+            imgs = [f for f in files if os.path.splitext(f)[1].lower() in valid_img_exts]
+            if imgs:
+                hf_candidates.append((root_p, len(imgs)))
+        if hf_candidates:
+            hf_candidates.sort(key=lambda x: x[1], reverse=True)
+            args.dataset_dir = hf_candidates[0][0]
+            print(f"Auto-selected HF dataset folder ({hf_candidates[0][1]} images): {args.dataset_dir}")
+
 subsets_base_dir = None
 if not (args.subsets_json and args.subsets_json.strip()) and os.path.exists("/kaggle/input"):
     found_manifests = sorted(
@@ -697,14 +819,7 @@ else:
 
 cloud_audit_summary = _audit_cloud_dataset_folders(staged_audit_dirs, max_tokens_val, args.resolution)
 
-# 4. 安装外围依赖
-print("\n>>> Installing auxiliary utilities (safetensors, hf-transfer, bitsandbytes)...")
-subprocess.run([
-    sys.executable, "-m", "pip", "install", "-q",
-    "huggingface_hub", "hf-transfer", "safetensors", "bitsandbytes", "ftfy"
-], check=True)
-
-# 5. 克隆并安装 KohakuMossTrainer
+# 4. 克隆并安装 KohakuMossTrainer
 print("\n>>> Setting up KohakuMossTrainer framework...")
 trainer_dir = "/tmp/KohakuMossTrainer"
 if not os.path.exists(trainer_dir):
@@ -1298,8 +1413,20 @@ with open(data_cfg_file, "w", encoding="utf-8") as f:
     f.write(sanitized_cfg.strip() + "\n")
 print("Sanitization complete! Knobs TEXT_ENCODER_KWARGS and IMAGE_ENCODER_KWARGS physically removed.")
 
-# 10. 启动核心 LoRA 深度训练
-os.environ["KOHAKUMOSS_PAUSE_FILE"] = "/tmp/.pause_request"
+# 10. 启动核心 LoRA 深度训练（内置超时自动存盘守护）
+pause_signal_file = "/tmp/.pause_request"
+if os.path.exists(pause_signal_file):
+    try:
+        os.remove(pause_signal_file)
+    except Exception:
+        pass
+os.environ["KOHAKUMOSS_PAUSE_FILE"] = pause_signal_file
+
+max_run_min = max(0, int(getattr(args, "max_run_minutes", 540)))
+guard_stop, guard_state = _start_max_runtime_guard(max_run_min, pause_signal_file, SCRIPT_START_MONOTONIC)
+if max_run_min > 0:
+    print(f" [Auto-Save Guard] Enabled runtime budget guard: {max_run_min} minutes (auto-save & archive before Kaggle 12h limit).")
+
 print(f"\n>>> Starting {effective_steps}-step Deep LoRA Training Loop: '{args.lora_name}' (Mode={train_mode.upper()}, Variant={selected_variant.upper()}, VRAM={effective_preset}, Res={args.resolution})...")
 start_time = time.time()
 train_cmd = [
@@ -1307,9 +1434,13 @@ train_cmd = [
     "--config", f"configs/user/{args.lora_name}.py"
 ]
 print("Executing command:", " ".join(train_cmd))
-subprocess.run(train_cmd, check=True)
+try:
+    subprocess.run(train_cmd, check=True)
+finally:
+    guard_stop.set()
 elapsed = time.time() - start_time
-print(f" [OK] Core training completed in {elapsed / 60:.2f} minutes ({elapsed / max(1, effective_steps - resumed_step):.2f} s/step)!")
+guard_note = " [Stopped gracefully by Auto-Save Guard]" if guard_state.get("triggered") else ""
+print(f" [OK] Core training completed in {elapsed / 60:.2f} minutes ({elapsed / max(1, effective_steps - resumed_step):.2f} s/step){guard_note}!")
 
 # 11. 智能检索所有生成的 .safetensors 权重并归档打包
 print("\n>>> Locating and packaging all generated .safetensors weights...")
@@ -1383,8 +1514,11 @@ summary_data = {
     "target_preset": args.target_preset,
     "loraplus_ratio": loraplus_val,
     "dataset_mode": "multi_subset" if cloud_subsets_summary else "single",
+    "dataset_source": dataset_source_desc,
     "dataset_audit": cloud_audit_summary,
     "subsets": cloud_subsets_summary,
+    "max_run_minutes": max_run_min,
+    "stopped_by_time_guard": bool(guard_state.get("triggered", False)),
     "optimizer": args.optimizer,
     "learning_rate": args.lr,
     "lr_scheduler": sched_mode,

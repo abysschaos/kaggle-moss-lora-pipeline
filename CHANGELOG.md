@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
 
+## [1.7.0] - 2026-11-23
+
+### Added
+- **云端图集直接从 Hugging Face 拉取 ([train_moss.py](train_moss.py) / [core/kaggle_bridge.py](core/kaggle_bridge.py) / [ui/tab_cloud.py](ui/tab_cloud.py) / [ui/app.py](ui/app.py))**：
+  - 在【☁️ 云端遥控】新增 **【训练图集来源】** 分段切换开关：支持 **`📦 本地打包上传到 Kaggle`** 与 **`🤗 云端直拉 Hugging Face 图集`**；
+  - `hf` 模式下完全跳过本地图片检验与 Kaggle Dataset 上传，`kernel-metadata.json` 自动置空 `dataset_sources: []`；云端通过 `huggingface_hub.snapshot_download` 拉取目标数据集（支持完整 URL / `owner/repo` 规范化、仓内子目录过滤、`subsets_cloud.json` 自动发现以及可选只读 `HF Token`）。
+- **云端实时日志、停机控制与超时自动存盘守护**：
+  - **超时自动存盘 (`--max_run_minutes`)**：默认 `540` 分钟（可在 GUI 自由选择 `0 / 180 / 300 / 480 / 540 / 660` 分钟），到达时限前自动写入 `/tmp/.pause_request` 触发底层优雅存盘，赶在 Kaggle 12 小时硬中断前保留最新检查点与 `{lora_name}_lora_results.zip`，`summary_data` 同步记录 `stopped_by_time_guard` 等状态；
+  - **实时云端日志与停机管理**：接入 `fetch_kaggle_kernel_logs`（调用 `kaggle kernels logs` 截取尾部日志直显右侧控制台）、**【🛑 停监控 & 去网页点 Stop】**（即时停止 30s 本地轮询并引导至 Kaggle 任务页点 Cancel Run），以及带高危二次确认弹窗的 **【🗑️ 强删云端任务】**（`delete_kaggle_kernel`，调用 `kaggle kernels delete --yes`）。
+
+### Changed & Security
+- **零泄密隔离设计**：前端填写的可选只读 `HF Token` 严格仅驻留运行内存，绝不序列化写入 `local_config.json`，免 API 手动导出 `.ipynb` 时亦不嵌入敏感 Token；`train_moss.py --dry_config_check` 会对 `hf_token` 执行 `"***"` 脱敏掩码输出。
+- **同步模板、手册与五位一体版本更新**：同步升级 [notebooks/kaggle_moss_lora_training.ipynb](notebooks/kaggle_moss_lora_training.ipynb)、[.env.example](.env.example)、[VERSION](VERSION) (`1.7.0`)、[launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) (`1.7.0.0`)、[core/config_store.py](core/config_store.py)、[train_local.py](train_local.py)、[README.md](README.md)、[docs/beginner_guide.md](docs/beginner_guide.md)、[docs/kaggle_deployment_guide.md](docs/kaggle_deployment_guide.md) 与全局技能 `kohaku`，并重编译 `MOSS_LoRA_Trainer.exe` 与 `SHA256SUMS.txt`。
+
 ## [1.6.0] - 2026-11-22
 
 ### Added
@@ -202,7 +216,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.4...v1.6.0
 [1.5.4]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.2...v1.5.3

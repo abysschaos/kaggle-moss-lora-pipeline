@@ -18,16 +18,22 @@
 
 ---
 
-## 🚀 方案零（v1.6.0 强烈推荐）：本地桌面端【☁️ 云端遥控】零代码一键云端炼丹
+## 🚀 方案零（v1.7.0 强烈推荐）：本地桌面端【☁️ 云端遥控】零代码一键云端炼丹
 
-从 `v1.6.0` 起，无需打开终端、也无需在网页里手动修改任何一行 Python 参数代码！直接打开本地 `MOSS_LoRA_Trainer.exe`，在【🚀 快速训练】和【📂 数据与续炼】选好预设和图集后，按 `Ctrl+4` 切换到 **【☁️ 云端遥控】**：
+从 `v1.7.0` 起，无需打开终端、也无需在网页里手动修改任何一行 Python 参数代码！直接打开本地 `MOSS_LoRA_Trainer.exe`，在【🚀 快速训练】和【📂 数据与续炼】选好预设和图集后，按 `Ctrl+4` 切换到 **【☁️ 云端遥控】**：
 
 1. **第 1 步 · 导入一次性凭证**：前往 Kaggle 右上角头像 -> **Settings** -> **API** -> **Create New Token** 下载 `kaggle.json`，回到软件点击 **【📥 导入 kaggle.json】** 选中即可（密钥仅保存在本机用户目录 `~/.kaggle/kaggle.json`，不会写入项目配置）。可顺手点 **【🔍 检测连通性】** 验证通畅，若本机尚未装 `kaggle` 命令行也可点 **【⬇️ 安装 CLI】** 一键补齐。
-2. **第 2 步 · 选择云端算力与生成 Slug**：推荐选 **🔥 双卡 T4 DDP** + 底模 **🩺 Heal**，点击 **【🔄 自动生成】** 自动将中文/大写名转为 6~50 位合规英文 Slug；上方同步条会实时确认来自 Tab 1/2 的步数、Rank、DoRA、多子集配比等参数已全部绑定。
+2. **第 2 步 · 选择算力、超时存盘时限与图集来源**：
+   - 推荐选 **🔥 双卡 T4 DDP** + 底模 **🩺 Heal**，并设置 **自动存盘时限(分)**（默认 `540` 分钟 = 9 小时；到达时限容器会自动写入优雅存盘信号并生成 `{lora_name}_lora_results.zip`，防止 Kaggle 12h 硬超时丢失全部中间成果；填 `0` 则不主动限制）。
+   - **训练图集来源切换**：默认 **`📦 本地打包上传到 Kaggle`**（自动将本地单/多子集打为私有 Dataset 与 `subsets_cloud.json`）；若你的图集与 `.txt` 标注已上传至 Hugging Face Dataset 仓库，可切换至 **`🤗 云端直拉 Hugging Face 图集`**，填入仓库 ID/链接、可选仓内子目录及只读 `HF Token`（Token 仅驻留内存不落盘），全程免本地传图！
+   - 点击 **【🔄 自动生成】** 自动将名称转为 6~50 位合规英文 Slug；上方实时同步条会显示完整参数摘要。
 3. **第 3 步 · 点击一键部署**：
-   - 点 **【🚀 一键全自动：打包上传图集 + 同步当前参数推送云端开炼】**：后台静默创建/更新私有 Kaggle Dataset（含多子集相对路径清单 `subsets_cloud.json`），将全部超参数注入 `train_moss.py` 并投递 GPU 计算队列。
-   - **免 API 兜底包**：若所在环境不便直连 Kaggle API，点击 **【📦 导出免 API 手动上传包】** 即可输出图集 ZIP、所有参数已全自动填好的 `.ipynb` 训练本和中文四步说明书，拖进 Kaggle 网页直接点击 **Run All**。
-4. **第 4 步 · 自动轮询与一键拉回本地**：开启 **【⏱️ 自动轮询 (30s)】**，等状态变为 **🟢 COMPLETE** 后点击 **【3️⃣ 一键拉回成品权重】**，成果会自动解压到 `output/<lora_name>/`、同步至 `ComfyUI/models/loras/`，并在右侧实时画出云端收敛 `Loss / EMA` 曲线！
+   - 点绿色主按钮，后台自动完成参数注入（`train_moss.py`）并提交至 Kaggle GPU 队列；开启【1️⃣ 打包并上传图集】或【2️⃣ 仅推送参数开炼】亦可分步操作。
+   - **免 API 兜底包**：点击 **【📦 导出免 API 手动上传包】** 即可输出参数已全自动预填完毕的 `.ipynb` 训练本（本地模式下附带图集 ZIP，HF 模式下直接内置 `HF_DATASET_REPO` 且严禁嵌入私人 Token）和中文操作指南。
+4. **第 4 步 · 实时日志、停机管理与一键拉回本地**：
+   - 开启 **【⏱️ 自动轮询 (30s)】** 或随时点击 **【📜 拉取云端日志】**（调用 `kaggle kernels logs` 截取尾部日志直显右侧控制台）。
+   - 若需手动中止运行中的云端作业，点 **【🛑 停监控 & 去网页点 Stop】** 立即取消本地轮询并在浏览器打开任务页点 `Cancel Run`；遇到完全卡死的任务需清理，可通过二次高危确认执行 **【🗑️ 强删云端任务】**（`kaggle kernels delete --yes`）。
+   - 状态变为 **🟢 COMPLETE** 后点击 **【3️⃣ 一键拉回成品权重】**，成果会自动解压到 `output/<lora_name>/`、同步至 `ComfyUI/models/loras/`，并在右侧实时画出云端收敛 `Loss / EMA` 曲线！
 
 ---
 
@@ -102,6 +108,10 @@ USE_DORA = False                    # 是否启用 DoRA 权重分解 (人物/多
 TARGET_PRESET = "attn-mlp"          # 注入层: "attn" | "attn-mlp" | "attn-mlp+modulation" | "attn-mlp+text-refiner" | "full-block" | "all"
 LORAPLUS_RATIO = 1.0                # LoRA+ 上投影学习率倍率 (1.0=关闭，人物/多概念建议 2.0~4.0)
 SUBSETS_JSON = ""                   # 留空 "" 为单图集；填写 JSON 数组可开启多子集配比
+HF_DATASET_REPO = ""                # 可选：Hugging Face 图集仓库（如 owner/dataset），填后无需挂本地图集
+HF_DATASET_SUBDIR = ""              # 可选：HF 仓内子目录筛选
+HF_DATASET_REVISION = "main"        # 可选：HF 数据集分支或 tag
+MAX_RUN_MINUTES = 540               # 超时自动优雅存盘并退出保护（分钟，540=9h，0=关闭）
 
 # --- 云端显存优化、分辨率与底模变体控制 ---
 MODEL_VARIANT = "heal"              # 底模分支: "heal"(推荐防溢出) | "base"(官方原版) | "sft"(官方SFT对齐版)

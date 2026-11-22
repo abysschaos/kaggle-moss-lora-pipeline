@@ -306,6 +306,21 @@ def sanitize_kaggle_slug(raw: str, prefix: str = "moss") -> str:
     return slug
 
 
+def normalize_hf_dataset_repo(raw: str) -> str:
+    """将 Hugging Face Dataset 网址或 owner/repo 字符串规范化为标准 owner/repo 标识。"""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^https?://huggingface\.co/datasets/", "", text, flags=re.IGNORECASE).strip("/")
+    for sep in ("/tree/", "/blob/", "/resolve/"):
+        if sep in text:
+            text = text.split(sep, 1)[0]
+    parts = [p for p in text.split("/") if p]
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return text
+
+
 def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict) -> dict:
     """将本地 Tab 1~3 清洗参数与云端算力选项映射为与 train_moss.py 完全一致的配置载荷。"""
     acc = (cloud_opts.get("accelerator") or "NvidiaTeslaT4").strip()
@@ -378,7 +393,20 @@ def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict) -> dict:
         "parallel": parallel_val,
         "max_tokens": 0,
         "train_mode": "fresh",
+        "max_run_minutes": max(0, int(float(str(cloud_opts.get("max_run_minutes", 540) or 540).strip()))),
     }
+
+    ds_source = str(cloud_opts.get("dataset_source", "local") or "local").strip().lower()
+    if ds_source == "hf":
+        hf_repo = normalize_hf_dataset_repo(str(cloud_opts.get("hf_dataset_repo", "")))
+        if hf_repo:
+            payload["hf_dataset_repo"] = hf_repo
+            payload["hf_dataset_subdir"] = str(cloud_opts.get("hf_dataset_subdir", "") or "").strip().strip("/")
+            payload["hf_dataset_revision"] = str(cloud_opts.get("hf_dataset_revision", "main") or "main").strip() or "main"
+            hf_tok = str(cloud_opts.get("hf_token", "") or "").strip()
+            if hf_tok:
+                payload["hf_token"] = hf_tok
+
     return payload
 
 
@@ -618,7 +646,8 @@ def stage_kernel_bundle(
     (stage_dir / "train_moss.py").write_text(injected_code, encoding="utf-8")
 
     acc = (cloud_opts.get("accelerator") or "NvidiaTeslaT4").strip()
-    ds_sources = [dataset_id.strip()] if (dataset_id and "/" in dataset_id) else []
+    ds_source = str(cloud_opts.get("dataset_source", "local") or "local").strip().lower()
+    ds_sources = [] if ds_source == "hf" else ([dataset_id.strip()] if (dataset_id and "/" in dataset_id) else [])
     meta = {
         "id": f"{user}/{slug}",
         "title": slug,
@@ -713,6 +742,70 @@ def fetch_kaggle_kernel_status(kernel_id: str, cli_info: dict = None, kaggle_jso
         return {"ok": True, "state": "unknown", "label": f"❔ 当前状态: {raw}", "raw": raw}
     except Exception as err:
         return {"ok": False, "state": "error", "label": f"🟠 查询状态超时或异常: {err}", "raw": str(err)}
+
+
+def fetch_kaggle_kernel_logs(
+    kernel_id: str,
+    cli_info: dict = None,
+    kaggle_json_path: Path = None,
+    tail_lines: int = 200,
+) -> dict:
+    """拉取指定 Kaggle 云端任务的实时或最新执行日志尾部，返回结构化结果。"""
+    cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
+    if not cli.get("found"):
+        return {"ok": False, "text": "", "tail": "", "line_count": 0, "error": "未检测到 Kaggle CLI。"}
+
+    try:
+        res = subprocess.run(
+            [*cli["cmd"], "kernels", "logs", kernel_id],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            env=_build_kaggle_env(kaggle_json_path=kaggle_json_path),
+            creationflags=NO_WINDOW,
+        )
+        raw = f"{res.stdout or ''}\n{res.stderr or ''}".strip()
+        lower = raw.lower()
+        if res.returncode != 0:
+            if "404" in lower or "not found" in lower:
+                return {"ok": False, "text": raw, "tail": "", "line_count": 0, "error": f"云端尚无任务记录: {kernel_id}"}
+            if "queued" in lower or "no logs" in lower:
+                return {"ok": False, "text": raw, "tail": "", "line_count": 0, "error": "任务仍在排队或容器刚启动，暂未产出运行日志，请稍后再试。"}
+            return {"ok": False, "text": raw, "tail": "", "line_count": 0, "error": f"拉取日志失败: {raw[:240]}"}
+
+        lines = raw.splitlines()
+        limit = max(20, int(tail_lines))
+        tail = "\n".join(lines[-limit:]) if len(lines) > limit else raw
+        return {"ok": True, "text": raw, "tail": tail, "line_count": len(lines), "error": ""}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "text": "", "tail": "", "line_count": 0, "error": "拉取云端日志超时（30 秒），请稍后重试。"}
+    except Exception as err:
+        return {"ok": False, "text": "", "tail": "", "line_count": 0, "error": f"拉取日志异常: {err}"}
+
+
+def delete_kaggle_kernel(
+    kernel_id: str,
+    cli_info: dict = None,
+    kaggle_json_path: Path = None,
+    on_log=None,
+) -> tuple:
+    """强制删除指定 Kaggle 云端任务以中止死锁队列并释放配额（破坏性操作：将清空远端输出与历史版本）。"""
+    cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
+    if not cli.get("found"):
+        return False, "未找到 Kaggle CLI。"
+
+    cmd = [*cli["cmd"], "kernels", "delete", kernel_id, "--yes"]
+    if on_log:
+        on_log(f"[Kaggle 强删] 正在彻底删除云端任务 {kernel_id}...\n")
+    rc, out = _stream_subprocess(cmd, PROJECT_ROOT, on_log=on_log, env=_build_kaggle_env(kaggle_json_path))
+    if rc == 0:
+        return True, f"已从 Kaggle 彻底删除任务：{kernel_id}"
+    lower = out.lower()
+    if "404" in lower or "not found" in lower:
+        return False, f"云端未找到任务：{kernel_id}（可能已被删除或尚未成功创建）。"
+    return False, f"删除云端任务失败 (Exit={rc})：\n{out[-300:]}"
 
 
 def _safe_extract_zip(zip_path: Path, target_dir: Path) -> list:
@@ -892,6 +985,10 @@ def _build_configured_notebook_json(template_ipynb: Path, payload: dict, raw_par
         "GPUS": repr(payload["gpus"]),
         "PARALLEL_MODE": repr(payload["parallel"]),
         "SAVE_EVERY": repr(payload["save_every"]),
+        "HF_DATASET_REPO": repr(payload.get("hf_dataset_repo", "")),
+        "HF_DATASET_SUBDIR": repr(payload.get("hf_dataset_subdir", "")),
+        "HF_DATASET_REVISION": repr(payload.get("hf_dataset_revision", "main")),
+        "MAX_RUN_MINUTES": repr(payload.get("max_run_minutes", 540)),
     }
 
     for cell in nb.get("cells", []):
@@ -924,7 +1021,7 @@ def export_manual_upload_bundle(
     export_root: Path = None,
 ) -> dict:
     """
-    零 API 备选方案：导出一键免配置网页手动上传包（含图集 ZIP、预填参数的 .ipynb 与四步中文操作说明）。
+    零 API 备选方案：导出一键免配置网页手动上传包（支持本地图集 ZIP+预填 Notebook，或免本地传图的 HF 直拉 Notebook）。
     """
     lora_name = cleaned_params["lora_name"]
     safe_name = re.sub(r"[^0-9A-Za-z_-]+", "_", lora_name).strip("_") or "moss_lora"
@@ -933,15 +1030,9 @@ def export_manual_upload_bundle(
         shutil.rmtree(base_out, ignore_errors=True)
     base_out.mkdir(parents=True, exist_ok=True)
 
-    stage_tmp = base_out / "_dataset_tmp"
-    stats = _populate_dataset_stage_dir(stage_tmp, raw_params)
-
-    zip_path = base_out / f"{safe_name}_dataset.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for fp in sorted(stage_tmp.rglob("*")):
-            if fp.is_file():
-                zf.write(fp, fp.relative_to(stage_tmp).as_posix())
-    shutil.rmtree(stage_tmp, ignore_errors=True)
+    ds_source = str(cloud_opts.get("dataset_source", "local") or "local").strip().lower()
+    hf_repo = normalize_hf_dataset_repo(str(cloud_opts.get("hf_dataset_repo", "")))
+    use_hf_direct = (ds_source == "hf" and bool(hf_repo))
 
     payload = build_cloud_config_payload(cleaned_params, cloud_opts)
     nb_obj = _build_configured_notebook_json(
@@ -952,30 +1043,69 @@ def export_manual_upload_bundle(
     nb_path = base_out / f"kaggle_moss_lora_{safe_name}.ipynb"
     nb_path.write_text(json.dumps(nb_obj, indent=1, ensure_ascii=False), encoding="utf-8")
 
-    guide_text = (
-        f"================================================================\n"
-        f"OpenMOSS MOSS-Image Kaggle 免 API 手动上传操作包 ({lora_name})\n"
-        f"================================================================\n\n"
-        f"本目录已由本地控制台为您自动打包当前全部参数与图集（共 {stats['images']} 张图 / {stats['captions']} 份标注）。\n\n"
-        f"【四步零代码完成云端训练】：\n"
-        f"1. 上传图集：登录 https://www.kaggle.com -> 左侧【+ Create】->【New Dataset】，\n"
-        f"   把 `{zip_path.name}` 拖进去，勾选 Private 创建私有数据集。\n"
-        f"2. 导入训练本：左侧【+ Create】->【New Notebook】-> 顶部 File -> Import Notebook，\n"
-        f"   导入同目录下的 `{nb_path.name}`（您的所有参数均已自动填好，无需改代码！）。\n"
-        f"3. 开启免费算力与挂载数据：\n"
-        f"   - 右侧/顶部 Settings -> Accelerator 选【GPU T4 x2】（双卡加速）；\n"
-        f"   - Settings -> Internet 选【Internet on】；\n"
-        f"   - File -> Add Data 挂载刚才第 1 步上传的数据集。\n"
-        f"4. 点击顶部【Run All】开始训练。完成后在右侧 Output 下载 `{lora_name}_lora_results.zip`，\n"
-        f"   解压出 `{lora_name}-comfy.safetensors` 放入 ComfyUI/models/loras/ 即可出图！\n"
-    )
+    if use_hf_direct:
+        stats = {
+            "mode": "hf_direct",
+            "hf_dataset_repo": hf_repo,
+            "images": 0,
+            "captions": 0,
+            "total_mb": 0.0,
+        }
+        zip_path_str = ""
+        guide_text = (
+            f"================================================================\n"
+            f"OpenMOSS MOSS-Image Kaggle 免本地传图上传包 ({lora_name})\n"
+            f"================================================================\n\n"
+            f"本包已配置为【云端直接从 Hugging Face 拉取图集】，无需上传本地数据集压缩包：\n"
+            f" • 目标 HF 数据集：{hf_repo}\n"
+            f" • 超时自动存盘保护：{payload['max_run_minutes']} 分钟\n\n"
+            f"【三步完成云端训练】：\n"
+            f"1. 导入训练本：登录 https://www.kaggle.com -> 左侧【+ Create】->【New Notebook】->\n"
+            f"   顶部 File -> Import Notebook，导入 `{nb_path.name}`（参数已全部自动填好）。\n"
+            f"   （若该 HF 数据集为 Private 私有仓库，请在 Kaggle 顶部 Add-ons -> Secrets 中添加只读 HF_TOKEN）\n"
+            f"2. 开启算力与联网：\n"
+            f"   - 右侧/顶部 Settings -> Accelerator 选【GPU T4 x2】（双卡加速）；\n"
+            f"   - Settings -> Internet 选【Internet on】。\n"
+            f"3. 点击顶部【Run All】开始训练。完成后在右侧 Output 下载 `{lora_name}_lora_results.zip`，\n"
+            f"   解压出 `{lora_name}-comfy.safetensors` 放入 ComfyUI/models/loras/ 即可出图！\n"
+        )
+    else:
+        stage_tmp = base_out / "_dataset_tmp"
+        stats = _populate_dataset_stage_dir(stage_tmp, raw_params)
+
+        zip_path = base_out / f"{safe_name}_dataset.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for fp in sorted(stage_tmp.rglob("*")):
+                if fp.is_file():
+                    zf.write(fp, fp.relative_to(stage_tmp).as_posix())
+        shutil.rmtree(stage_tmp, ignore_errors=True)
+        zip_path_str = str(zip_path)
+
+        guide_text = (
+            f"================================================================\n"
+            f"OpenMOSS MOSS-Image Kaggle 免 API 手动上传操作包 ({lora_name})\n"
+            f"================================================================\n\n"
+            f"本目录已由本地控制台为您自动打包当前全部参数与图集（共 {stats['images']} 张图 / {stats['captions']} 份标注）。\n\n"
+            f"【四步零代码完成云端训练】：\n"
+            f"1. 上传图集：登录 https://www.kaggle.com -> 左侧【+ Create】->【New Dataset】，\n"
+            f"   把 `{zip_path.name}` 拖进去，勾选 Private 创建私有数据集。\n"
+            f"2. 导入训练本：左侧【+ Create】->【New Notebook】-> 顶部 File -> Import Notebook，\n"
+            f"   导入同目录下的 `{nb_path.name}`（您的所有参数均已自动填好，无需改代码！）。\n"
+            f"3. 开启免费算力与挂载数据：\n"
+            f"   - 右侧/顶部 Settings -> Accelerator 选【GPU T4 x2】（双卡加速）；\n"
+            f"   - Settings -> Internet 选【Internet on】；\n"
+            f"   - File -> Add Data 挂载刚才第 1 步上传的数据集。\n"
+            f"4. 点击顶部【Run All】开始训练。完成后在右侧 Output 下载 `{lora_name}_lora_results.zip`，\n"
+            f"   解压出 `{lora_name}-comfy.safetensors` 放入 ComfyUI/models/loras/ 即可出图！\n"
+        )
+
     guide_path = base_out / "README_操作步骤.txt"
     guide_path.write_text(guide_text, encoding="utf-8")
 
     return {
         "ok": True,
         "export_dir": str(base_out),
-        "zip_path": str(zip_path),
+        "zip_path": zip_path_str,
         "notebook_path": str(nb_path),
         "guide_path": str(guide_path),
         "stats": stats,

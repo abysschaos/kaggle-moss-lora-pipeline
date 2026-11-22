@@ -5,7 +5,7 @@ from tkinter import ttk
 
 from core.presets import PRESETS
 from .theme import PALETTE
-from .widgets import FlatButton, HoverTooltip, ScrollableFrame, ToggleButton
+from .widgets import FlatButton, HoverTooltip, ScrollableFrame, SegmentedSelector, ToggleButton
 
 
 def _add_labeled_entry(parent, row: int, col_base: int, label_text: str, var: tk.Variable, pady: int = 3, tip: str = None):
@@ -74,6 +74,38 @@ def build_train_tab(parent, app) -> ScrollableFrame:
         font=(c["font_family"], 9, "bold"),
         anchor="w",
     ).pack(fill=tk.X, pady=(0, 6))
+
+    target_row = tk.Frame(preset_card, bg=c["bg_dark"])
+    target_row.pack(fill=tk.X, pady=(0, 6))
+    lbl_target = tk.Label(
+        target_row,
+        text="目标算力:",
+        bg=c["bg_dark"],
+        fg=c["text_main"],
+        font=(c["font_family"], 8, "bold"),
+        width=9,
+        anchor="w",
+    )
+    lbl_target.pack(side=tk.LEFT)
+    seg_target = SegmentedSelector(
+        target_row,
+        variable=app.var_target_compute,
+        options=[
+            ("local", "💻 本机显卡", c["accent_blue"]),
+            ("kaggle_t4x2", "☁️ Kaggle 双卡 T4", c["accent_green"]),
+            ("kaggle_t4x1", "⚡ Kaggle 单卡 T4", c["accent_yellow"]),
+        ],
+        command=app.on_target_compute_changed,
+    )
+    seg_target.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    target_tip = (
+        "切换下方 8 套预设及公式算步的目标硬件环境：\n"
+        "• 本机显卡：按本机探测 VRAM 与单卡打包能力核算；\n"
+        "• Kaggle 双卡 T4：按 DDP 并发（MAX_TOKENS=9216×2卡, 1024px=4图/步）自动校准 GradAcc/LR/Steps；\n"
+        "• Kaggle 单卡 T4：按单卡 16GB（MAX_TOKENS=8192）核算步数。"
+    )
+    HoverTooltip(lbl_target, target_tip)
+    HoverTooltip(seg_target, target_tip)
 
     row1 = tk.Frame(preset_card, bg=c["bg_dark"])
     row1.pack(fill=tk.X, pady=(0, 4))
@@ -230,7 +262,22 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     btn_cli.pack(side=tk.RIGHT)
     HoverTooltip(btn_cli, "查看当前所有界面选项对应的完整 train_local.py CLI 命令行，支持一键复制用于排查或脚本自动化。")
 
+    app.cloud_hw_banner = tk.Label(
+        hp_card,
+        text="☁️ 云端算力模式：Precision(T4自动FP16)、VRAM、Base Prec 与 TextEnc 将由 Kaggle 自动托管；步数与预设已按云端实际并发吞吐校准。",
+        bg=c["card_bg"],
+        fg=c["accent_blue"],
+        font=(c["font_family"], 8),
+        anchor="w",
+        justify=tk.LEFT,
+        padx=8,
+        pady=5,
+        wraplength=560,
+    )
+    scroll.register_wrap_label(app.cloud_hw_banner)
+
     hp_grid = tk.Frame(hp_card, bg=c["bg_dark"])
+    app.hp_grid = hp_grid
     hp_grid.pack(fill=tk.X)
     hp_grid.columnconfigure(1, weight=1)
     hp_grid.columnconfigure(3, weight=1)
@@ -302,8 +349,8 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     )
 
     _add_labeled_combo(
-        hp_grid, 6, 0, "学习率 (LR):", app.var_lr, ["1e-4", "8e-5", "6e-5", "5e-5", "1.5e-4", "2e-4"], state="normal",
-        tip="画风常用 1e-4（LoKr 可用 1.5e-4）；人物五官常用 6e-5~8e-5。",
+        hp_grid, 6, 0, "学习率 (LR):", app.var_lr, ["1e-4", "1.2e-4", "1.3e-4", "8e-5", "6e-5", "1.5e-4", "1.8e-4", "2e-4"], state="normal",
+        tip="画风常用 1e-4（双卡 T4 推荐 1.2e-4 / LoKr 1.8e-4 / Muon 1.3e-4）；人物五官常用 6e-5~8e-5（双卡 T4 推荐 1e-4）。",
     )
     ent_rep = _add_labeled_entry(
         hp_grid, 6, 2, "每图重复 (Repeats):", app.var_repeats,
@@ -367,8 +414,44 @@ def build_train_tab(parent, app) -> ScrollableFrame:
         pady=5,
         wraplength=560,
     )
-    math_lbl.pack(fill=tk.X, pady=(4, 6))
+    math_lbl.pack(fill=tk.X, pady=(4, 4))
     scroll.register_wrap_label(math_lbl)
+    app.lbl_math_info = math_lbl
+
+    est_row = tk.Frame(hp_card, bg=c["bg_dark"])
+    est_row.pack(fill=tk.X, pady=(0, 6))
+    lbl_est = tk.Label(
+        est_row,
+        text="预估图数(HF/空目录算步):",
+        bg=c["bg_dark"],
+        fg=c["text_sub"],
+        font=(c["font_family"], 8),
+        anchor="w",
+    )
+    lbl_est.pack(side=tk.LEFT)
+    ent_est = tk.Entry(
+        est_row,
+        textvariable=app.var_manual_img_count,
+        bg=c["input_bg"],
+        fg=c["text_main"],
+        insertbackground=c["text_main"],
+        relief=tk.FLAT,
+        font=("Consolas", 8),
+        width=6,
+    )
+    ent_est.pack(side=tk.LEFT, padx=(6, 8))
+    ent_est.bind("<KeyRelease>", lambda _e: app.recalculate_math())
+    tk.Label(
+        est_row,
+        text="留空自动统计本地目录",
+        bg=c["bg_dark"],
+        fg=c["text_sub"],
+        font=(c["font_family"], 8),
+        anchor="w",
+    ).pack(side=tk.LEFT)
+    est_tip = "使用【🤗 云端直拉 Hugging Face 图集】且本机未放图时，填入 HF 数据集张数即可精准核算双卡/单卡推荐步数；本地有图时留空自动数图。"
+    HoverTooltip(lbl_est, est_tip)
+    HoverTooltip(ent_est, est_tip)
 
     # ==================== 可折叠高阶算法/防过拟合/优化器抽屉 ====================
     app.btn_adv_toggle = FlatButton(

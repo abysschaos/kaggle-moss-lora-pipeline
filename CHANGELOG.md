@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
 
+## [1.7.1] - 2026-11-23
+
+### Added
+- **目标算力环境解耦与 Kaggle T4 双卡预设智能派生 ([core/config_store.py](core/config_store.py) / [core/presets.py](core/presets.py) / [ui/tab_train.py](ui/tab_train.py) / [ui/tab_cloud.py](ui/tab_cloud.py) / [ui/app.py](ui/app.py))**：
+  - 在 Tab 1 预设卡顶部新增 **【目标算力】** 分段切换条（`💻 本机显卡` / `☁️ Kaggle 双卡 T4` / `⚡ Kaggle 单卡 T4`），与 Tab 4 云端算力队列实现双向实时同步，并在云端模式下显示硬件参数自动托管提示条；
+  - 新增 `COMPUTE_TARGET_PROFILES`、`resolve_compute_target_budget()` 与 `CLOUD_T4X2_OVERRIDES` / `resolve_preset_for_target()` / `recommend_save_every_and_ema()`：切换至 `☁️ Kaggle 双卡 T4` 时按 `MAX_TOKENS=9216×2卡`（`1024px` 与 `896px` 并发 4 图/步、`768px` 并发 6 图/步）自动核算步数，8 套预设自动将 `GradAcc` 归 1、按 $\sqrt{B}$ 平方根法则温和校准学习率（`1.2e-4 / 1e-4 / 1.8e-4 / 8e-5 / 1.3e-4`），并在总步数较短时自动细化【每 N 步存盘】（`<=120` 步设 `30`、`<=320` 步设 `50`）与短步数 `EMA` 平滑（`<250` 步时 `0.99 -> 0.97`）；
+  - **HF / 空目录步数预估**：在公式算力条下方新增紧凑的【预估图数(HF/空目录算步)】输入框，配合云端 HF 直拉精准核算推荐步数。
+- **推送前防过曝安全网 (`_confirm_cloud_batch_sanity`) & 算力告警高亮**：
+  - 当当前步数明显偏高（`>= max(1.8×推荐步数, 推荐步数+80)`）或双卡总步数偏少（`<120` 步）时，公式算力条自动切为黄色预警提示；
+  - 点击一键部署、仅推送内核或导出免 API 手动上传包前往 `Kaggle 双卡 T4 DDP` 时，若检测到高 `GradAcc` 或潜在 1.8 倍以上过曝配置，弹出带明确 `[是/否/取消]` 指引的警告框，支持一键按双卡重算后继续推送或保持原参数强推。
+
+### Changed
+- **五位一体版本同步**：更新 [VERSION](VERSION) 至 `1.7.1`、[launcher/MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs) 至 `1.7.1.0`、[train_local.py](train_local.py)、[train_moss.py](train_moss.py)、[notebooks/kaggle_moss_lora_training.ipynb](notebooks/kaggle_moss_lora_training.ipynb)、[README.md](README.md)、[docs/beginner_guide.md](docs/beginner_guide.md)、[docs/kaggle_deployment_guide.md](docs/kaggle_deployment_guide.md) 与全局技能 `kohaku`，并重编译 `MOSS_LoRA_Trainer.exe` 与 `SHA256SUMS.txt`。
+
 ## [1.7.0] - 2026-11-23
 
 ### Added
@@ -216,7 +230,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.1...HEAD
+[1.7.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.4...v1.6.0
 [1.5.4]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.5.3...v1.5.4

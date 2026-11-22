@@ -1,6 +1,7 @@
 """Core business logic, configuration persistence, presets, and trainer runner helpers."""
 
 from .config_store import (
+    COMPUTE_TARGET_PROFILES,
     PROJECT_ROOT,
     compute_exposure_summary,
     count_images_in_dir,
@@ -11,11 +12,19 @@ from .config_store import (
     open_in_explorer,
     probe_gpu_quick,
     resolve_cli_python,
+    resolve_compute_target_budget,
     resolve_effective_vram_label,
     resolve_max_tokens_budget,
     save_local_config,
 )
-from .presets import ADVANCED_DEFAULTS, PRESETS, get_preset_by_id
+from .presets import (
+    ADVANCED_DEFAULTS,
+    CLOUD_T4X2_OVERRIDES,
+    PRESETS,
+    get_preset_by_id,
+    recommend_save_every_and_ema,
+    resolve_preset_for_target,
+)
 from .kaggle_bridge import (
     KAGGLE_ACCELERATORS,
     build_cloud_config_payload,
@@ -51,11 +60,14 @@ __all__ = [
     "PROJECT_ROOT",
     "ADVANCED_DEFAULTS",
     "PRESETS",
+    "CLOUD_T4X2_OVERRIDES",
+    "COMPUTE_TARGET_PROFILES",
     "NO_WINDOW",
     "KAGGLE_ACCELERATORS",
     "load_app_version",
     "is_trainer_ready",
     "resolve_cli_python",
+    "resolve_compute_target_budget",
     "resolve_effective_vram_label",
     "probe_gpu_quick",
     "discover_default_comfy_models",
@@ -66,6 +78,8 @@ __all__ = [
     "resolve_max_tokens_budget",
     "compute_exposure_summary",
     "get_preset_by_id",
+    "resolve_preset_for_target",
+    "recommend_save_every_and_ema",
     "validate_training_params",
     "build_train_command",
     "request_graceful_pause",

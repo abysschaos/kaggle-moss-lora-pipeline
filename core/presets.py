@@ -290,7 +290,64 @@ PRESETS = [
 
 _PRESET_MAP = {p["id"]: p for p in PRESETS}
 
+# 针对 Kaggle T4 x2 DDP（MAX_TOKENS=9216 x 2卡, 1024px=4图/步）的预设智能派生覆盖：
+# Batch 放大后默认归 1 GradAcc（单步已 4 图足够稳定），并按平方根法则温和调整学习率。
+CLOUD_T4X2_OVERRIDES = {
+    "style": {"grad_acc": "1", "lr": "1.2e-4"},
+    "character": {"grad_acc": "1", "lr": "1e-4"},
+    "multi_char": {"grad_acc": "1", "lr": "1e-4"},
+    "multi_style": {"grad_acc": "1", "lr": "1.2e-4"},
+    "concept": {"grad_acc": "1", "lr": "1.2e-4"},
+    "lokr_style": {"grad_acc": "1", "lr": "1.8e-4"},
+    "antifit_char": {"grad_acc": "1", "lr": "8e-5"},
+    "muon_style": {"grad_acc": "1", "lr": "1.3e-4"},
+}
+
 
 def get_preset_by_id(preset_id: str):
     """按 ID 检索预设定义字典。"""
     return _PRESET_MAP.get(preset_id)
+
+
+def recommend_save_every_and_ema(rec_steps: int, base_ema: str = "0.0") -> tuple:
+    """根据推荐总步数自适应建议存档间隔与短步数 EMA，避免总步数骤降后检查点过稀或 EMA 滞后。"""
+    steps = max(0, int(rec_steps or 0))
+    if steps <= 0:
+        save_every = "100"
+    elif steps <= 120:
+        save_every = "30"
+    elif steps <= 320:
+        save_every = "50"
+    else:
+        save_every = "100"
+
+    ema_raw = str(base_ema if base_ema is not None else "0.0").strip() or "0.0"
+    try:
+        ema_val = float(ema_raw)
+    except Exception:
+        ema_val = 0.0
+
+    if ema_val >= 0.985 and 0 < steps < 250:
+        return save_every, "0.97", f"短步数({steps} < 250)已将 EMA {ema_raw} 调平至 0.97 防收敛滞后"
+    return save_every, ema_raw, ""
+
+
+def resolve_preset_for_target(preset_id: str, target_compute: str = "local") -> tuple:
+    """按目标算力环境返回 (派生后的参数字典, 云端自适应说明列表)。"""
+    preset = get_preset_by_id(preset_id)
+    if not preset:
+        return {}, []
+
+    merged = dict(preset.get("values", {}))
+    tc = (target_compute or "local").strip().lower()
+    if tc == "kaggle_t4x2":
+        overrides = CLOUD_T4X2_OVERRIDES.get(preset_id, {})
+        merged.update(overrides)
+        notes = [
+            f"Kaggle T4×2 DDP 单步并发 4 图（MAX_TOKENS=9216×2卡），已自动将 GradAcc 设为 {merged.get('grad_acc', '1')}，"
+            f"并按 √B 法则温和校准 LR={merged.get('lr', '1e-4')}。"
+        ]
+        return merged, notes
+    if tc == "kaggle_t4x1":
+        return merged, ["已按 Kaggle 单卡 T4（MAX_TOKENS=8192）核算单步吞吐与步数。"]
+    return merged, []

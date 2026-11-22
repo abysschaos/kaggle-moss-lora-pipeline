@@ -45,10 +45,13 @@ from core import (
     pull_and_extract_kaggle_outputs,
     push_kaggle_kernel,
     read_kaggle_credentials,
+    recommend_save_every_and_ema,
     request_graceful_pause,
     rescue_latest_weights,
+    resolve_compute_target_budget,
     resolve_effective_vram_label,
     resolve_max_tokens_budget,
+    resolve_preset_for_target,
     sanitize_kaggle_slug,
     save_kaggle_credentials,
     save_local_config,
@@ -255,6 +258,11 @@ class ModernLocalTrainerGUI:
         self.var_kaggle_max_run_min = tk.StringVar(
             value=str(saved_cfg.get("kaggle_max_run_min", "540") or "540").strip()
         )
+        tc_init = str(saved_cfg.get("target_compute", "local") or "local").strip().lower()
+        if tc_init not in ("local", "kaggle_t4x2", "kaggle_t4x1"):
+            tc_init = "local"
+        self.var_target_compute = tk.StringVar(value=tc_init)
+        self.var_manual_img_count = tk.StringVar(value=str(saved_cfg.get("manual_img_count", "") or "").strip())
         self.var_cloud_auto_poll = tk.BooleanVar(value=False)
 
         # 状态文本标签变量
@@ -277,6 +285,7 @@ class ModernLocalTrainerGUI:
         )
         self.var_output_dir.trace_add("write", lambda *_: self.update_output_preview())
         self.var_resume_path.trace_add("write", lambda *_: self.refresh_resume_status())
+        self.var_steps.trace_add("write", lambda *_: (self.recalculate_math(), self.refresh_cloud_sync_summary()))
 
         self.build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -287,6 +296,7 @@ class ModernLocalTrainerGUI:
         self.refresh_subset_tree()
         self.update_output_preview()
         self.refresh_resume_status()
+        self.on_target_compute_changed(silent=True, from_cloud_tab=True)
         self.recalculate_math()
         self.refresh_cloud_sync_summary()
         self._ui_queue_job = self.root.after(20, self._drain_ui_queue)
@@ -499,6 +509,8 @@ class ModernLocalTrainerGUI:
             "hf_dataset_repo": self.var_hf_dataset_repo.get().strip(),
             "hf_dataset_subdir": self.var_hf_dataset_subdir.get().strip(),
             "kaggle_max_run_min": self.var_kaggle_max_run_min.get().strip() or "540",
+            "target_compute": self.var_target_compute.get().strip().lower() or "local",
+            "manual_img_count": self.var_manual_img_count.get().strip(),
         }
 
     def save_local_config(self):
@@ -625,7 +637,7 @@ class ModernLocalTrainerGUI:
                 btn.set_colors(base_bg, base_fg, hover_bg, active_bg)
 
     def apply_preset(self, preset_id: str):
-        """应用 core.presets 中声明的 8 套场景预设并同步 UI 联动。"""
+        """应用 core.presets 中声明的 8 套场景预设，并按当前目标算力自动派生 cloud/local 参数与同步联动。"""
         preset = get_preset_by_id(preset_id)
         if not preset:
             return
@@ -633,6 +645,9 @@ class ModernLocalTrainerGUI:
         self._reset_advanced_defaults()
         self.var_multi_subset.set(bool(preset.get("multi_subset", False)))
         self._apply_subset_panel_visibility()
+
+        target_compute = (self.var_target_compute.get() or "local").strip().lower()
+        resolved_vals, cloud_notes = resolve_preset_for_target(preset_id, target_compute)
 
         var_map = {
             "repeats": self.var_repeats,
@@ -660,18 +675,26 @@ class ModernLocalTrainerGUI:
             "optimizer": self.var_optimizer,
             "timestep": self.var_timestep,
         }
-        for key, val in preset.get("values", {}).items():
+        for key, val in resolved_vals.items():
             if key in var_map:
                 var_map[key].set(val)
 
         if preset.get("align_steps", False):
             self.align_steps_by_formula(silent=True)
 
+        if target_compute != "local":
+            cloud_notes.extend(self._apply_target_save_and_ema(target_compute))
+        else:
+            self.var_save_every.set("100")
+
         self.on_dynamic_controls_changed()
         self.recalculate_math()
         self.update_quick_status_summary()
         self.highlight_active_preset(preset_id)
-        messagebox.showinfo(preset["dialog_title"], preset["dialog_message"])
+        dialog_msg = preset["dialog_message"]
+        if cloud_notes:
+            dialog_msg += "\n\n【☁️ 云端算力自动适配】\n" + "\n".join(f"• {n}" for n in cloud_notes)
+        messagebox.showinfo(preset["dialog_title"], dialog_msg)
 
     # ==================== 引擎管理、底模扫描与输出预览 ====================
     def check_trainer_status(self):
@@ -1297,7 +1320,33 @@ class ModernLocalTrainerGUI:
         self.update_quick_status_summary()
 
     # ==================== 数学算力估算与步数自动对齐 ====================
-    def _compute_math_summary(self):
+    def _resolve_manual_img_override(self) -> int:
+        raw = (self.var_manual_img_count.get() or "").strip()
+        if not raw:
+            return 0
+        try:
+            manual = int(float(raw))
+        except Exception:
+            return 0
+        if manual <= 0:
+            return 0
+        if self.var_multi_subset.get():
+            return 0
+        local_cnt = count_images_in_dir(self.var_data_dir.get().strip())
+        tc = (self.var_target_compute.get() or "local").strip().lower()
+        if (self._is_hf_cloud_source() and tc != "local") or local_cnt == 0:
+            return manual
+        return 0
+
+    def _get_active_compute_meta(self, target_override: str = None) -> tuple:
+        tc = (target_override or self.var_target_compute.get() or "local").strip().lower()
+        eff_key, tok_budget, active_gpus, short_badge = resolve_compute_target_budget(
+            tc, self.var_vram_preset.get(), self.detected_vram_gb
+        )
+        return tc, eff_key, tok_budget, active_gpus, short_badge
+
+    def _compute_math_summary(self, target_override: str = None):
+        _tc, _eff_key, tok_budget, active_gpus, _badge = self._get_active_compute_meta(target_override)
         return compute_exposure_summary(
             multi_subset=bool(self.var_multi_subset.get()),
             subsets=self.subsets,
@@ -1309,14 +1358,101 @@ class ModernLocalTrainerGUI:
             resolution=int(self.var_resolution.get() or 1024),
             grad_acc=max(1, int(float(self.var_grad_acc.get() or 1))),
             timestep_mu=float(self.var_timestep_mu.get() or 0.0),
+            active_gpus=active_gpus,
+            max_tokens_override=tok_budget,
+            img_count_override=self._resolve_manual_img_override(),
         )
+
+    def _apply_target_save_and_ema(self, target_compute: str, preset_id: str = None) -> list:
+        """按目标算力与推荐步数同步存档间隔与短步数 EMA；切回本机时恢复预设基准值。"""
+        notes = []
+        if target_compute != "local":
+            try:
+                cur_steps = int(float(self.var_steps.get() or 0))
+            except Exception:
+                cur_steps = 0
+            save_ev, ema_adj, ema_note = recommend_save_every_and_ema(cur_steps, self.var_ema.get())
+            self.var_save_every.set(save_ev)
+            self.var_ema.set(ema_adj)
+            if ema_note:
+                notes.append(ema_note)
+            if cur_steps > 0 and save_ev != "100":
+                notes.append(f"推荐步数 {cur_steps} 偏短，已自动将【每 N 步存盘】细化为 {save_ev} 步。")
+        else:
+            self.var_save_every.set("100")
+            if preset_id:
+                preset = get_preset_by_id(preset_id)
+                base_ema = (preset or {}).get("values", {}).get("ema", ADVANCED_DEFAULTS["ema"])
+                self.var_ema.set(str(base_ema))
+        return notes
+
+    def on_target_compute_changed(self, silent: bool = False, from_cloud_tab: bool = False):
+        """在 Tab 1 切换目标算力（本机 / Kaggle双卡T4 / Kaggle单卡T4），同步 Tab 4、提示条及激活预设派生值。"""
+        tc = (self.var_target_compute.get() or "local").strip().lower()
+        if tc not in ("local", "kaggle_t4x2", "kaggle_t4x1"):
+            tc = "local"
+            self.var_target_compute.set(tc)
+
+        if not from_cloud_tab:
+            if tc == "kaggle_t4x2":
+                self.var_kaggle_accelerator.set("NvidiaTeslaT4")
+            elif tc == "kaggle_t4x1":
+                self.var_kaggle_accelerator.set("default_gpu")
+
+        banner = getattr(self, "cloud_hw_banner", None)
+        hp_grid = getattr(self, "hp_grid", None)
+        if banner is not None and hp_grid is not None:
+            try:
+                banner.pack_forget()
+                if tc != "local":
+                    banner.pack(fill=tk.X, pady=(0, 6), before=hp_grid)
+            except Exception:
+                pass
+
+        active_pid = getattr(self, "_active_preset_id", None)
+        if not silent and not from_cloud_tab and active_pid:
+            vals, _notes = resolve_preset_for_target(active_pid, tc)
+            if vals:
+                if "grad_acc" in vals:
+                    self.var_grad_acc.set(str(vals["grad_acc"]))
+                if "lr" in vals:
+                    self.var_lr.set(str(vals["lr"]))
+                _, cur_img_cnt, *_ = self._compute_math_summary()
+                if cur_img_cnt > 0:
+                    self.align_steps_by_formula(silent=True)
+                self._apply_target_save_and_ema(tc, preset_id=active_pid)
+                self.monitor.log(
+                    f"[目标算力切换] {tc} -> 已重新校准激活预设 [{active_pid}]："
+                    f"GradAcc={self.var_grad_acc.get()}, LR={self.var_lr.get()}, "
+                    f"Steps={self.var_steps.get()}, SaveEvery={self.var_save_every.get()}, EMA={self.var_ema.get()}\n"
+                )
+
+        self.recalculate_math()
+        self.refresh_cloud_sync_summary()
+        if hasattr(self, "tab_scrolls") and self.tab_scrolls:
+            try:
+                self.root.after_idle(self.tab_scrolls[0].refresh_scroll_region)
+            except Exception:
+                pass
+
+    def on_cloud_accelerator_changed(self):
+        """Tab 4 切换云端算力队列时，反向同步 Tab 1 目标算力与数学估算。"""
+        acc = (self.var_kaggle_accelerator.get() or "NvidiaTeslaT4").strip()
+        mapped = "kaggle_t4x2" if acc == "NvidiaTeslaT4" else "kaggle_t4x1"
+        if self.var_target_compute.get() != mapped:
+            self.var_target_compute.set(mapped)
+        self.on_target_compute_changed(silent=True, from_cloud_tab=True)
 
     def recalculate_math(self):
         try:
+            tc, _eff_key, tok_budget, active_gpus, short_badge = self._get_active_compute_meta()
             is_multi, img_count, factor, ep, total_exp, rec, eff_batch, imgs_per_pack, acc, mu, _ = self._compute_math_summary()
-            raw_vram = (self.var_vram_preset.get() or "auto").strip().lower()
-            eff_vram, tok_budget = resolve_effective_vram_label(raw_vram, self.detected_vram_gb)
-            vram_tag = f"{raw_vram}→{eff_vram}" if raw_vram == "auto" else eff_vram
+            tok_desc = f"{tok_budget}×{active_gpus}卡" if active_gpus > 1 else f"{tok_budget}"
+            batch_expr = (
+                f"{imgs_per_pack}图/卡 × {active_gpus}卡 × GradAcc {acc} = {eff_batch}张/步"
+                if active_gpus > 1
+                else f"{imgs_per_pack}图/包 × GradAcc {acc} = {eff_batch}张/步"
+            )
             if mu <= -0.8:
                 mu_hint = "宏观画风(高噪)"
             elif mu >= 0.3:
@@ -1324,19 +1460,44 @@ class ModernLocalTrainerGUI:
             else:
                 mu_hint = "通用均衡"
 
+            manual_used = self._resolve_manual_img_override() > 0
+            cnt_note = f"(预估{img_count}图)" if manual_used else f"{img_count}图"
             if is_multi:
                 enabled_cnt = sum(1 for s in self.subsets if s.get("enabled", True))
-                self.var_math_info.set(
-                    f"📊 [多子集算力 | 档位 {vram_tag} / MAX_TOKENS={tok_budget}] ({enabled_cnt}子集/{img_count}图) 单轮{factor}曝光 × {ep}Epochs = {total_exp}\n"
-                    f"📦 单步等效 Batch = {imgs_per_pack}图/包 × GradAcc {acc} = {eff_batch}张/步 → 建议 Max Steps ≈ {rec} 步 ({mu_hint})"
+                base_msg = (
+                    f"📊 [{short_badge} | MAX_TOKENS={tok_desc}] ({enabled_cnt}子集/{img_count}图) 单轮{factor}曝光 × {ep}Epochs = {total_exp}\n"
+                    f"📦 单步等效 Batch = {batch_expr} → 建议 Max Steps ≈ {rec} 步 ({mu_hint})"
                 )
             else:
-                self.var_math_info.set(
-                    f"📊 [单目录算力 | 档位 {vram_tag} / MAX_TOKENS={tok_budget}] {img_count}图 × {factor}Repeats × {ep}Epochs = {total_exp}次总曝光\n"
-                    f"📦 单步等效 Batch = {imgs_per_pack}图/包 × GradAcc {acc} = {eff_batch}张/步 → 建议 Max Steps ≈ {rec} 步 ({mu_hint})"
+                base_msg = (
+                    f"📊 [{short_badge} | MAX_TOKENS={tok_desc}] {cnt_note} × {factor}Repeats × {ep}Epochs = {total_exp}次总曝光\n"
+                    f"📦 单步等效 Batch = {batch_expr} → 建议 Max Steps ≈ {rec} 步 ({mu_hint})"
                 )
+
+            warn_color = self.accent_green
+            try:
+                cur_steps = int(float(self.var_steps.get().strip()))
+            except Exception:
+                cur_steps = 0
+
+            if img_count > 0 and cur_steps > 0 and cur_steps >= max(rec * 1.8, rec + 80):
+                ratio = cur_steps / max(1, rec)
+                base_msg += f"\n⚠️ 当前 Max Steps ({cur_steps}) 约为该算力推荐值 ({rec}) 的 {ratio:.1f} 倍，建议点【📐 一键对齐推荐步数】防过拟合！"
+                warn_color = self.accent_yellow
+            elif tc == "kaggle_t4x2" and img_count > 0 and 0 < rec < 120:
+                base_msg += f"\n⚠️ 双卡大 Batch 下推荐步数仅 {rec} 步(<120)，易更新不足，建议略提高 Epochs 使步数达到 150+ 步。"
+                warn_color = self.accent_yellow
+
+            self.var_math_info.set(base_msg)
+            if hasattr(self, "lbl_math_info"):
+                self.lbl_math_info.config(fg=warn_color)
         except Exception:
             self.var_math_info.set("📊 请填入有效正整数（Repeats / Epochs / GradAcc）以实时演算推荐步数。")
+            if hasattr(self, "lbl_math_info"):
+                try:
+                    self.lbl_math_info.config(fg=self.accent_green)
+                except Exception:
+                    pass
 
     def preview_cli_command(self):
         """校验当前全部面板参数并弹窗预览对应的完整 train_local.py 启动命令（支持一键复制）。"""
@@ -1599,15 +1760,18 @@ class ModernLocalTrainerGUI:
             else:
                 imgs = count_images_in_dir(self.var_data_dir.get().strip())
                 ds_txt = f"单图集 ({imgs} 张)"
+            acc_val = self.var_kaggle_accelerator.get().strip()
             acc_map = {"NvidiaTeslaT4": "双卡 T4 DDP", "default_gpu": "单卡 GPU", "NvidiaTeslaP100": "兼容队列"}
-            acc_txt = acc_map.get(self.var_kaggle_accelerator.get().strip(), "双卡 T4 DDP")
+            acc_txt = acc_map.get(acc_val, "双卡 T4 DDP")
+            sim_tc = "kaggle_t4x2" if acc_val == "NvidiaTeslaT4" else "kaggle_t4x1"
+            _, _, _, _, _, _, cloud_batch, _, _, _, _ = self._compute_math_summary(target_override=sim_tc)
             dora_txt = "+DoRA" if self.var_dora.get() else ""
             guard_min = self._parse_max_run_minutes()
             guard_txt = f"{guard_min}m存盘" if guard_min > 0 else "无时限"
             self.var_cloud_sync_summary.set(
                 f"🔄 将同步推送：[{lora_name}] | {ds_txt} | {self.var_steps.get().strip()}步 | "
-                f"{self.var_algo.get().upper()}{dora_txt} R{self.var_rank.get().strip()} @ {self.var_resolution.get()}px "
-                f"| 云端 {acc_txt} / {self.var_kaggle_variant.get().upper()} / {guard_txt}"
+                f"{self.var_algo.get().upper()}{dora_txt} R{self.var_rank.get().strip()} LR={self.var_lr.get().strip()} @ {self.var_resolution.get()}px "
+                f"| 云端 {acc_txt} ({cloud_batch}张/步) / {self.var_kaggle_variant.get().upper()} / {guard_txt}"
             )
         except Exception:
             pass
@@ -1744,6 +1908,66 @@ class ModernLocalTrainerGUI:
 
         self._run_cloud_worker(f"⏳ 正在打包并上传图集 {ds_id}...", _worker)
 
+    def _confirm_cloud_batch_sanity(self, cleaned: dict, cloud_opts: dict) -> bool:
+        """推送/导出至 Kaggle 双卡 T4 DDP 前拦截潜在过曝配置，提供一键双卡重算或强推选择。"""
+        if (cloud_opts.get("accelerator") or "NvidiaTeslaT4").strip() != "NvidiaTeslaT4":
+            return True
+
+        res_int = max(256, int(cleaned.get("resolution", 1024)))
+        est_tok = (res_int // 16) ** 2 + 160
+        imgs_per_pack = max(1, 9216 // est_tok)
+        cur_ga = max(1, int(cleaned.get("grad_acc", 1)))
+        cur_batch = imgs_per_pack * 2 * cur_ga
+        ga1_batch = imgs_per_pack * 2
+        cur_steps = max(1, int(cleaned.get("steps", 1)))
+
+        _, img_count, _, _, total_exp, _, _, _, _, _, _ = self._compute_math_summary(target_override="kaggle_t4x2")
+        rec_ga1 = max(1, total_exp // ga1_batch) if img_count > 0 else 0
+
+        high_ga = cur_ga >= 2 and cur_batch >= 8
+        over_exposed = img_count > 0 and (cur_steps * cur_batch >= total_exp * 1.8)
+        if not (high_ga or over_exposed):
+            return True
+
+        plan_steps_desc = f"{rec_ga1} 步" if rec_ga1 > 0 else f"保持 {cur_steps} 步但 GradAcc 归 1"
+        exposure_desc = (
+            f"• 预期曝光 {total_exp} 次（{img_count} 图）→ 按当前参数将跑出 {cur_steps * cur_batch} 次（过曝隐患）！\n"
+            if img_count > 0
+            else ""
+        )
+        ans = messagebox.askyesnocancel(
+            "⚠️ 云端双卡 T4 曝光倍率提醒",
+            f"当前准备推送至【Kaggle 双卡 T4 DDP】，容器实测并发吞吐较高：\n"
+            f"• 双卡 DDP 下 MAX_TOKENS=9216×2卡（{res_int}px 单步并发 = {imgs_per_pack}×2×GradAcc {cur_ga} = {cur_batch} 张/步）\n"
+            f"{exposure_desc}"
+            f"\n是否按双卡标准（GradAcc=1 -> {ga1_batch} 张/步，{plan_steps_desc}）自动重算并同步左侧界面后推送？\n\n"
+            f"• [是 (Y)]：自动按双卡 T4 重算后继续推送/导出\n"
+            f"• [否 (N)]：保持当前 {cur_steps} 步 / GradAcc={cur_ga} 原参数强推\n"
+            f"• [取消]：中止本次操作返回修改",
+            icon="warning",
+        )
+        if ans is None:
+            return False
+        if ans is True:
+            if cur_ga > 1:
+                cleaned["grad_acc"] = 1
+                self.var_grad_acc.set("1")
+            if rec_ga1 > 0:
+                cleaned["steps"] = rec_ga1
+                self.var_steps.set(str(rec_ga1))
+                save_ev, ema_adj, _ = recommend_save_every_and_ema(rec_ga1, self.var_ema.get())
+                cleaned["save_every"] = int(save_ev)
+                self.var_save_every.set(save_ev)
+                cleaned["ema"] = float(ema_adj)
+                self.var_ema.set(ema_adj)
+            self.var_target_compute.set("kaggle_t4x2")
+            self.on_target_compute_changed(silent=True, from_cloud_tab=True)
+            self.save_local_config()
+            self.monitor.log(
+                f"[双卡防呆校准] 已按 T4×2 DDP 重算：GradAcc={cleaned['grad_acc']}, Steps={cleaned['steps']}, SaveEvery={cleaned['save_every']}\n"
+            )
+        return True
+
     def cloud_push_kernel_only(self):
         is_hf = self._is_hf_cloud_source()
         if is_hf and not self._validate_hf_repo_ui():
@@ -1758,6 +1982,8 @@ class ModernLocalTrainerGUI:
             messagebox.showerror("参数格式错误", err_msg)
             return
         cloud_opts = self._cloud_opts()
+        if not self._confirm_cloud_batch_sanity(cleaned, cloud_opts):
+            return
         self.save_local_config()
 
         def _worker():
@@ -1810,6 +2036,8 @@ class ModernLocalTrainerGUI:
             messagebox.showerror("参数格式错误", err_msg)
             return
         cloud_opts = self._cloud_opts()
+        if not self._confirm_cloud_batch_sanity(cleaned, cloud_opts):
+            return
         self.save_local_config()
 
         def _worker():
@@ -2109,6 +2337,8 @@ class ModernLocalTrainerGUI:
             messagebox.showerror("参数格式错误", err_msg)
             return
         cloud_opts = self._cloud_opts()
+        if not self._confirm_cloud_batch_sanity(cleaned, cloud_opts):
+            return
         self.save_local_config()
         try:
             res = export_manual_upload_bundle(cleaned, raw_params, cloud_opts)

@@ -139,7 +139,7 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
             ("default_gpu", "⚡ 单卡默认 GPU", c["accent_blue"]),
             ("NvidiaTeslaP100", "🟦 兼容队列", c["accent_yellow"]),
         ],
-        command=app.refresh_cloud_sync_summary,
+        command=app.on_cloud_accelerator_changed,
     ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     var_row = tk.Frame(cfg_card, bg=c["bg_dark"])

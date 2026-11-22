@@ -9,9 +9,24 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VRAM_MAX_TOKENS = {"6g": 4352, "8g": 4352, "12g": 6144, "16g": 8192}
+COMPUTE_TARGET_PROFILES = {
+    "local": {"label": "💻 本机显卡", "active_gpus": 1, "max_tokens": 0, "kaggle_accelerator": None},
+    "kaggle_t4x2": {
+        "label": "☁️ Kaggle 双卡 T4 DDP",
+        "active_gpus": 2,
+        "max_tokens": 9216,
+        "kaggle_accelerator": "NvidiaTeslaT4",
+    },
+    "kaggle_t4x1": {
+        "label": "⚡ Kaggle 单卡 T4",
+        "active_gpus": 1,
+        "max_tokens": 8192,
+        "kaggle_accelerator": "default_gpu",
+    },
+}
 
 
-def load_app_version(fallback: str = "1.7.0") -> str:
+def load_app_version(fallback: str = "1.7.1") -> str:
     """读取项目根目录 VERSION 单一版本信源，缺失时安全回退。"""
     ver_file = PROJECT_ROOT / "VERSION"
     try:
@@ -157,6 +172,22 @@ def resolve_max_tokens_budget(vram_preset: str, detected_vram_gb: float = 8.0) -
     return max_tokens
 
 
+def resolve_compute_target_budget(target_compute: str, vram_preset: str, detected_vram_gb: float = 8.0) -> tuple:
+    """按目标算力档案（local / kaggle_t4x2 / kaggle_t4x1）解析 (eff_key, max_tokens_per_gpu, active_gpus, display_tag)。"""
+    tc = (target_compute or "local").strip().lower()
+    if tc == "kaggle_t4x2":
+        prof = COMPUTE_TARGET_PROFILES["kaggle_t4x2"]
+        return "kaggle_t4x2", prof["max_tokens"], prof["active_gpus"], "☁️ Kaggle T4×2 DDP"
+    if tc == "kaggle_t4x1":
+        prof = COMPUTE_TARGET_PROFILES["kaggle_t4x1"]
+        return "kaggle_t4x1", prof["max_tokens"], prof["active_gpus"], prof["label"]
+
+    raw_vram = (vram_preset or "auto").strip().lower()
+    eff_vram, tok_budget = resolve_effective_vram_label(raw_vram, detected_vram_gb)
+    vram_tag = f"auto→{eff_vram}" if raw_vram == "auto" else eff_vram
+    return eff_vram, tok_budget, 1, f"💻 本机 {vram_tag}"
+
+
 def compute_exposure_summary(
     *,
     multi_subset: bool,
@@ -169,16 +200,20 @@ def compute_exposure_summary(
     resolution: int,
     grad_acc: int,
     timestep_mu: float,
+    active_gpus: int = 1,
+    max_tokens_override: int = 0,
+    img_count_override: int = 0,
 ) -> tuple:
     """
-    计算当前单图集/多子集的真实总曝光次数，以及基于 Token 打包与梯度累积等效 Batch 的推荐步数。
+    计算当前单图集/多子集的真实总曝光次数，以及基于 Token 打包、并行 GPU 数与梯度累积等效 Batch 的推荐步数。
     返回 (is_multi, img_count, factor, ep, total_exposures, rec, eff_batch, imgs_per_pack, grad_acc, mu, divisor)
     """
-    max_tokens = resolve_max_tokens_budget(vram_preset, detected_vram_gb)
+    max_tokens = int(max_tokens_override) if int(max_tokens_override) > 0 else resolve_max_tokens_budget(vram_preset, detected_vram_gb)
     est_tokens_per_img = (max(256, int(resolution)) // 16) ** 2 + 160
     imgs_per_pack = max(1, max_tokens // est_tokens_per_img)
+    gpus = max(1, int(active_gpus))
     acc = max(1, int(grad_acc))
-    eff_batch = imgs_per_pack * acc
+    eff_batch = imgs_per_pack * gpus * acc
     divisor = max(1, eff_batch)
     ep = int(epochs)
     mu = float(timestep_mu)
@@ -196,7 +231,7 @@ def compute_exposure_summary(
         return True, total_imgs, epoch_exp, ep, total_exposures, rec, eff_batch, imgs_per_pack, acc, mu, divisor
 
     dpath = Path(data_dir)
-    img_count = count_images_in_dir(str(dpath)) if dpath.exists() else 0
+    img_count = int(img_count_override) if int(img_count_override) > 0 else (count_images_in_dir(str(dpath)) if dpath.exists() else 0)
     rep = int(repeats)
     total_exposures = img_count * rep * ep
     rec = max(1, total_exposures // divisor)

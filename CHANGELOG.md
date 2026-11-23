@@ -16,6 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
 
+## [1.8.2] - 2026-11-23
+
+### Added & Improved
+- **免排队交互式 `--no-run` Notebook 直推（绕过 Kaggle 后台批处理排队池，[`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`core/__init__.py`](core/__init__.py) / [`ui/tab_cloud.py`](ui/tab_cloud.py) / [`ui/app.py`](ui/app.py)）**：
+  - 新增并导出 `stage_interactive_notebook_bundle()` 与 `_prepare_kernel_stage_dir()` 共享辅助函数，生成 `kernel_type: "notebook"` 与自包含 `train_moss_interactive.ipynb`（内嵌全量注入后的 `train_moss.py` 与 `FileLink` 下载单元）；
+  - `push_kaggle_kernel()` 新增 `no_run: bool = False` 参数，开启后附加 `--no-run` 走 Kaggle Quick-Save 通道并返回 `/edit` 编辑链接，完全绕开经常拥堵或卡死的后台批处理提交队列；
+  - 在【☁️ 云端遥控】第 3 步新增 **【⚡ 免排队：推送为交互式 Notebook 并打开网页直接跑 (绕过后台排队)】** 按钮，复用共享上下文准备/图集同步函数 `_prepare_cloud_deploy_request()` 与 `_sync_cloud_dataset_for_deploy()`，推完自动打开浏览器并引导用户清理旧 `Active Events` 后点击 `Run All` 在交互式 GPU 池立即开机。
+- **`QUEUED` 阻塞原因自动探针诊断（[`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`core/__init__.py`](core/__init__.py)）**：
+  - 新增并导出 `diagnose_kaggle_queue_blockers()`，在 `fetch_kaggle_kernel_status()` 检测到 `QUEUED` 时自动扫描同账号其它运行/排队中的后台任务与占满并发配额的交互式 GPU 草稿本（如 `NO_COMMIT_VER` 空白本），将阻断任务标识直显至界面状态栏；
+  - 同步在 `tests/test_external_url_flow.py` 增补 `test_interactive_notebook_bundle_no_run_and_queue_blocker_hint` Mock 单元测试覆盖。
+
+### Fixed
+- **图集外链命名残留与重复点击 Slug 碰撞修复（[`ui/app.py`](ui/app.py)）**：
+  - `_resolve_kaggle_identity()` 在 `url / r2 / hf` 模式下自动依据当前 `lora_name` 生成 `{lora_name}-data` 作为隐式打包文件名，消除更换 `lora_name` 后外链压缩包仍沿用旧名（如 `moss-data-rani3_direct.zip`）的错位现象；
+  - `auto_generate_cloud_slugs()` 检测到当前 `Kernel Slug` 已以 `{lora_name}-train` 开头时自动追加 3 位十六进制后缀生成全新任务 Slug（规避删除残留 `QUEUED` 任务锁槽），并自动调用 `refresh_cloud_sync_summary()`。
+
 ## [1.8.1] - 2026-11-23
 
 ### Fixed & Changed
@@ -266,7 +282,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.2...HEAD
+[1.8.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.2...v1.8.0
 [1.7.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.1...v1.7.2

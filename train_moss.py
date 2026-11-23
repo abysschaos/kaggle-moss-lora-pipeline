@@ -23,7 +23,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.8.1"
+    return "1.8.2"
 
 
 def _normalize_hf_dataset_repo(raw: str) -> str:

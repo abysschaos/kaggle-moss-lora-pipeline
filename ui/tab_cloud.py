@@ -517,6 +517,26 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
     app.btn_cloud_master.pack(fill=tk.X, pady=(0, 6))
     app.cloud_action_buttons.append(app.btn_cloud_master)
 
+    app.btn_cloud_interactive = FlatButton(
+        pipe_card,
+        text="⚡ 免排队：推送为交互式 Notebook 并打开网页直接跑 (绕过后台排队)",
+        bg="#1e3a5f",
+        fg=c["accent_blue"],
+        hover_bg="#264b78",
+        pressed_bg="#162c47",
+        font=(c["font_family"], 8, "bold"),
+        pady=6,
+        command=app.cloud_push_interactive_notebook,
+    )
+    app.btn_cloud_interactive.pack(fill=tk.X, pady=(0, 6))
+    app.cloud_action_buttons.append(app.btn_cloud_interactive)
+    HoverTooltip(
+        app.btn_cloud_interactive,
+        "遇到后台批处理长期 QUEUED 但空白笔记本能秒开运行时使用：\n"
+        "调用 `kaggle kernels push --no-run`（2 秒 Quick Save，不进后台批处理队列）并自动打开网页 `/edit`；\n"
+        "确认关闭右下/左下 Active Events 旧占用并点顶部【Run All】即可用交互式 GPU 池立即开炼。",
+    )
+
     step_row = tk.Frame(pipe_card, bg=c["bg_dark"])
     step_row.pack(fill=tk.X, pady=(0, 5))
 

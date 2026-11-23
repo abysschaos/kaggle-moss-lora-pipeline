@@ -23,14 +23,17 @@ from core import (
     PROJECT_ROOT as CORE_ROOT,
     build_cloud_config_payload,
     cleanup_workspace_staging,
+    diagnose_kaggle_queue_blockers,
     extract_kaggle_outputs_from_dir,
     fetch_kaggle_kernel_status,
     generate_r2_presigned_url,
     pull_and_extract_kaggle_outputs,
+    push_kaggle_kernel,
     read_r2_credentials,
     sanitize_external_dataset_url,
     save_r2_credentials,
     stage_external_dataset_zip,
+    stage_interactive_notebook_bundle,
     stage_kernel_bundle,
     upload_dataset_to_cloudflare_r2,
     upload_dataset_to_hf_repo,
@@ -605,6 +608,67 @@ class ExternalUrlFlowTests(unittest.TestCase):
             self.assertFalse((ws / "init_from_stage").exists())
             self.assertFalse((ws / "trainer_main.zip").exists())
             self.assertFalse((ko / "unpacked_style_lora_results.zip").exists())
+
+    def test_interactive_notebook_bundle_no_run_and_queue_blocker_hint(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cleaned, _ = _sample_cleaned_and_raw(root)
+            cleaned["lora_name"] = "d1a"
+            stage_dir, info = stage_interactive_notebook_bundle(
+                cleaned_params=cleaned,
+                cloud_opts={
+                    "dataset_source": "url",
+                    "accelerator": "NvidiaTeslaT4",
+                    "dataset_url": "https://example.com/moss-data-d1a_direct.zip",
+                    "max_run_minutes": 520,
+                    "base_variant": "heal",
+                    "parallel": "ddp",
+                    "gpus": "auto",
+                },
+                username="testuser",
+                dataset_id="testuser/d1a-data",
+                kernel_slug="moss-train-d1a",
+                stage_root=root,
+            )
+            self.assertEqual(info["kernel_id"], "testuser/moss-train-d1a")
+            nb_path = stage_dir / "train_moss_interactive.ipynb"
+            self.assertTrue(nb_path.is_file())
+            nb_obj = json.loads(nb_path.read_text(encoding="utf-8"))
+            self.assertEqual(nb_obj["nbformat"], 4)
+            self.assertEqual(len(nb_obj["cells"]), 3)
+            runner_src = "".join(nb_obj["cells"][1]["source"])
+            self.assertIn("moss-data-d1a_direct.zip", runner_src)
+            self.assertIn("d1a", runner_src)
+
+            meta = json.loads((stage_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["kernel_type"], "notebook")
+            self.assertEqual(meta["code_file"], "train_moss_interactive.ipynb")
+            self.assertEqual(meta["dataset_sources"], [])
+
+            seen_cmds = []
+            with mock.patch("core.kaggle_bridge.find_kaggle_cli", return_value={"found": True, "cmd": ["kaggle"]}), \
+                 mock.patch("core.kaggle_bridge._stream_subprocess", side_effect=lambda cmd, cwd, **kw: (seen_cmds.append(list(cmd)), (0, "ok"))[1]):
+                ok, url, msg = push_kaggle_kernel(stage_dir, accelerator="NvidiaTeslaT4", no_run=True)
+            self.assertTrue(ok)
+            self.assertEqual(url, "https://www.kaggle.com/code/testuser/moss-train-d1a/edit")
+            self.assertIn("--no-run", seen_cmds[0])
+            self.assertIn("免排队", msg)
+
+        diag_payload = json.dumps({
+            "active_commits": ["testuser/old-job (QUEUED)"],
+            "interactive_gpu_drafts": ["testuser/notebookf3d6dacb8f (NvidiaTeslaT4)"],
+        })
+        cli_mock = {"found": True, "cmd": ["kaggle"]}
+        mock_status_res = mock.Mock(returncode=0, stdout='testuser/moss-train-d1a has status "KernelWorkerStatus.QUEUED"', stderr="")
+        mock_diag_res = mock.Mock(returncode=0, stdout=diag_payload, stderr="")
+        with mock.patch("core.kaggle_bridge.find_kaggle_cli", return_value=cli_mock), \
+             mock.patch("core.kaggle_bridge._resolve_kaggle_python_exe", return_value="python"), \
+             mock.patch("core.kaggle_bridge.subprocess.run", side_effect=[mock_status_res, mock_diag_res]):
+            st = fetch_kaggle_kernel_status("testuser/moss-train-d1a", cli_info=cli_mock)
+        self.assertTrue(st["ok"])
+        self.assertEqual(st["state"], "queued")
+        self.assertIn("notebookf3d6dacb8f", st["queue_hint"])
+        self.assertIn("old-job", st["label"])
 
 
 if __name__ == "__main__":

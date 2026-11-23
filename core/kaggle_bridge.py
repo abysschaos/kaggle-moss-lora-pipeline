@@ -1512,7 +1512,7 @@ def inject_cloud_config_into_train_moss(source_script: Path, config_payload: dic
     return src_text.replace(marker, f"CLOUD_GUI_CONFIG_JSON = {repr(serialized)}", 1)
 
 
-def stage_kernel_bundle(
+def _prepare_kernel_stage_dir(
     cleaned_params: dict,
     cloud_opts: dict,
     username: str,
@@ -1520,7 +1520,7 @@ def stage_kernel_bundle(
     kernel_slug: str,
     stage_root: Path = None,
 ) -> tuple:
-    """组装带有注入超参数与 kernel-metadata.json 的 Kaggle 云端脚本暂存包。"""
+    """共享组装内核暂存目录、注入版 train_moss.py 源码与公共元数据字段。"""
     user = (username or "").strip()
     if not user:
         raise ValueError("Kaggle 用户名不能为空。")
@@ -1538,7 +1538,6 @@ def stage_kernel_bundle(
 
     payload = build_cloud_config_payload(cleaned_params, cloud_opts)
     injected_code = inject_cloud_config_into_train_moss(PROJECT_ROOT / "train_moss.py", payload)
-    (stage_dir / "train_moss.py").write_text(injected_code, encoding="utf-8")
 
     acc = (cloud_opts.get("accelerator") or "NvidiaTeslaT4").strip()
     ds_source = str(cloud_opts.get("dataset_source", "local") or "local").strip().lower()
@@ -1559,7 +1558,99 @@ def stage_kernel_bundle(
     }
     if acc in ("NvidiaTeslaT4", "NvidiaTeslaP100"):
         meta["machine_shape"] = acc
+    return stage_dir, user, slug, payload, injected_code, meta
 
+
+def stage_kernel_bundle(
+    cleaned_params: dict,
+    cloud_opts: dict,
+    username: str,
+    dataset_id: str,
+    kernel_slug: str,
+    stage_root: Path = None,
+) -> tuple:
+    """组装带有注入超参数与 kernel-metadata.json 的 Kaggle 云端脚本暂存包。"""
+    stage_dir, user, slug, payload, injected_code, meta = _prepare_kernel_stage_dir(
+        cleaned_params, cloud_opts, username, dataset_id, kernel_slug, stage_root=stage_root
+    )
+    (stage_dir / "train_moss.py").write_text(injected_code, encoding="utf-8")
+    (stage_dir / "kernel-metadata.json").write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return stage_dir, {"kernel_id": f"{user}/{slug}", "kernel_slug": slug, "payload": payload, "metadata": meta}
+
+
+def stage_interactive_notebook_bundle(
+    cleaned_params: dict,
+    cloud_opts: dict,
+    username: str,
+    dataset_id: str,
+    kernel_slug: str,
+    stage_root: Path = None,
+) -> tuple:
+    """组装面向 `--no-run` 快速保存的自包含交互式 `.ipynb` 暂存包，可在 Kaggle 编辑器内直接 Run All 绕过后台批处理队列。"""
+    stage_dir, user, slug, payload, injected_code, meta = _prepare_kernel_stage_dir(
+        cleaned_params, cloud_opts, username, dataset_id, kernel_slug, stage_root=stage_root
+    )
+    lora_name = payload["lora_name"]
+    runner_cell = (
+        "import pathlib, subprocess, sys\n\n"
+        f"_SCRIPT_CODE = {json.dumps(injected_code, ensure_ascii=False)}\n"
+        "script_path = pathlib.Path('/kaggle/working/train_moss.py')\n"
+        "script_path.write_text(_SCRIPT_CODE, encoding='utf-8')\n"
+        "print(f'>>> Starting interactive MOSS LoRA training ({script_path})...', flush=True)\n"
+        "subprocess.run([sys.executable, '-u', str(script_path)], check=True)\n"
+    )
+    download_cell = (
+        "from pathlib import Path\n"
+        "from IPython.display import FileLink, display\n\n"
+        f"zip_path = Path('/kaggle/working/{lora_name}_lora_results.zip')\n"
+        "if zip_path.is_file():\n"
+        "    print(f'Archive ready: {zip_path} ({zip_path.stat().st_size / (1024**2):.2f} MB)')\n"
+        "    display(FileLink(zip_path.name))\n"
+        "else:\n"
+        "    print('ZIP archive not found yet; check training logs above.')\n"
+    )
+    nb_obj = {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": [
+                    f"# MOSS-Image LoRA Interactive Runner (`{lora_name}`)\n\n"
+                    "1. 先确认左下角 **Active Events** 中没有其它占用 GPU 的运行/排队会话；\n"
+                    "2. 确认右侧 **Settings -> Accelerator = GPU T4 x2** 且 **Internet = ON**；\n"
+                    "3. 点击顶部 **Run All** 直接在交互式 GPU 池开机开炼（无需进入后台批处理排队）。\n"
+                ],
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [runner_cell],
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [download_cell],
+            },
+        ],
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python", "version": "3.10.0"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 4,
+    }
+    nb_file = stage_dir / "train_moss_interactive.ipynb"
+    nb_file.write_text(json.dumps(nb_obj, indent=1, ensure_ascii=False), encoding="utf-8")
+
+    meta["code_file"] = nb_file.name
+    meta["kernel_type"] = "notebook"
     (stage_dir / "kernel-metadata.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -1573,8 +1664,9 @@ def push_kaggle_kernel(
     cli_info: dict = None,
     kaggle_json_path: Path = None,
     on_log=None,
+    no_run: bool = False,
 ) -> tuple:
-    """将阶段化后的训练内核推送至 Kaggle 云端队列唤醒 GPU 执行。"""
+    """将阶段化后的训练内核推送至 Kaggle 云端队列或 Quick-Save 为交互式 Notebook（`no_run=True`）。"""
     cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
     if not cli.get("found"):
         return False, "", "未找到 Kaggle CLI，请先安装并配置凭证。"
@@ -1586,17 +1678,25 @@ def push_kaggle_kernel(
             kernel_id = json.loads(meta_file.read_text(encoding="utf-8")).get("id", "")
         except Exception:
             pass
-    kernel_url = f"https://www.kaggle.com/code/{kernel_id}" if kernel_id else "https://www.kaggle.com/code"
+    kernel_url = (
+        (f"https://www.kaggle.com/code/{kernel_id}/edit" if no_run else f"https://www.kaggle.com/code/{kernel_id}")
+        if kernel_id
+        else "https://www.kaggle.com/code"
+    )
 
     cmd = [*cli["cmd"], "kernels", "push", "-p", str(stage_dir)]
     if accelerator in ("NvidiaTeslaT4", "NvidiaTeslaP100"):
         cmd.extend(["--accelerator", accelerator])
+    if no_run:
+        cmd.append("--no-run")
 
     if on_log:
-        on_log(f"[Kaggle 推送] 正在提交任务 {kernel_id} 至云端计算队列...\n")
+        action_lbl = "正在 Quick-Save 为交互式 Notebook (免排队)" if no_run else "正在提交任务"
+        on_log(f"[Kaggle 推送] {action_lbl} {kernel_id}...\n")
     rc, out = _stream_subprocess(cmd, Path(stage_dir), on_log=on_log, env=_build_kaggle_env(kaggle_json_path))
     if rc == 0:
-        return True, kernel_url, f"任务已提交云端：{kernel_id}"
+        ok_msg = f"已免排队保存交互式 Notebook：{kernel_id}" if no_run else f"任务已提交云端：{kernel_id}"
+        return True, kernel_url, ok_msg
     return False, kernel_url, f"推送任务失败 (Exit={rc})：\n{out[-300:]}"
 
 
@@ -1666,11 +1766,90 @@ def _probe_kernel_failure_message(kernel_id: str, cli: dict, env: dict) -> str:
     return ""
 
 
+_KAGGLE_QUEUE_DIAG_PROBE = """
+import json, sys
+target_id = (sys.argv[1] or "").strip().lower()
+from kaggle.api.kaggle_api_extended import KaggleApi
+from kagglesdk.kernels.types.kernels_api_service import ApiGetKernelRequest
+
+api = KaggleApi()
+api.authenticate()
+active_commits = []
+interactive_gpu_drafts = []
+with api.build_kaggle_client() as client:
+    for item in (api.kernels_list(mine=True, page_size=8) or []):
+        ref = str(getattr(item, "ref", "") or "").strip()
+        if not ref or ref.lower() == target_id or "/" not in ref:
+            continue
+        owner, slug = ref.split("/", 1)
+        try:
+            st = api.kernels_status(ref)
+            st_name = str(getattr(st, "status", "") or "").upper()
+            if "RUNNING" in st_name or "QUEUED" in st_name:
+                active_commits.append(f"{ref} ({st_name.split('.')[-1]})")
+            continue
+        except Exception:
+            pass
+        try:
+            req = ApiGetKernelRequest()
+            req.user_name = owner
+            req.kernel_slug = slug
+            meta = (client.kernels.kernels_api_client.get_kernel(req).to_dict() or {}).get("metadata") or {}
+            if meta.get("enableGpu") and not meta.get("currentVersionNumber"):
+                interactive_gpu_drafts.append(ref)
+        except Exception:
+            pass
+print(json.dumps({"active_commits": active_commits, "interactive_gpu_drafts": interactive_gpu_drafts}), flush=True)
+""".strip()
+
+
+def diagnose_kaggle_queue_blockers(
+    kernel_id: str,
+    cli_info: dict = None,
+    kaggle_json_path: Path = None,
+) -> dict:
+    """探测同账号下是否存在占用 GPU 槽位的其它运行/排队后台任务或交互式 GPU 草稿本。"""
+    cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
+    if not cli.get("found"):
+        return {"ok": False, "active_commits": [], "interactive_gpu_drafts": [], "hint": ""}
+
+    kaggle_py = _resolve_kaggle_python_exe(cli)
+    if not kaggle_py:
+        return {"ok": False, "active_commits": [], "interactive_gpu_drafts": [], "hint": ""}
+
+    env = _build_kaggle_env(kaggle_json_path=kaggle_json_path)
+    try:
+        res = subprocess.run(
+            [kaggle_py, "-u", "-c", _KAGGLE_QUEUE_DIAG_PROBE, kernel_id],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=12,
+            env=env,
+            creationflags=NO_WINDOW,
+        )
+        if res.returncode != 0:
+            return {"ok": False, "active_commits": [], "interactive_gpu_drafts": [], "hint": ""}
+        lines = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip().startswith("{")]
+        data = json.loads(lines[-1]) if lines else {}
+        active = list(data.get("active_commits") or [])
+        drafts = list(data.get("interactive_gpu_drafts") or [])
+        hints = []
+        if active:
+            hints.append(f"发现其它运行/排队中的后台任务: {', '.join(active[:2])}")
+        if drafts:
+            hints.append(f"发现启用 GPU 的交互式草稿本: {', '.join(drafts[:2])}（请先在 Kaggle Active Events 停掉旧会话或改用【⚡ 免排队交互式推送】）")
+        return {"ok": True, "active_commits": active, "interactive_gpu_drafts": drafts, "hint": "；".join(hints)}
+    except Exception:
+        return {"ok": False, "active_commits": [], "interactive_gpu_drafts": [], "hint": ""}
+
+
 def fetch_kaggle_kernel_status(kernel_id: str, cli_info: dict = None, kaggle_json_path: Path = None) -> dict:
     """查询 Kaggle 云端任务实时运行状态并映射为统一状态码、失败原因与中文文案。"""
     cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
     if not cli.get("found"):
-        return {"ok": False, "state": "unknown", "failure_message": "", "label": "⚪ 未检测到 Kaggle CLI", "raw": ""}
+        return {"ok": False, "state": "unknown", "failure_message": "", "queue_hint": "", "label": "⚪ 未检测到 Kaggle CLI", "raw": ""}
 
     env = _build_kaggle_env(kaggle_json_path=kaggle_json_path)
     try:
@@ -1689,15 +1868,18 @@ def fetch_kaggle_kernel_status(kernel_id: str, cli_info: dict = None, kaggle_jso
         lower = raw.lower()
         if res.returncode != 0:
             if "404" in lower or "not found" in lower:
-                return {"ok": False, "state": "not_found", "failure_message": failure_msg, "label": f"⚪ 云端尚无任务记录: {kernel_id}", "raw": raw}
-            return {"ok": False, "state": "error", "failure_message": failure_msg, "label": f"🟠 状态查询异常: {raw[:160]}", "raw": raw}
+                return {"ok": False, "state": "not_found", "failure_message": failure_msg, "queue_hint": "", "label": f"⚪ 云端尚无任务记录: {kernel_id}", "raw": raw}
+            return {"ok": False, "state": "error", "failure_message": failure_msg, "queue_hint": "", "label": f"🟠 状态查询异常: {raw[:160]}", "raw": raw}
 
         if "complete" in lower:
-            return {"ok": True, "state": "complete", "failure_message": failure_msg, "label": "🟢 云端训练已完成！请点击【一键拉回成品权重】", "raw": raw}
+            return {"ok": True, "state": "complete", "failure_message": failure_msg, "queue_hint": "", "label": "🟢 云端训练已完成！请点击【一键拉回成品权重】", "raw": raw}
         if "running" in lower:
-            return {"ok": True, "state": "running", "failure_message": failure_msg, "label": "🔵 云端 GPU 正在全速训练中 (RUNNING)...", "raw": raw}
+            return {"ok": True, "state": "running", "failure_message": failure_msg, "queue_hint": "", "label": "🔵 云端 GPU 正在全速训练中 (RUNNING)...", "raw": raw}
         if "queued" in lower:
-            return {"ok": True, "state": "queued", "failure_message": failure_msg, "label": "🟡 已进入云端算力排队队列 (QUEUED)...", "raw": raw}
+            diag = diagnose_kaggle_queue_blockers(kernel_id, cli_info=cli, kaggle_json_path=kaggle_json_path)
+            qhint = str(diag.get("hint", "") or "").strip()
+            lbl = f"🟡 已进入云端算力排队队列 (QUEUED · {qhint})" if qhint else "🟡 已进入云端算力排队队列 (QUEUED)..."
+            return {"ok": True, "state": "queued", "failure_message": failure_msg, "queue_hint": qhint, "label": lbl, "raw": raw}
         if "error" in lower:
             if not failure_msg:
                 failure_msg = _probe_kernel_failure_message(kernel_id, cli, env)
@@ -1706,7 +1888,7 @@ def fetch_kaggle_kernel_status(kernel_id: str, cli_info: dict = None, kaggle_jso
                 if failure_msg
                 else "🔴 云端执行出错 (ERROR)，请点击右侧【打开任务页】排查"
             )
-            return {"ok": True, "state": "error", "failure_message": failure_msg, "label": label, "raw": raw}
+            return {"ok": True, "state": "error", "failure_message": failure_msg, "queue_hint": "", "label": label, "raw": raw}
         if "cancel" in lower:
             if not failure_msg:
                 failure_msg = _probe_kernel_failure_message(kernel_id, cli, env)
@@ -1717,10 +1899,10 @@ def fetch_kaggle_kernel_status(kernel_id: str, cli_info: dict = None, kaggle_jso
                     label = f"⚪ 云端任务已取消 (CANCELLED · {failure_msg}，非本地刷新所致)"
             else:
                 label = "⚪ 云端任务已取消 (CANCELLED，云端会话已停止，非本地刷新所致)"
-            return {"ok": True, "state": "cancel", "failure_message": failure_msg, "label": label, "raw": raw}
-        return {"ok": True, "state": "unknown", "failure_message": failure_msg, "label": f"❔ 当前状态: {raw}", "raw": raw}
+            return {"ok": True, "state": "cancel", "failure_message": failure_msg, "queue_hint": "", "label": label, "raw": raw}
+        return {"ok": True, "state": "unknown", "failure_message": failure_msg, "queue_hint": "", "label": f"❔ 当前状态: {raw}", "raw": raw}
     except Exception as err:
-        return {"ok": False, "state": "error", "failure_message": "", "label": f"🟠 查询状态超时或异常: {err}", "raw": str(err)}
+        return {"ok": False, "state": "error", "failure_message": "", "queue_hint": "", "label": f"🟠 查询状态超时或异常: {err}", "raw": str(err)}
 
 
 def fetch_kaggle_kernel_logs(

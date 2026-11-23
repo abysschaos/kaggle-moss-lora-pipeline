@@ -23,6 +23,7 @@ from core import (
     PROJECT_ROOT as CORE_ROOT,
     build_cloud_config_payload,
     cleanup_workspace_staging,
+    derive_interactive_kernel_slug,
     diagnose_kaggle_queue_blockers,
     extract_kaggle_outputs_from_dir,
     fetch_kaggle_kernel_status,
@@ -610,6 +611,11 @@ class ExternalUrlFlowTests(unittest.TestCase):
             self.assertFalse((ko / "unpacked_style_lora_results.zip").exists())
 
     def test_interactive_notebook_bundle_no_run_and_queue_blocker_hint(self):
+        self.assertEqual(derive_interactive_kernel_slug("d1a2-train"), "d1a2-train-nb")
+        self.assertEqual(derive_interactive_kernel_slug("d1a2-train-nb"), "d1a2-train-nb")
+        self.assertLessEqual(len(derive_interactive_kernel_slug("a" * 50)), 50)
+        self.assertTrue(derive_interactive_kernel_slug("a" * 50).endswith("-nb"))
+
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             cleaned, _ = _sample_cleaned_and_raw(root)
@@ -627,18 +633,33 @@ class ExternalUrlFlowTests(unittest.TestCase):
                 },
                 username="testuser",
                 dataset_id="testuser/d1a-data",
-                kernel_slug="moss-train-d1a",
+                kernel_slug="moss-train-d1a-nb",
                 stage_root=root,
             )
-            self.assertEqual(info["kernel_id"], "testuser/moss-train-d1a")
+            self.assertEqual(info["kernel_id"], "testuser/moss-train-d1a-nb")
             nb_path = stage_dir / "train_moss_interactive.ipynb"
             self.assertTrue(nb_path.is_file())
             nb_obj = json.loads(nb_path.read_text(encoding="utf-8"))
             self.assertEqual(nb_obj["nbformat"], 4)
-            self.assertEqual(len(nb_obj["cells"]), 3)
-            runner_src = "".join(nb_obj["cells"][1]["source"])
-            self.assertIn("moss-data-d1a_direct.zip", runner_src)
-            self.assertIn("d1a", runner_src)
+            self.assertEqual(len(nb_obj["cells"]), 4)
+            guide_src = "".join(nb_obj["cells"][0]["source"])
+            self.assertIn("Edit", guide_src)
+
+            payload_cell = nb_obj["cells"][1]
+            self.assertTrue(payload_cell["metadata"].get("_kg_hide-input"))
+            payload_src = "".join(payload_cell["source"])
+            self.assertTrue(payload_src.startswith("%%writefile /kaggle/working/train_moss.py\n"))
+            self.assertNotIn("base64", payload_src)
+            self.assertNotIn("zlib", payload_src)
+            self.assertIn("moss-data-d1a_direct.zip", payload_src)
+            self.assertIn("d1a", payload_src)
+
+            runner_src = "".join(nb_obj["cells"][2]["source"])
+            self.assertIn("subprocess.Popen", runner_src)
+            self.assertIn("train_moss.py", runner_src)
+
+            dl_src = "".join(nb_obj["cells"][3]["source"])
+            self.assertIn("FileLink", dl_src)
 
             meta = json.loads((stage_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["kernel_type"], "notebook")
@@ -646,13 +667,20 @@ class ExternalUrlFlowTests(unittest.TestCase):
             self.assertEqual(meta["dataset_sources"], [])
 
             seen_cmds = []
+            ok_cli_out = "Kernel version 1 successfully saved without running.  See https://www.kaggle.com/code/testuser/moss-train-d1a-nb\n"
             with mock.patch("core.kaggle_bridge.find_kaggle_cli", return_value={"found": True, "cmd": ["kaggle"]}), \
-                 mock.patch("core.kaggle_bridge._stream_subprocess", side_effect=lambda cmd, cwd, **kw: (seen_cmds.append(list(cmd)), (0, "ok"))[1]):
+                 mock.patch("core.kaggle_bridge._stream_subprocess", side_effect=lambda cmd, cwd, **kw: (seen_cmds.append(list(cmd)), (0, ok_cli_out))[1]):
                 ok, url, msg = push_kaggle_kernel(stage_dir, accelerator="NvidiaTeslaT4", no_run=True)
             self.assertTrue(ok)
-            self.assertEqual(url, "https://www.kaggle.com/code/testuser/moss-train-d1a/edit")
+            self.assertEqual(url, "https://www.kaggle.com/code/testuser/moss-train-d1a-nb/edit")
             self.assertIn("--no-run", seen_cmds[0])
             self.assertIn("免排队", msg)
+
+            with mock.patch("core.kaggle_bridge.find_kaggle_cli", return_value={"found": True, "cmd": ["kaggle"]}), \
+                 mock.patch("core.kaggle_bridge._stream_subprocess", return_value=(0, "Kernel push error: Notebook not found\n")):
+                ok_err, _url_err, msg_err = push_kaggle_kernel(stage_dir, accelerator="NvidiaTeslaT4", no_run=True)
+            self.assertFalse(ok_err)
+            self.assertIn("Notebook not found", msg_err)
 
         diag_payload = json.dumps({
             "active_commits": ["testuser/old-job (QUEUED)"],

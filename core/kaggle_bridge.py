@@ -313,6 +313,15 @@ def sanitize_kaggle_slug(raw: str, prefix: str = "moss") -> str:
     return slug
 
 
+def derive_interactive_kernel_slug(kernel_slug: str) -> str:
+    """为 `--no-run` 交互式 Notebook 生成独立于 script 内核的合规 Slug（带 `-nb` 后缀，防止与既有 script 同名撞型）。"""
+    base = sanitize_kaggle_slug(kernel_slug, prefix="moss-train")
+    if base.endswith("-nb"):
+        return base
+    trimmed = base[:47].rstrip("-") or "moss-train"
+    return sanitize_kaggle_slug(f"{trimmed}-nb", prefix="moss-train")
+
+
 def normalize_hf_dataset_repo(raw: str) -> str:
     """将 Hugging Face Dataset 网址或 owner/repo 字符串规范化为标准 owner/repo 标识。"""
     text = (raw or "").strip()
@@ -1589,18 +1598,39 @@ def stage_interactive_notebook_bundle(
     kernel_slug: str,
     stage_root: Path = None,
 ) -> tuple:
-    """组装面向 `--no-run` 快速保存的自包含交互式 `.ipynb` 暂存包，可在 Kaggle 编辑器内直接 Run All 绕过后台批处理队列。"""
+    """组装面向 `--no-run` 快速保存的自包含交互式 `.ipynb` 暂存包，可在 Kaggle 编辑器内点击 Edit 后直接 Run All 绕过后台批处理队列。"""
     stage_dir, user, slug, payload, injected_code, meta = _prepare_kernel_stage_dir(
         cleaned_params, cloud_opts, username, dataset_id, kernel_slug, stage_root=stage_root
     )
     lora_name = payload["lora_name"]
+    ds_source = str(cloud_opts.get("dataset_source", "local") or "local").strip().lower()
+    payload_cell = f"%%writefile /kaggle/working/train_moss.py\n{injected_code}"
+    summary_line = (
+        f"lora={lora_name} | steps={payload['steps']} | lr={payload['lr']} "
+        f"| res={payload['resolution']} | algo={payload['algo']} | src={ds_source}"
+    )
     runner_cell = (
         "import pathlib, subprocess, sys\n\n"
-        f"_SCRIPT_CODE = {json.dumps(injected_code, ensure_ascii=False)}\n"
         "script_path = pathlib.Path('/kaggle/working/train_moss.py')\n"
-        "script_path.write_text(_SCRIPT_CODE, encoding='utf-8')\n"
+        "if not script_path.is_file():\n"
+        "    raise FileNotFoundError('请点击顶部 Run All（或先运行上一个 %%writefile 隐藏单元）以生成 /kaggle/working/train_moss.py')\n\n"
+        f"print('>>> 配置摘要: ' + {json.dumps(summary_line, ensure_ascii=False)}, flush=True)\n"
         "print(f'>>> Starting interactive MOSS LoRA training ({script_path})...', flush=True)\n"
-        "subprocess.run([sys.executable, '-u', str(script_path)], check=True)\n"
+        "proc = subprocess.Popen(\n"
+        "    [sys.executable, '-u', str(script_path)],\n"
+        "    stdout=subprocess.PIPE,\n"
+        "    stderr=subprocess.STDOUT,\n"
+        "    text=True,\n"
+        "    encoding='utf-8',\n"
+        "    errors='replace',\n"
+        "    bufsize=1,\n"
+        ")\n"
+        "if proc.stdout is not None:\n"
+        "    for line in proc.stdout:\n"
+        "        print(line, end='', flush=True)\n"
+        "rc = proc.wait()\n"
+        "if rc != 0:\n"
+        "    raise RuntimeError(f'train_moss.py exited with code {rc}')\n"
     )
     download_cell = (
         "from pathlib import Path\n"
@@ -1619,10 +1649,18 @@ def stage_interactive_notebook_bundle(
                 "metadata": {},
                 "source": [
                     f"# MOSS-Image LoRA Interactive Runner (`{lora_name}`)\n\n"
-                    "1. 先确认左下角 **Active Events** 中没有其它占用 GPU 的运行/排队会话；\n"
+                    "0. 如果页面右上角显示黑色 **`Edit`** 按钮且右侧显示 `Runtime: 9s` / `In [ ]:`，说明快速保存已成功（尚未开始训练，并非出错）——请先点右上角 **`Edit`** 进入编辑器！\n"
+                    "1. 先确认左下角 **`View Active Events`** 中没有其它占用 GPU 的运行/排队会话；\n"
                     "2. 确认右侧 **Settings -> Accelerator = GPU T4 x2** 且 **Internet = ON**；\n"
-                    "3. 点击顶部 **Run All** 直接在交互式 GPU 池开机开炼（无需进入后台批处理排队）。\n"
+                    "3. 点击顶部 **`Run All`** 直接在交互式 GPU 池开机开炼（无需进入后台批处理排队）。\n"
                 ],
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {"_kg_hide-input": True, "jupyter": {"source_hidden": True}, "tags": ["hide-input"]},
+                "outputs": [],
+                "source": [payload_cell],
             },
             {
                 "cell_type": "code",
@@ -1656,6 +1694,18 @@ def stage_interactive_notebook_bundle(
         encoding="utf-8",
     )
     return stage_dir, {"kernel_id": f"{user}/{slug}", "kernel_slug": slug, "payload": payload, "metadata": meta}
+
+
+_PUSH_ERROR_MARKERS = (
+    "400 client error",
+    "401 client error",
+    "403 client error",
+    "404 client error",
+    "409 client error",
+    "500 server error",
+    "traceback (most recent call last)",
+    "valueerror:",
+)
 
 
 def push_kaggle_kernel(
@@ -1694,10 +1744,27 @@ def push_kaggle_kernel(
         action_lbl = "正在 Quick-Save 为交互式 Notebook (免排队)" if no_run else "正在提交任务"
         on_log(f"[Kaggle 推送] {action_lbl} {kernel_id}...\n")
     rc, out = _stream_subprocess(cmd, Path(stage_dir), on_log=on_log, env=_build_kaggle_env(kaggle_json_path))
-    if rc == 0:
-        ok_msg = f"已免排队保存交互式 Notebook：{kernel_id}" if no_run else f"任务已提交云端：{kernel_id}"
-        return True, kernel_url, ok_msg
-    return False, kernel_url, f"推送任务失败 (Exit={rc})：\n{out[-300:]}"
+    out_text = (out or "").strip()
+    out_lower = out_text.lower()
+    has_push_err = (
+        rc != 0
+        or "kernel push error" in out_lower
+        or ("successfully" not in out_lower and any(marker in out_lower for marker in _PUSH_ERROR_MARKERS))
+    )
+    if has_push_err:
+        m_err = re.search(r"(Kernel push error:[^\r\n]+)", out_text, re.IGNORECASE)
+        detail = m_err.group(1).strip() if m_err else out_text[-400:]
+        return False, kernel_url, f"推送任务失败 (Exit={rc})：\n{detail}"
+
+    m_url = re.search(r"https://www\.kaggle\.com/code/[^\s\"'<>]+", out_text)
+    if m_url:
+        matched_url = m_url.group(0).rstrip(".,)")
+        if no_run and not matched_url.endswith("/edit"):
+            kernel_url = f"{matched_url}/edit"
+        else:
+            kernel_url = matched_url
+    ok_msg = f"已免排队保存交互式 Notebook：{kernel_id}" if no_run else f"任务已提交云端：{kernel_id}"
+    return True, kernel_url, ok_msg
 
 
 def _extract_kernel_failure_message(raw: str) -> str:

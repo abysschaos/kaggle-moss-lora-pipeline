@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
 
+## [1.8.3] - 2026-11-23
+
+### Fixed & Improved
+- **隔离交互式 Notebook Slug 防止与既有 `script` 内核撞型（[`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`core/__init__.py`](core/__init__.py) / [`ui/app.py`](ui/app.py)）**：
+  - 新增并导出 `derive_interactive_kernel_slug()`（自动截断并追加 `-nb` 后缀，长度严控在 50 字符内），免排队交互式推送改用独立 `<slug>-nb` 标识，避免复用已存在的 `kernel_type="script"` 内核导致 Kaggle 拒绝修改类型；
+- **拦截 `kaggle kernels push` 退出码为 `0` 的静默失败（[`core/kaggle_bridge.py`](core/kaggle_bridge.py)）**：
+  - `push_kaggle_kernel()` 不再仅依赖退出码 `rc == 0` 判断成功，补充检测输出中的 `Kernel push error:`、HTTP `400/401/403/404/409/500`、Traceback 与 `ValueError:`，阻断静默打开错误网页并在成功时优先提取终端返回的真实 `/code/...` 链接拼接 `/edit`；
+- **重构交互式 `.ipynb` 四单元可读排版与 `Edit -> Run All` 明确指引（[`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`ui/app.py`](ui/app.py) / [`tests/test_external_url_flow.py`](tests/test_external_url_flow.py)）**：
+  - `stage_interactive_notebook_bundle()` 将原本单行 92 KB 红色转义字符串重构为 4 单元纯明文结构：第 0 单元 Markdown 说明强调“`Version 1 of 1 / Runtime: 9s / In [ ]: / 右上角黑色 Edit` 代表 `--no-run` 快速保存已成功而非报错”、第 1 单元通过 `_kg_hide-input` 折叠并使用 Jupyter 原生 `%%writefile /kaggle/working/train_moss.py` 明文魔法命令写出脚本（完全不含 `base64`/`zlib` 编解码，杜绝杀毒软件启发式误报）、第 2 单元简洁打印参数摘要并使用 `subprocess.Popen` 实时流式打印训练日志、第 3 单元保留 `FileLink` 下载出口；同步更新 GUI 弹窗指引与 `test_interactive_notebook_bundle_no_run_and_queue_blocker_hint` 单元测试。
+
 ## [1.8.2] - 2026-11-23
 
 ### Added & Improved
@@ -282,7 +292,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.2...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.3...HEAD
+[1.8.3]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.2...v1.8.3
 [1.8.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.2...v1.8.0

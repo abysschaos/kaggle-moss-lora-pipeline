@@ -29,6 +29,7 @@ from core import (
     compute_exposure_summary,
     count_images_in_dir,
     delete_kaggle_kernel,
+    derive_interactive_kernel_slug,
     diagnose_kaggle_queue_blockers,
     discover_default_comfy_models,
     export_manual_upload_bundle,
@@ -2656,13 +2657,16 @@ class ModernLocalTrainerGUI:
         if not ctx:
             return
 
+        nb_slug = derive_interactive_kernel_slug(ctx["kn_slug"])
+        nb_id = f"{ctx['username']}/{nb_slug}"
+
         def _worker():
             log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
             ok_sync, meta = self._sync_cloud_dataset_for_deploy(ctx, log_cb)
             if not ok_sync:
                 return
 
-            diag = diagnose_kaggle_queue_blockers(ctx["kn_id"], cli_info=self._kaggle_cli_info)
+            diag = diagnose_kaggle_queue_blockers(nb_id, cli_info=self._kaggle_cli_info)
             if diag.get("hint"):
                 log_cb(f"[免排队前置巡检] ⚠️ {diag['hint']}\n")
 
@@ -2671,7 +2675,7 @@ class ModernLocalTrainerGUI:
                 ctx["cloud_opts"],
                 ctx["username"],
                 ctx["ds_id"],
-                ctx["kn_slug"],
+                nb_slug,
             )
             log_cb(
                 f"\n[云端流水线 2/2 · 免排队交互模式] 已注入全量超参数，准备 Quick-Save 为交互式 Notebook：{info['kernel_id']} "
@@ -2687,17 +2691,20 @@ class ModernLocalTrainerGUI:
             if ok:
                 accel_lbl = ctx["cloud_opts"]["accelerator"]
                 blocker_line = f"\n\n⚠️ 检测到同账号有其它占槽任务：{diag['hint']}" if diag.get("hint") else ""
-                self._enqueue_ui(lambda k=ctx["kn_id"]: self.var_cloud_job_status.set(f"🟢 免排队交互 Notebook 已保存：{k}（请在网页点击 Run All）"))
+                self._enqueue_ui(lambda k=nb_id: self.var_cloud_job_status.set(f"🟢 免排队交互 Notebook 已保存：{k}（请在网页点击 Run All）"))
                 self._enqueue_ui(lambda u=url: webbrowser.open(u))
                 self._enqueue_ui(
                     lambda u=url, m=msg, s=meta["success_summary"], a=accel_lbl, b=blocker_line: messagebox.showinfo(
                         "⚡ 免排队交互式 Notebook 已就绪！",
-                        f"{s}\n\n{m}\n\n已绕过拥堵的后台批处理排队（--no-run Quick Save），并已在浏览器为你打开编辑页：\n{u}"
+                        f"{s}\n\n{m}\n\n已绕过拥堵的后台批处理排队（--no-run Quick Save），并已在浏览器为你打开页面：\n{u}"
                         f"{b}\n\n"
-                        f"接下来只需 3 步立即在交互式 GPU 池开机训练：\n"
-                        f"1. 查看页面左下角 Active Events，停掉旧的空白草稿或排队会话；\n"
-                        f"2. 确认右侧 Settings -> Accelerator = {a} 且 Internet = ON；\n"
-                        f"3. 点击顶部 【Run All】 按钮直接全速开炼！",
+                        f"⚠️ 重要提示：若网页显示 Version 1 of 1、Runtime: 9s、代码未执行 (In [ ]:) 且右上角有黑色【Edit】按钮，"
+                        f"这表示快速保存已成功（尚未开始训练，绝非出错！）。\n\n"
+                        f"请按以下 4 步立即开炼：\n"
+                        f"1. 先点击网页右上角黑色 【Edit】 按钮进入编辑器；\n"
+                        f"2. 看左下角 View Active Events，确认没有其它占满 GPU 的旧会话或正在跑的任务；\n"
+                        f"3. 确认右侧 Settings -> Accelerator = {a} 且 Internet = ON；\n"
+                        f"4. 点击顶部 【Run All】 按钮即可直接在交互式 GPU 池开机训练！",
                     )
                 )
             else:

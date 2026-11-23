@@ -24,11 +24,13 @@ from core import (
     NO_WINDOW,
     PROJECT_ROOT,
     build_train_command,
+    cleanup_workspace_staging,
     compute_exposure_summary,
     count_images_in_dir,
     delete_kaggle_kernel,
     discover_default_comfy_models,
     export_manual_upload_bundle,
+    extract_kaggle_outputs_from_dir,
     fetch_kaggle_kernel_logs,
     fetch_kaggle_kernel_status,
     find_kaggle_cli,
@@ -53,6 +55,7 @@ from core import (
     resolve_effective_vram_label,
     resolve_max_tokens_budget,
     resolve_preset_for_target,
+    sanitize_external_dataset_url,
     sanitize_kaggle_slug,
     save_kaggle_credentials,
     save_local_config,
@@ -256,7 +259,9 @@ class ModernLocalTrainerGUI:
         if k_src_init not in ("local", "hf", "url", "r2"):
             k_src_init = "local"
         self.var_kaggle_dataset_source = tk.StringVar(value=k_src_init)
-        self.var_external_dataset_url = tk.StringVar(value=str(saved_cfg.get("external_dataset_url", "") or "").strip())
+        self.var_external_dataset_url = tk.StringVar(
+            value=sanitize_external_dataset_url(saved_cfg.get("external_dataset_url", ""))
+        )
         self.var_hf_dataset_repo = tk.StringVar(value=str(saved_cfg.get("hf_dataset_repo", "") or "").strip())
         self.var_hf_dataset_subdir = tk.StringVar(value=str(saved_cfg.get("hf_dataset_subdir", "") or "").strip())
         self.var_hf_upload_local = tk.BooleanVar(value=bool(saved_cfg.get("hf_upload_local", True)))
@@ -977,16 +982,66 @@ class ModernLocalTrainerGUI:
         name = self.var_lora_name.get().strip() or "my_lora"
         out_root = self.var_output_dir.get().strip() or str((PROJECT_ROOT / "output").resolve())
         dest_dir = Path(out_root) / name
-        self.var_output_preview.set(f"最终归档输出位置：{dest_dir / (name + '_comfy.safetensors')}")
+        self.var_output_preview.set(f"最终归档输出位置：{dest_dir / (name + '-comfy.safetensors')}")
 
     def open_lora_output_folder(self):
         name = self.var_lora_name.get().strip() or "my_lora"
         out_root = self.var_output_dir.get().strip() or str((PROJECT_ROOT / "output").resolve())
         target = Path(out_root) / name
+        has_weights = target.is_dir() and any(
+            f.is_file() and f.stat().st_size > 0 for f in target.rglob("*.safetensors")
+        )
+        if not has_weights:
+            cloud_cache = PROJECT_ROOT / "workspace" / "kaggle_outputs" / name
+            if cloud_cache.is_dir() and any(
+                f.is_file() and f.stat().st_size > 0 and f.suffix.lower() in (".safetensors", ".zip")
+                for f in cloud_cache.rglob("*")
+            ):
+                try:
+                    res = extract_kaggle_outputs_from_dir(
+                        cloud_cache,
+                        lora_name=name,
+                        output_dir=out_root,
+                        comfy_models_dir=self.var_comfy_dir.get().strip(),
+                        copy_to_comfy=bool(self.var_copy_comfy.get()),
+                        on_log=lambda txt: self.monitor.log(txt),
+                    )
+                    if res.get("ok"):
+                        self.monitor.log(f"[输出自愈] 已将未归档云端成品自动解压整理至：{res['output_dir']}\n")
+                except Exception:
+                    pass
         try:
             open_in_explorer(str(target if target.exists() else Path(out_root)))
         except Exception as err:
             messagebox.showerror("打开失败", str(err))
+
+    def clean_workspace_caches_ui(self):
+        """一键安全清理 workspace/ 过期中转与 output/ 空目录（自动抢救未归档云端成品，严格保护 models/ 硬链接）。"""
+        if self.is_training:
+            messagebox.showwarning("训练进行中", "当前本地训练正在运行，为防止误删活跃中转缓存，请等待训练结束或先暂停后再执行清理。")
+            return
+        out_root = self.var_output_dir.get().strip() or str((PROJECT_ROOT / "output").resolve())
+        try:
+            res = cleanup_workspace_staging(PROJECT_ROOT, output_dir=out_root)
+            rescued = res.get("rescued_loras", [])
+            removed = res.get("removed_items", [])
+            freed_mb = res.get("freed_mb", 0.0)
+            self.monitor.log(
+                f"\n🧹 [工作区清理完成] 共释放 {freed_mb:.2f} MB | 自动抢救归档: {len(rescued)} 项 | 清理条目: {len(removed)} 项\n"
+            )
+            for item in removed:
+                self.monitor.log(f"  • {item}\n")
+            rescue_note = f"\n自动抢救归档云端成品：{', '.join(rescued)}" if rescued else ""
+            if not removed and not rescued:
+                messagebox.showinfo("工作区已很整洁", "未发现需要清理的过期中转残余或空输出目录（workspace/models 硬链接与成品库均受保护）。")
+            else:
+                messagebox.showinfo(
+                    "🧹 临时工作区清理完成",
+                    f"共释放磁盘空间：约 {freed_mb:.2f} MB{rescue_note}\n"
+                    f"已清理条目数：{len(removed)} 项（详情见右侧日志；workspace/models 硬链接与已有成品未受影响）。",
+                )
+        except Exception as err:
+            messagebox.showerror("清理失败", f"清理临时工作区时发生异常：\n{err}")
 
     # ==================== 图集目录、多子集管理、健康体检与续炼状态 ====================
     def browse_data_dir(self):
@@ -1299,6 +1354,31 @@ class ModernLocalTrainerGUI:
             if manual_path and Path(manual_path).is_file() and manual_path.lower().endswith(".safetensors"):
                 inspect_target = Path(manual_path)
                 status_prefix = f"📦 已选中权重文件: {inspect_target.name}"
+            elif mode == "init_from" and not manual_path:
+                out_root = self.var_output_dir.get().strip() or str((PROJECT_ROOT / "output").resolve())
+                cand_roots = [Path(out_root) / lora_name, PROJECT_ROOT / "workspace" / "kaggle_outputs" / lora_name]
+                found_sfs = []
+                for cr in cand_roots:
+                    if cr.is_dir():
+                        found_sfs.extend(
+                            f for f in cr.rglob("*.safetensors")
+                            if f.is_file()
+                            and f.stat().st_size > 0
+                            and "moss_image" not in f.name.lower()
+                            and "qwen" not in f.name.lower()
+                            and "flux2" not in f.name.lower()
+                        )
+                if found_sfs:
+                    def _sf_rank(p: Path):
+                        ln = p.name.lower()
+                        prio = 2 if ln.endswith("-trainable.safetensors") else (1 if "-comfy" in ln else 0)
+                        return (prio, p.stat().st_mtime)
+
+                    found_sfs.sort(key=_sf_rank)
+                    inspect_target = found_sfs[-1]
+                    status_prefix = f"📦 已自动匹配成品权重: {inspect_target.name}"
+                else:
+                    status_prefix = f"⚠️ 未在 output/{lora_name} 找到已有 .safetensors 权重，请先训练或手动选择文件"
             else:
                 ckpts = train_local.list_lora_checkpoints(trainer_dir, lora_name, manual_path)
                 if ckpts:
@@ -1308,7 +1388,7 @@ class ModernLocalTrainerGUI:
                 elif manual_path:
                     status_prefix = f"⚠️ 指定路径未检测到有效断点/权重: {manual_path}"
                 else:
-                    status_prefix = f"⚠️ 未在 runs/moss/{lora_name}/checkpoints/ 找到断点目录，请手动选择文件或目录"
+                    status_prefix = f"⚠️ 未在 runs/moss/{lora_name}/checkpoints/ 或云端回传目录找到断点，请手动选择文件或目录"
 
             if inspect_target and inspect_target.is_file():
                 info = train_local.inspect_safetensors_lora(inspect_target)
@@ -1746,7 +1826,10 @@ class ModernLocalTrainerGUI:
             if tok:
                 opts["hf_token"] = tok
         elif src == "url":
-            opts["dataset_url"] = self.var_external_dataset_url.get().strip()
+            cleaned_url = sanitize_external_dataset_url(self.var_external_dataset_url.get().strip())
+            if cleaned_url != self.var_external_dataset_url.get().strip():
+                self.var_external_dataset_url.set(cleaned_url)
+            opts["dataset_url"] = cleaned_url
         elif src == "r2":
             opts["dataset_url"] = self.var_r2_dataset_url.get().strip()
         return opts
@@ -1758,7 +1841,7 @@ class ModernLocalTrainerGUI:
         if hasattr(self, "btn_cloud_master"):
             try:
                 if src == "url":
-                    master_txt = "🚀 一键全自动：图集上传 6 站外链 + 推送 Kaggle 直拉开炼 (免审核)"
+                    master_txt = "🚀 一键全自动：图集上传 5 站外链 + 推送 Kaggle 直拉开炼 (免审核)"
                 elif src == "hf":
                     master_txt = (
                         "🚀 一键全自动：上传 HF 私有仓库 + 推送 Kaggle 云端直拉开炼"
@@ -1788,7 +1871,7 @@ class ModernLocalTrainerGUI:
                 pass
 
     def on_cloud_dataset_source_changed(self):
-        """在【临时外链(6站)】、【HF私有仓库】、【Cloudflare R2私有存储】与【Kaggle私有Dataset】间切换面板。"""
+        """在【临时外链(5站)】、【HF私有仓库】、【Cloudflare R2私有存储】与【Kaggle私有Dataset】间切换面板。"""
         src = self._cloud_source()
         for attr in ("cloud_url_frame", "cloud_local_slug_frame", "cloud_hf_frame", "cloud_r2_frame"):
             widget = getattr(self, attr, None)
@@ -1900,7 +1983,7 @@ class ModernLocalTrainerGUI:
                 ds_txt = f"☁️ R2 私有 ({base_ds} → {bkt} · {r2_ready})"
             elif src == "url":
                 cur_url = self.var_external_dataset_url.get().strip()
-                url_state = "已就绪外链" if cur_url else "自动传6站"
+                url_state = "已就绪外链" if cur_url else "自动传5站"
                 ds_txt = f"🔗 外链直拉 ({base_ds} · {url_state})"
             else:
                 ds_txt = f"📦 Kaggle私有 ({base_ds})"
@@ -2011,8 +2094,8 @@ class ModernLocalTrainerGUI:
         self._run_cloud_worker("⏳ 正在安装官方 Kaggle CLI...", _worker)
 
     def _upload_external_step(self, raw_params: dict, ds_slug: str, log_cb) -> tuple:
-        """打包本地图集并上传 6 站外链中转矩阵，成功后在 UI 线程回填直链并持久化配置。"""
-        log_cb("\n[云端流水线 · 6站外链中转] 正在打包本地图集并上传多线路外链中转站...\n")
+        """打包本地图集并上传 5 站外链中转矩阵，成功后在 UI 线程回填直链并持久化配置。"""
+        log_cb("\n[云端流水线 · 5站外链中转] 正在打包本地图集并上传多线路外链中转站...\n")
         ok, url_or_err, stats = upload_external_dataset(raw_params, dataset_slug=ds_slug, on_log=log_cb)
         if ok:
             def _save_url():
@@ -2161,7 +2244,7 @@ class ModernLocalTrainerGUI:
                     self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 外链图集上传失败，请查看控制台报错"))
                     self._enqueue_ui(lambda m=url_or_err: messagebox.showerror("外链上传失败", m))
 
-            self._run_cloud_worker("⏳ 正在打包并上传图集至 6 站外链中转站...", _url_worker)
+            self._run_cloud_worker("⏳ 正在打包并上传图集至 5 站外链中转站...", _url_worker)
             return
 
         ident = self._resolve_kaggle_identity(require_creds=True)
@@ -2344,7 +2427,7 @@ class ModernLocalTrainerGUI:
             elif src == "r2":
                 src_note = "☁️ Cloudflare R2 私有预签名直拉 (dataset_sources=[])"
             elif src == "url":
-                src_note = f"🔗 6站外链直拉 ({len(cloud_opts.get('dataset_url', '').split('|'))}条线路, dataset_sources=[])"
+                src_note = f"🔗 5站外链直拉 ({len(cloud_opts.get('dataset_url', '').split('|'))}条线路, dataset_sources=[])"
             else:
                 src_note = f"📦 挂载 Kaggle 图集: {ds_id}"
 
@@ -2461,7 +2544,7 @@ class ModernLocalTrainerGUI:
             if src == "url":
                 ext_stats = None
                 if has_local:
-                    log_cb(f"\n{'='*70}\n🔗 [一键 6 站外链直拉流水线] 1/2 打包图集并上传多线路外链中转站（免 Kaggle 审核）\n")
+                    log_cb(f"\n{'='*70}\n🔗 [一键 5 站外链直拉流水线] 1/2 打包图集并上传多线路外链中转站（免 Kaggle 审核）\n")
                     ok_ext, url_or_err, ext_stats = self._upload_external_step(raw_params, ds_slug, log_cb)
                     if not ok_ext:
                         self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 第一步上传外链失败，已中止推送"))
@@ -2476,7 +2559,7 @@ class ModernLocalTrainerGUI:
                 )
                 self._push_kernel_and_report(
                     cleaned, cloud_opts, username, ds_id, kn_slug,
-                    src_note=f"🔗 6站外链直拉 ({mirror_cnt}条镜像, dataset_sources=[])",
+                    src_note=f"🔗 5站外链直拉 ({mirror_cnt}条镜像, dataset_sources=[])",
                     queued_prefix="🟡 外链直拉训练已排队：",
                     success_title="🚀 外链直拉云端部署成功！",
                     success_summary=summary_txt,
@@ -2512,7 +2595,7 @@ class ModernLocalTrainerGUI:
         title_map = {
             "hf": f"⏳ 正在执行 HF 私有仓流水线 ({cloud_opts.get('hf_dataset_repo', '')})...",
             "r2": "⏳ 正在执行 Cloudflare R2 私有上传 + 推云端...",
-            "url": "⏳ 正在执行 6 站外链中转 + 推云端直拉开炼...",
+            "url": "⏳ 正在执行 5 站外链中转 + 推云端直拉开炼...",
             "local": "⏳ 全自动流水线执行中：传图集 + 推云端...",
         }
         self._run_cloud_worker(title_map.get(src, title_map["local"]), _worker)
@@ -2699,7 +2782,9 @@ class ModernLocalTrainerGUI:
                 return
 
             def _on_ok():
-                self.var_cloud_job_status.set(f"🟢 已成功拉回 {len(res['safetensors'])} 个权重至 {res['output_dir']}")
+                warn_line = f"\n\n{res['partial_warning']}" if res.get("partial_warning") else ""
+                status_prefix = "🟡 已恢复拉回" if res.get("partial_warning") else "🟢 已成功拉回"
+                self.var_cloud_job_status.set(f"{status_prefix} {len(res['safetensors'])} 个权重至 {res['output_dir']}")
                 if res.get("metrics_path"):
                     self.monitor.load_metrics_from_path(Path(res["metrics_path"]), label=f"云端 {lora_name}", silent=False)
                 comfy_note = f"\n已自动同步 ComfyUI loras：{len(res['comfy_synced'])} 个文件" if res["comfy_synced"] else ""
@@ -2707,7 +2792,7 @@ class ModernLocalTrainerGUI:
                     "🎉 云端成品拉回成功！",
                     f"已完成解压并归档至：\n{res['output_dir']}\n\n"
                     f"权重文件数：{len(res['safetensors'])} 个{comfy_note}\n"
-                    f"{'已同步在右侧绘出云端 Loss 收敛曲线！' if res.get('metrics_path') else ''}",
+                    f"{'已同步在右侧绘出云端 Loss 收敛曲线！' if res.get('metrics_path') else ''}{warn_line}",
                 )
 
             self._enqueue_ui(_on_ok)

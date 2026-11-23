@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
 
+## [1.8.1] - 2026-11-23
+
+### Fixed & Changed
+- **剔除触发 Kaggle 容器风控的 `x0.at` 外链镜像与透传真实 `failureMessage`（[`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`core/__init__.py`](core/__init__.py) / [`train_moss.py`](train_moss.py) / [`ui/app.py`](ui/app.py) / [`ui/tab_cloud.py`](ui/tab_cloud.py)）**：
+  - 移除 `upload_zip_to_external_mirrors()` 中的 `x0.at` 上传节点，外链直拉收敛为 **5 站 Kaggle 安全容灾矩阵**（`temp.sh -> filebin.net -> transfer.whalebone.io -> ul.sto.care (trystocare.com) -> tmpfiles.org`），规避 Kaggle 容器在下载 `x0.at` 后约 10 秒触发后端安全 Watchdog 被强行中止（`Canceled by backend.`）的问题；
+  - 新增并导出 `sanitize_external_dataset_url()`，在 GUI 启动读入 `local_config.json`、保存云端参数 `_cloud_opts()` 以及 `build_cloud_config_payload()` 中自动清洗遗留的 `x0.at` 镜像链接；`train_moss.py` 的 `_download_dataset_archive()` 同步拦截并跳过任意 `x0.at` 镜像；
+  - 新增 `_extract_kernel_failure_message()` 与版本级状态探针 `_probe_kernel_failure_message()`，在 `fetch_kaggle_kernel_status()` 遇到 `CANCEL` 或 `ERROR` 且无明确说明时自动拉取当前版本号的 `failureMessage`（如 `Canceled by backend.`）并直显于状态栏，明确提示“非本地刷新所致”。
+
+### Added & Improved
+- **工作区清理自愈与 `.kaggle-partial` 断流恢复（[`core/config_store.py`](core/config_store.py) / [`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py) / [`ui/app.py`](ui/app.py) / [`ui/monitor_panel.py`](ui/monitor_panel.py) / [`ui/tab_help.py`](ui/tab_help.py)）**：
+  - 新增 `cleanup_workspace_staging()` 及 Tab 5【🧹 一键清理临时工作区与空目录】按钮，自动抢救未归档权重、清除过期暂存目录与空输出目录，同时保护 `workspace/models` 硬链接与 `workspace/temp`；
+  - 优化云端与本地回传归档：`train_moss.py` 与 `extract_kaggle_outputs_from_dir()` 按步数优先归档最新导出权重及 checkpoints、自动修剪冗余 `optim.pt`，并支持从残余 `.kaggle-partial` 中断中恢复完整 `.zip` 成品；`MonitorPanel.load_history_metrics()` 同步兼容读取云端回传 `metrics.jsonl`，`init_from` 模式支持自动匹配历史成品权重。
+
 ## [1.8.0] - 2026-11-23
 
 ### Added
@@ -253,7 +266,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.2...v1.8.0
 [1.7.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.7.0...v1.7.1

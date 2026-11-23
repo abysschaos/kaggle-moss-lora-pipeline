@@ -328,6 +328,13 @@ def normalize_hf_dataset_repo(raw: str) -> str:
     return text
 
 
+def sanitize_external_dataset_url(raw_url: str) -> str:
+    """剔除会触发 Kaggle 容器运行时网络风控（Canceled by backend.）的 x0.at 镜像并规范化 '|' 分隔直链。"""
+    parts = [u.strip() for u in str(raw_url or "").split("|") if u.strip()]
+    safe_parts = [u for u in parts if not re.match(r"^https?://(?:www\.)?x0\.at(?:/|$)", u, re.IGNORECASE)]
+    return "|".join(safe_parts)
+
+
 def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict = None) -> dict:
     """将本地 Tab 1~3 清洗参数与云端算力选项映射为与 train_moss.py 完全一致的配置载荷。"""
     opts = cloud_opts or {}
@@ -414,7 +421,11 @@ def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict = None) ->
             hf_tok = str(opts.get("hf_token", "") or "").strip()
             if hf_tok:
                 payload["hf_token"] = hf_tok
-    elif ds_source in ("url", "r2"):
+    elif ds_source == "url":
+        ds_url = sanitize_external_dataset_url(opts.get("dataset_url", ""))
+        if ds_url:
+            payload["dataset_url"] = ds_url
+    elif ds_source == "r2":
         ds_url = str(opts.get("dataset_url", "") or "").strip()
         if ds_url:
             payload["dataset_url"] = ds_url
@@ -736,6 +747,10 @@ def stage_dataset_bundle(raw_params: dict, username: str, dataset_slug: str, sta
         raise ValueError("Kaggle 用户名不能为空。")
 
     root = Path(stage_root) if stage_root else (PROJECT_ROOT / "workspace" / "kaggle_dataset_stage")
+    root.mkdir(parents=True, exist_ok=True)
+    for old_sub in list(root.iterdir()):
+        if old_sub.is_dir() and old_sub.name != slug:
+            shutil.rmtree(old_sub, ignore_errors=True)
     stage_dir = root / slug
     if stage_dir.exists():
         shutil.rmtree(stage_dir, ignore_errors=True)
@@ -766,130 +781,136 @@ def upload_kaggle_dataset(
     kaggle_json_path: Path = None,
     on_log=None,
     verify_poll_attempts: int = 3,
+    cleanup_stage: bool = True,
 ) -> tuple:
     """智能创建或更新 Kaggle 私有数据集：自动清洗缓存、防标题撞车重试、抓全报错正文并异步验活。"""
-    cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
-    if not cli.get("found"):
-        return False, "未找到 Kaggle CLI，请先安装并配置凭证。"
-
-    _cleanup_stale_kaggle_upload_cache()
-    env = _build_kaggle_env(kaggle_json_path=kaggle_json_path)
-
-    def _query_status():
-        return subprocess.run(
-            [*cli["cmd"], "datasets", "status", dataset_id],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=20,
-            env=env,
-            creationflags=NO_WINDOW,
-        )
-
-    exists = False
     try:
-        st_res = _query_status()
-        exists = (st_res.returncode == 0)
-    except Exception:
+        cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
+        if not cli.get("found"):
+            return False, "未找到 Kaggle CLI，请先安装并配置凭证。"
+
+        _cleanup_stale_kaggle_upload_cache()
+        env = _build_kaggle_env(kaggle_json_path=kaggle_json_path)
+
+        def _query_status():
+            return subprocess.run(
+                [*cli["cmd"], "datasets", "status", dataset_id],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                env=env,
+                creationflags=NO_WINDOW,
+            )
+
         exists = False
+        try:
+            st_res = _query_status()
+            exists = (st_res.returncode == 0)
+        except Exception:
+            exists = False
 
-    notes = (version_notes or "Sync dataset from MOSS LoRA Trainer GUI").strip()
+        notes = (version_notes or "Sync dataset from MOSS LoRA Trainer GUI").strip()
 
-    def _is_op_success(exit_code: int, text: str, err_text: str) -> bool:
-        if exit_code != 0:
+        def _is_op_success(exit_code: int, text: str, err_text: str) -> bool:
+            if exit_code != 0:
+                return False
+            if not err_text:
+                return True
+            low_text = (text or "").lower()
+            if "dataset operation succeeded:" in low_text and "dataset creation error:" not in low_text:
+                remaining = [
+                    ln for ln in err_text.splitlines()
+                    if not ("403" in ln.lower() and "datasets.get" in ln.lower())
+                ]
+                return len(remaining) == 0
             return False
-        if not err_text:
-            return True
-        low_text = (text or "").lower()
-        if "dataset operation succeeded:" in low_text and "dataset creation error:" not in low_text:
-            remaining = [
-                ln for ln in err_text.splitlines()
-                if not ("403" in ln.lower() and "datasets.get" in ln.lower())
-            ]
-            return len(remaining) == 0
-        return False
 
-    if exists:
+        if exists:
+            if on_log:
+                on_log(f"[Kaggle 图集] 检测到私有数据集 {dataset_id} 已存在，正在推送新版本...\n")
+            rc, out = _run_kaggle_dataset_op("version", Path(stage_dir), notes, cli, env, on_log=on_log)
+            err_hint = _extract_kaggle_cli_error(out)
+            if _is_op_success(rc, out, err_hint):
+                return True, f"已成功更新私有数据集版本：{dataset_id}"
+            return False, _format_dataset_error("更新数据集失败", rc, out, err_hint)
+
         if on_log:
-            on_log(f"[Kaggle 图集] 检测到私有数据集 {dataset_id} 已存在，正在推送新版本...\n")
-        rc, out = _run_kaggle_dataset_op("version", Path(stage_dir), notes, cli, env, on_log=on_log)
+            on_log(f"[Kaggle 图集] 正在创建私有数据集 {dataset_id}...\n")
+        rc, out = _run_kaggle_dataset_op("create", Path(stage_dir), notes, cli, env, on_log=on_log)
         err_hint = _extract_kaggle_cli_error(out)
-        if _is_op_success(rc, out, err_hint):
-            return True, f"已成功更新私有数据集版本：{dataset_id}"
-        return False, _format_dataset_error("更新数据集失败", rc, out, err_hint)
+        effective_ok = _is_op_success(rc, out, err_hint)
 
-    if on_log:
-        on_log(f"[Kaggle 图集] 正在创建私有数据集 {dataset_id}...\n")
-    rc, out = _run_kaggle_dataset_op("create", Path(stage_dir), notes, cli, env, on_log=on_log)
-    err_hint = _extract_kaggle_cli_error(out)
-    effective_ok = _is_op_success(rc, out, err_hint)
+        if not effective_ok:
+            combined_lower = f"{err_hint}\n{out}".lower()
+            if "title" in combined_lower and "already in use" in combined_lower:
+                meta_file = Path(stage_dir) / "dataset-metadata.json"
+                slug_part = dataset_id.split("/", 1)[1] if "/" in dataset_id else dataset_id
+                new_title = build_kaggle_dataset_title(slug_part, suffix=secrets.token_hex(2))
+                if meta_file.is_file():
+                    try:
+                        meta_obj = json.loads(meta_file.read_text(encoding="utf-8"))
+                        meta_obj["title"] = new_title
+                        meta_file.write_text(json.dumps(meta_obj, indent=2, ensure_ascii=False), encoding="utf-8")
+                    except Exception:
+                        pass
+                if on_log:
+                    on_log(f"[Kaggle 图集] 检测到标题占用，已自动更换防撞车标题 [{new_title}] 并重试创建...\n")
+                rc, out = _run_kaggle_dataset_op("create", Path(stage_dir), notes, cli, env, on_log=on_log)
+                err_hint = _extract_kaggle_cli_error(out)
+                effective_ok = _is_op_success(rc, out, err_hint)
+                combined_lower = f"{err_hint}\n{out}".lower()
 
-    if not effective_ok:
-        combined_lower = f"{err_hint}\n{out}".lower()
-        if "title" in combined_lower and "already in use" in combined_lower:
-            meta_file = Path(stage_dir) / "dataset-metadata.json"
-            slug_part = dataset_id.split("/", 1)[1] if "/" in dataset_id else dataset_id
-            new_title = build_kaggle_dataset_title(slug_part, suffix=secrets.token_hex(2))
-            if meta_file.is_file():
+            if not effective_ok and (
+                "already exists" in combined_lower
+                or "409" in combined_lower
+                or ("already in use" in combined_lower and "title" not in combined_lower)
+            ):
+                if on_log:
+                    on_log(f"[Kaggle 图集] 数据集 {dataset_id} 已存在，自动切换为增量版本推送...\n")
+                rc2, out2 = _run_kaggle_dataset_op("version", Path(stage_dir), notes, cli, env, on_log=on_log)
+                err_hint2 = _extract_kaggle_cli_error(out2)
+                if _is_op_success(rc2, out2, err_hint2):
+                    return True, f"已自动更新现有私有数据集版本：{dataset_id}"
+                return False, _format_dataset_error("增量更新数据集失败", rc2, out2, err_hint2)
+
+        if not effective_ok:
+            return False, _format_dataset_error("上传私有数据集失败", rc, out, err_hint)
+
+        # 创建受理后做轻量异步验活，确认云端解包是否真正进入 ready 状态
+        if int(verify_poll_attempts) > 0:
+            poll_delays = (3, 5, 6)
+            for idx in range(int(verify_poll_attempts)):
+                time.sleep(poll_delays[min(idx, len(poll_delays) - 1)])
                 try:
-                    meta_obj = json.loads(meta_file.read_text(encoding="utf-8"))
-                    meta_obj["title"] = new_title
-                    meta_file.write_text(json.dumps(meta_obj, indent=2, ensure_ascii=False), encoding="utf-8")
+                    st_after = _query_status()
+                    st_txt = f"{st_after.stdout or ''} {st_after.stderr or ''}".strip()
+                    if st_after.returncode == 0:
+                        low_st = st_txt.lower()
+                        if "ready" in low_st:
+                            if on_log:
+                                on_log(f"[Kaggle 验活] 数据集 {dataset_id} 云端解包完成，状态：ready ✅\n")
+                            return True, f"已成功创建并就绪私有数据集：{dataset_id}"
+                        if "error" in low_st:
+                            return False, f"Kaggle 后台处理数据集失败：{st_txt}"
                 except Exception:
                     pass
             if on_log:
-                on_log(f"[Kaggle 图集] 检测到标题占用，已自动更换防撞车标题 [{new_title}] 并重试创建...\n")
-            rc, out = _run_kaggle_dataset_op("create", Path(stage_dir), notes, cli, env, on_log=on_log)
-            err_hint = _extract_kaggle_cli_error(out)
-            effective_ok = _is_op_success(rc, out, err_hint)
-            combined_lower = f"{err_hint}\n{out}".lower()
-
-        if not effective_ok and (
-            "already exists" in combined_lower
-            or "409" in combined_lower
-            or ("already in use" in combined_lower and "title" not in combined_lower)
-        ):
-            if on_log:
-                on_log(f"[Kaggle 图集] 数据集 {dataset_id} 已存在，自动切换为增量版本推送...\n")
-            rc2, out2 = _run_kaggle_dataset_op("version", Path(stage_dir), notes, cli, env, on_log=on_log)
-            err_hint2 = _extract_kaggle_cli_error(out2)
-            if _is_op_success(rc2, out2, err_hint2):
-                return True, f"已自动更新现有私有数据集版本：{dataset_id}"
-            return False, _format_dataset_error("增量更新数据集失败", rc2, out2, err_hint2)
-
-    if not effective_ok:
-        return False, _format_dataset_error("上传私有数据集失败", rc, out, err_hint)
-
-    # 创建受理后做轻量异步验活，确认云端解包是否真正进入 ready 状态
-    if int(verify_poll_attempts) > 0:
-        poll_delays = (3, 5, 6)
-        for idx in range(int(verify_poll_attempts)):
-            time.sleep(poll_delays[min(idx, len(poll_delays) - 1)])
-            try:
-                st_after = _query_status()
-                st_txt = f"{st_after.stdout or ''} {st_after.stderr or ''}".strip()
-                if st_after.returncode == 0:
-                    low_st = st_txt.lower()
-                    if "ready" in low_st:
-                        if on_log:
-                            on_log(f"[Kaggle 验活] 数据集 {dataset_id} 云端解包完成，状态：ready ✅\n")
-                        return True, f"已成功创建并就绪私有数据集：{dataset_id}"
-                    if "error" in low_st:
-                        return False, f"Kaggle 后台处理数据集失败：{st_txt}"
-            except Exception:
-                pass
-        if on_log:
-            on_log(
-                f"[Kaggle 验活] 数据集 {dataset_id} 已受理创建但云端仍在后台解包索引；"
-                f"如随即推送报错 403，请等待 15~30 秒后重试或查看 https://www.kaggle.com/datasets/{dataset_id}\n"
+                on_log(
+                    f"[Kaggle 验活] 数据集 {dataset_id} 已受理创建但云端仍在后台解包索引；"
+                    f"如随即推送报错 403，请等待 15~30 秒后重试或查看 https://www.kaggle.com/datasets/{dataset_id}\n"
+                )
+            return (
+                True,
+                f"已提交创建私有数据集：{dataset_id}（云端正在后台索引，建议稍候 15~30 秒或访问 https://www.kaggle.com/datasets/{dataset_id} 确认就绪后再推送）",
             )
-        return (
-            True,
-            f"已提交创建私有数据集：{dataset_id}（云端正在后台索引，建议稍候 15~30 秒或访问 https://www.kaggle.com/datasets/{dataset_id} 确认就绪后再推送）",
-        )
 
-    return True, f"已成功创建并上传私有数据集：{dataset_id}"
+        return True, f"已成功创建并上传私有数据集：{dataset_id}"
+    finally:
+        st_path = Path(stage_dir)
+        if cleanup_stage and st_path.parent.name == "kaggle_dataset_stage" and st_path.exists():
+            shutil.rmtree(st_path, ignore_errors=True)
 
 
 def stage_external_dataset_zip(
@@ -935,7 +956,7 @@ def upload_zip_to_external_mirrors(
     on_log=None,
     max_mirrors: int = 3,
 ) -> tuple:
-    """将本地数据集 ZIP 依次上传至 6 个实测免登录外链站（temp.sh / x0.at / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org），返回 (ok, '|' 拼接直链或报错, 明细列表)。"""
+    """将本地数据集 ZIP 依次上传至 5 个 Kaggle 安全的免登录外链站（temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org），返回 (ok, '|' 拼接直链或报错, 明细列表)。"""
     zpath = Path(zip_path).resolve()
     if not zpath.is_file() or zpath.stat().st_size == 0:
         return False, f"待上传 ZIP 文件不存在或为空：{zpath}", []
@@ -976,24 +997,7 @@ def upload_zip_to_external_mirrors(
         except Exception as exc:
             errors.append(f"temp.sh: {exc}")
 
-    # 2. x0.at（1 GiB 上限，留存 3~100 天，纯静态 GET 直链）
-    if len(mirrors) < max_mirrors and size_mb <= 1000.0:
-        try:
-            res = _run_upload(
-                "x0.at (3~100d/1GB)",
-                [curl_bin, "-sS", "--connect-timeout", "20", "--max-time", "300", "-F", f"file=@{posix_zip}", "https://x0.at/"],
-            )
-            url_out = (res.stdout or "").strip().splitlines()[0].strip() if (res.stdout or "").strip() else ""
-            if res.returncode == 0 and re.match(r"^https?://x0\.at/[A-Za-z0-9_.-]+", url_out, re.IGNORECASE):
-                mirrors.append({"host": "x0.at", "url": url_out})
-                if on_log:
-                    on_log(f"  ✅ x0.at 直链就绪: {url_out}\n")
-            else:
-                errors.append(f"x0.at: rc={res.returncode} out={url_out[:120]} err={(res.stderr or '')[:120]}")
-        except Exception as exc:
-            errors.append(f"x0.at: {exc}")
-
-    # 3. filebin.net（6 天有效）
+    # 2. filebin.net（6 天有效）
     if len(mirrors) < max_mirrors:
         try:
             bin_id = f"moss-{secrets.token_hex(4)}"
@@ -1017,7 +1021,7 @@ def upload_zip_to_external_mirrors(
         except Exception as exc:
             errors.append(f"filebin.net: {exc}")
 
-    # 4. transfer.whalebone.io（transfer.sh 开源兼容镜像）
+    # 3. transfer.whalebone.io（transfer.sh 开源兼容镜像）
     if len(mirrors) < max_mirrors:
         try:
             res = _run_upload(
@@ -1034,7 +1038,7 @@ def upload_zip_to_external_mirrors(
         except Exception as exc:
             errors.append(f"transfer.whalebone.io: {exc}")
 
-    # 5. ul.sto.care / trystocare.com（API 上限 100MB，72 小时有效）
+    # 4. ul.sto.care / trystocare.com（API 上限 100MB，72 小时有效）
     if len(mirrors) < max_mirrors and size_mb <= 98.0:
         try:
             res = _run_upload(
@@ -1053,7 +1057,7 @@ def upload_zip_to_external_mirrors(
         except Exception as exc:
             errors.append(f"ul.sto.care: {exc}")
 
-    # 6. tmpfiles.org（60 分钟有效，上限 100MB）
+    # 5. tmpfiles.org（60 分钟有效，上限 100MB）
     if len(mirrors) < max_mirrors and size_mb <= 98.0:
         try:
             res = _run_upload(
@@ -1085,6 +1089,7 @@ def upload_external_dataset(
     dataset_slug: str = "",
     stage_root: Path = None,
     on_log=None,
+    cleanup_zip: bool = True,
 ) -> tuple:
     """打包本地单/多子集图集并自动上传至外链中转站，返回 (ok, '|' 拼接直链或报错, 统计详情)。"""
     zip_path, stats = stage_external_dataset_zip(
@@ -1098,9 +1103,16 @@ def upload_external_dataset(
             f"[外链打包完成] 模式={stats['mode']} | {stats['images']} 张图 / {stats['captions']} 份标注 "
             f"| 压缩包 {stats['zip_mb']} MB -> {zip_path}\n"
         )
-    ok, url_or_err, mirrors = upload_zip_to_external_mirrors(zip_path, on_log=on_log)
-    stats["mirrors"] = mirrors
-    return ok, url_or_err, stats
+    try:
+        ok, url_or_err, mirrors = upload_zip_to_external_mirrors(zip_path, on_log=on_log)
+        stats["mirrors"] = mirrors
+        return ok, url_or_err, stats
+    finally:
+        if cleanup_zip:
+            try:
+                Path(zip_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _resolve_hf_hub_python() -> str:
@@ -1390,6 +1402,7 @@ def upload_dataset_to_cloudflare_r2(
     dataset_slug: str = "",
     stage_root: Path = None,
     on_log=None,
+    cleanup_zip: bool = True,
 ) -> tuple:
     """将本地图集打包为 ZIP 并通过 SigV4 预签名 PUT 上传至私有 Cloudflare R2 桶，返回 7 天有效期预签名直拉链接。"""
     saved_r2 = read_r2_credentials()
@@ -1411,75 +1424,82 @@ def upload_dataset_to_cloudflare_r2(
         on_log=on_log,
     )
 
-    slug_part = sanitize_kaggle_slug(dataset_slug or str(raw_params.get("lora_name", "") or "moss-data"), prefix="moss-data")
-    ts_tag = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-    obj_name = f"{slug_part}_{ts_tag}.zip"
-    object_key = f"{prefix}/{obj_name}" if prefix else obj_name
-
-    put_url = generate_r2_presigned_url(
-        account_id=acct,
-        access_key_id=ak,
-        secret_access_key=sk,
-        bucket=bkt,
-        object_key=object_key,
-        method="PUT",
-        expires_seconds=3600,
-        endpoint_url=endpoint_url,
-    )
-
-    curl_bin = shutil.which("curl.exe") or shutil.which("curl") or "curl"
-    posix_zip = Path(zip_path).resolve().as_posix()
-    if on_log:
-        on_log(f"[R2 上传] 正在上传 {stats['zip_mb']} MB -> r2://{bkt}/{object_key} ...\n")
-
     try:
-        res = subprocess.run(
-            [
-                curl_bin, "-sS", "-g",
-                "--connect-timeout", "20",
-                "--max-time", "600",
-                "-w", "\n__HTTP_CODE__:%{http_code}",
-                "-X", "PUT",
-                "--upload-file", posix_zip,
-                put_url,
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=620,
-            creationflags=NO_WINDOW,
+        slug_part = sanitize_kaggle_slug(dataset_slug or str(raw_params.get("lora_name", "") or "moss-data"), prefix="moss-data")
+        ts_tag = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+        obj_name = f"{slug_part}_{ts_tag}.zip"
+        object_key = f"{prefix}/{obj_name}" if prefix else obj_name
+
+        put_url = generate_r2_presigned_url(
+            account_id=acct,
+            access_key_id=ak,
+            secret_access_key=sk,
+            bucket=bkt,
+            object_key=object_key,
+            method="PUT",
+            expires_seconds=3600,
+            endpoint_url=endpoint_url,
         )
-    except Exception as exc:
-        return False, f"Cloudflare R2 PUT 上传异常：{exc}", stats
 
-    raw_out = res.stdout or ""
-    http_code = 0
-    m_code = re.search(r"__HTTP_CODE__:(\d+)", raw_out)
-    if m_code:
-        http_code = int(m_code.group(1))
-    body_clean = re.sub(r"\s*__HTTP_CODE__:\d+\s*", "", raw_out).strip()
+        curl_bin = shutil.which("curl.exe") or shutil.which("curl") or "curl"
+        posix_zip = Path(zip_path).resolve().as_posix()
+        if on_log:
+            on_log(f"[R2 上传] 正在上传 {stats['zip_mb']} MB -> r2://{bkt}/{object_key} ...\n")
 
-    if res.returncode != 0 or http_code not in (200, 201, 204):
-        err_detail = body_clean[:300] or (res.stderr or "")[:200]
-        return False, f"Cloudflare R2 上传失败 (curl rc={res.returncode}, HTTP {http_code})：{err_detail}", stats
+        try:
+            res = subprocess.run(
+                [
+                    curl_bin, "-sS", "-g",
+                    "--connect-timeout", "20",
+                    "--max-time", "600",
+                    "-w", "\n__HTTP_CODE__:%{http_code}",
+                    "-X", "PUT",
+                    "--upload-file", posix_zip,
+                    put_url,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=620,
+                creationflags=NO_WINDOW,
+            )
+        except Exception as exc:
+            return False, f"Cloudflare R2 PUT 上传异常：{exc}", stats
 
-    get_url = generate_r2_presigned_url(
-        account_id=acct,
-        access_key_id=ak,
-        secret_access_key=sk,
-        bucket=bkt,
-        object_key=object_key,
-        method="GET",
-        expires_seconds=604800,
-        endpoint_url=endpoint_url,
-    )
-    final_url = f"{pub_base}/{urllib.parse.quote(object_key, safe='/~_.-')}|{get_url}" if pub_base else get_url
-    stats["r2_bucket"] = bkt
-    stats["r2_object_key"] = object_key
-    if on_log:
-        on_log(f"  ✅ Cloudflare R2 私有上传完成：r2://{bkt}/{object_key}（已签发 7 天免密预签名直链）\n")
-    return True, final_url, stats
+        raw_out = res.stdout or ""
+        http_code = 0
+        m_code = re.search(r"__HTTP_CODE__:(\d+)", raw_out)
+        if m_code:
+            http_code = int(m_code.group(1))
+        body_clean = re.sub(r"\s*__HTTP_CODE__:\d+\s*", "", raw_out).strip()
+
+        if res.returncode != 0 or http_code not in (200, 201, 204):
+            err_detail = body_clean[:300] or (res.stderr or "")[:200]
+            return False, f"Cloudflare R2 上传失败 (curl rc={res.returncode}, HTTP {http_code})：{err_detail}", stats
+
+        get_url = generate_r2_presigned_url(
+            account_id=acct,
+            access_key_id=ak,
+            secret_access_key=sk,
+            bucket=bkt,
+            object_key=object_key,
+            method="GET",
+            expires_seconds=604800,
+            endpoint_url=endpoint_url,
+        )
+        final_url = f"{pub_base}/{urllib.parse.quote(object_key, safe='/~_.-')}|{get_url}" if pub_base else get_url
+        stats["r2_bucket"] = bkt
+        stats["r2_object_key"] = object_key
+        if on_log:
+            on_log(f"  ✅ Cloudflare R2 私有上传完成：r2://{bkt}/{object_key}（已签发 7 天免密预签名直链）\n")
+        return True, final_url, stats
+    finally:
+        if cleanup_zip:
+            try:
+                Path(zip_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def inject_cloud_config_into_train_moss(source_script: Path, config_payload: dict) -> str:
@@ -1507,6 +1527,10 @@ def stage_kernel_bundle(
     slug = sanitize_kaggle_slug(kernel_slug, prefix="moss-train")
 
     root = Path(stage_root) if stage_root else (PROJECT_ROOT / "workspace" / "kaggle_kernel_stage")
+    root.mkdir(parents=True, exist_ok=True)
+    for old_sub in list(root.iterdir()):
+        if old_sub.is_dir() and old_sub.name != slug:
+            shutil.rmtree(old_sub, ignore_errors=True)
     stage_dir = root / slug
     if stage_dir.exists():
         shutil.rmtree(stage_dir, ignore_errors=True)
@@ -1576,12 +1600,79 @@ def push_kaggle_kernel(
     return False, kernel_url, f"推送任务失败 (Exit={rc})：\n{out[-300:]}"
 
 
+def _extract_kernel_failure_message(raw: str) -> str:
+    """从 Kaggle CLI 状态输出提取 Failure message / failureMessage。"""
+    text = raw or ""
+    for pat in (
+        r'Failure message:\s*"([^"]+)"',
+        r'Failure message:\s*([^\r\n]+)',
+        r'"failureMessage"\s*:\s*"([^"]+)"',
+    ):
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            msg = m.group(1).strip().strip('"').strip()
+            if msg:
+                return msg[:240]
+    return ""
+
+
+_KAGGLE_KERNEL_FAILURE_PROBE = """
+import sys
+kernel_id = sys.argv[1]
+from kaggle.api.kaggle_api_extended import KaggleApi
+from kagglesdk.kernels.types.kernels_api_service import ApiGetKernelRequest
+
+api = KaggleApi()
+api.authenticate()
+owner, slug, ver_arg = api.parse_kernel_string(kernel_id)
+if not ver_arg:
+    with api.build_kaggle_client() as client:
+        req = ApiGetKernelRequest()
+        req.user_name = owner
+        req.kernel_slug = slug
+        resp = client.kernels.kernels_api_client.get_kernel(req)
+        meta = (resp.to_dict() or {}).get("metadata") or {}
+        ver_num = meta.get("currentVersionNumber")
+        ver_arg = str(ver_num) if ver_num else None
+target = f"{owner}/{slug}/{ver_arg}" if ver_arg else f"{owner}/{slug}"
+st = api.kernels_status(target)
+msg = getattr(st, "failure_message", "") or getattr(st, "failureMessage", "") or ""
+if msg:
+    print(str(msg).strip(), flush=True)
+""".strip()
+
+
+def _probe_kernel_failure_message(kernel_id: str, cli: dict, env: dict) -> str:
+    """在状态为 CANCEL/ERROR 且 CLI 未输出 Failure message 时，经官方 SDK 查询当前版本号对应的 failure_message。"""
+    kaggle_py = _resolve_kaggle_python_exe(cli)
+    if not kaggle_py:
+        return ""
+    try:
+        res = subprocess.run(
+            [kaggle_py, "-u", "-c", _KAGGLE_KERNEL_FAILURE_PROBE, kernel_id],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=12,
+            env=env,
+            creationflags=NO_WINDOW,
+        )
+        if res.returncode == 0:
+            lines = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip()]
+            return lines[-1][:240] if lines else ""
+    except Exception:
+        pass
+    return ""
+
+
 def fetch_kaggle_kernel_status(kernel_id: str, cli_info: dict = None, kaggle_json_path: Path = None) -> dict:
-    """查询 Kaggle 云端任务实时运行状态并映射为统一状态码与中文文案。"""
+    """查询 Kaggle 云端任务实时运行状态并映射为统一状态码、失败原因与中文文案。"""
     cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
     if not cli.get("found"):
-        return {"ok": False, "state": "unknown", "label": "⚪ 未检测到 Kaggle CLI", "raw": ""}
+        return {"ok": False, "state": "unknown", "failure_message": "", "label": "⚪ 未检测到 Kaggle CLI", "raw": ""}
 
+    env = _build_kaggle_env(kaggle_json_path=kaggle_json_path)
     try:
         res = subprocess.run(
             [*cli["cmd"], "kernels", "status", kernel_id],
@@ -1590,29 +1681,46 @@ def fetch_kaggle_kernel_status(kernel_id: str, cli_info: dict = None, kaggle_jso
             encoding="utf-8",
             errors="replace",
             timeout=20,
-            env=_build_kaggle_env(kaggle_json_path=kaggle_json_path),
+            env=env,
             creationflags=NO_WINDOW,
         )
         raw = f"{res.stdout or ''}\n{res.stderr or ''}".strip()
+        failure_msg = _extract_kernel_failure_message(raw)
         lower = raw.lower()
         if res.returncode != 0:
             if "404" in lower or "not found" in lower:
-                return {"ok": False, "state": "not_found", "label": f"⚪ 云端尚无任务记录: {kernel_id}", "raw": raw}
-            return {"ok": False, "state": "error", "label": f"🟠 状态查询异常: {raw[:160]}", "raw": raw}
+                return {"ok": False, "state": "not_found", "failure_message": failure_msg, "label": f"⚪ 云端尚无任务记录: {kernel_id}", "raw": raw}
+            return {"ok": False, "state": "error", "failure_message": failure_msg, "label": f"🟠 状态查询异常: {raw[:160]}", "raw": raw}
 
         if "complete" in lower:
-            return {"ok": True, "state": "complete", "label": "🟢 云端训练已完成！请点击【一键拉回成品权重】", "raw": raw}
+            return {"ok": True, "state": "complete", "failure_message": failure_msg, "label": "🟢 云端训练已完成！请点击【一键拉回成品权重】", "raw": raw}
         if "running" in lower:
-            return {"ok": True, "state": "running", "label": "🔵 云端 GPU 正在全速训练中 (RUNNING)...", "raw": raw}
+            return {"ok": True, "state": "running", "failure_message": failure_msg, "label": "🔵 云端 GPU 正在全速训练中 (RUNNING)...", "raw": raw}
         if "queued" in lower:
-            return {"ok": True, "state": "queued", "label": "🟡 已进入云端算力排队队列 (QUEUED)...", "raw": raw}
+            return {"ok": True, "state": "queued", "failure_message": failure_msg, "label": "🟡 已进入云端算力排队队列 (QUEUED)...", "raw": raw}
         if "error" in lower:
-            return {"ok": True, "state": "error", "label": "🔴 云端执行出错 (ERROR)，请点击右侧【打开任务页】排查", "raw": raw}
+            if not failure_msg:
+                failure_msg = _probe_kernel_failure_message(kernel_id, cli, env)
+            label = (
+                f"🔴 云端执行出错 (ERROR · {failure_msg})，请点击【拉取云端日志】或【打开任务页】排查"
+                if failure_msg
+                else "🔴 云端执行出错 (ERROR)，请点击右侧【打开任务页】排查"
+            )
+            return {"ok": True, "state": "error", "failure_message": failure_msg, "label": label, "raw": raw}
         if "cancel" in lower:
-            return {"ok": True, "state": "cancel", "label": "⚪ 云端任务已取消 (CANCELLED)", "raw": raw}
-        return {"ok": True, "state": "unknown", "label": f"❔ 当前状态: {raw}", "raw": raw}
+            if not failure_msg:
+                failure_msg = _probe_kernel_failure_message(kernel_id, cli, env)
+            if failure_msg:
+                if "backend" in failure_msg.lower():
+                    label = f"🔴 云端任务被 Kaggle 后端中止 (CANCELLED · {failure_msg}，非本地刷新所致，请换非 x0.at 源或换新 Slug 重推)"
+                else:
+                    label = f"⚪ 云端任务已取消 (CANCELLED · {failure_msg}，非本地刷新所致)"
+            else:
+                label = "⚪ 云端任务已取消 (CANCELLED，云端会话已停止，非本地刷新所致)"
+            return {"ok": True, "state": "cancel", "failure_message": failure_msg, "label": label, "raw": raw}
+        return {"ok": True, "state": "unknown", "failure_message": failure_msg, "label": f"❔ 当前状态: {raw}", "raw": raw}
     except Exception as err:
-        return {"ok": False, "state": "error", "label": f"🟠 查询状态超时或异常: {err}", "raw": str(err)}
+        return {"ok": False, "state": "error", "failure_message": "", "label": f"🟠 查询状态超时或异常: {err}", "raw": str(err)}
 
 
 def fetch_kaggle_kernel_logs(
@@ -1701,6 +1809,117 @@ def _safe_extract_zip(zip_path: Path, target_dir: Path) -> list:
     return extracted
 
 
+def _extract_step_num_from_path(path_obj: Path) -> int:
+    """从 checkpoints/step_XXXXXXXX/ 路径或同级 state.json 解析步数编号。"""
+    for idx, part in enumerate(path_obj.parts):
+        m = re.match(r"^step_(\d+)$", part, re.IGNORECASE)
+        if m:
+            step_dir = Path(*path_obj.parts[: idx + 1])
+            st_file = step_dir / "state.json"
+            if st_file.is_file():
+                try:
+                    return int(json.loads(st_file.read_text(encoding="utf-8")).get("step", m.group(1)))
+                except Exception:
+                    pass
+            return int(m.group(1))
+    return 0
+
+
+def _is_under_dir(path_obj: Path, parent_dir: Path) -> bool:
+    try:
+        return os.path.commonpath([str(path_obj.resolve()), str(parent_dir.resolve())]) == str(parent_dir.resolve())
+    except ValueError:
+        return False
+
+
+def _clean_partial_and_empty_downloads(dl_path: Path, protect_dir: Path) -> int:
+    """清除 *.kaggle-partial 断点标记、对应的半成品目标文件及 0 字节损坏文件。"""
+    cleaned = 0
+    for partial in list(dl_path.rglob("*.kaggle-partial")):
+        if _is_under_dir(partial, protect_dir):
+            continue
+        target_name = partial.name[: -len(".kaggle-partial")]
+        target_file = partial.with_name(target_name)
+        if target_file.is_file() and not _is_under_dir(target_file, protect_dir):
+            try:
+                target_file.unlink(missing_ok=True)
+                cleaned += 1
+            except OSError:
+                pass
+        try:
+            partial.unlink(missing_ok=True)
+            cleaned += 1
+        except OSError:
+            pass
+
+    for fp in list(dl_path.rglob("*")):
+        if _is_under_dir(fp, protect_dir) or not fp.is_file():
+            continue
+        try:
+            if fp.stat().st_size <= 0:
+                fp.unlink(missing_ok=True)
+                cleaned += 1
+        except OSError:
+            pass
+    return cleaned
+
+
+def _prune_kaggle_download_cache(dl_path: Path, protect_dir: Path, on_log=None) -> int:
+    """在成品完整归档至 output/<lora_name>/ 后，自动精简 dl_path 下的冗余 ZIP、重复 output 与旧检查点 optim.pt。"""
+    freed_bytes = 0
+
+    def _rm_file(p: Path):
+        nonlocal freed_bytes
+        if not p.is_file() or _is_under_dir(p, protect_dir):
+            return
+        try:
+            freed_bytes += p.stat().st_size
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _rm_dir(d: Path):
+        nonlocal freed_bytes
+        if not d.is_dir() or _is_under_dir(protect_dir, d):
+            return
+        for f in d.rglob("*"):
+            if f.is_file():
+                try:
+                    freed_bytes += f.stat().st_size
+                except OSError:
+                    pass
+        shutil.rmtree(d, ignore_errors=True)
+
+    for zf in list(dl_path.rglob("*.zip")):
+        _rm_file(zf)
+
+    out_dup = dl_path / "output"
+    if out_dup.is_dir():
+        _rm_dir(out_dup)
+
+    runs_root = dl_path / "runs"
+    if runs_root.is_dir():
+        for exp_dir in list(runs_root.rglob("export")):
+            if exp_dir.is_dir():
+                _rm_dir(exp_dir)
+        for ckpts_root in list(runs_root.rglob("checkpoints")):
+            if not ckpts_root.is_dir():
+                continue
+            step_dirs = [p for p in ckpts_root.iterdir() if p.is_dir() and re.match(r"^step_\d+$", p.name, re.IGNORECASE)]
+            step_dirs.sort(key=lambda d: (_extract_step_num_from_path(d / "x"), d.stat().st_mtime))
+            if step_dirs:
+                latest_step = step_dirs[-1]
+                for old_step in step_dirs[:-1]:
+                    _rm_dir(old_step)
+                optim_f = latest_step / "optim.pt"
+                if optim_f.is_file():
+                    _rm_file(optim_f)
+
+    if on_log and freed_bytes > 0:
+        on_log(f"[自动精简] 已清理冗余云端过程副本，释放 {freed_bytes / (1024**2):.1f} MB（已保留最新步数断点 state.json + trainable.safetensors）。\n")
+    return freed_bytes
+
+
 def extract_kaggle_outputs_from_dir(
     download_dir: Path,
     lora_name: str,
@@ -1708,29 +1927,89 @@ def extract_kaggle_outputs_from_dir(
     comfy_models_dir: str = "",
     copy_to_comfy: bool = False,
     on_log=None,
+    prune_download_dir: bool = True,
 ) -> dict:
-    """将下载到本地的 Kaggle 输出目录解压、整理至 output/<lora_name>/，按需同步 ComfyUI 并检索 metrics.jsonl。"""
+    """将下载到本地的 Kaggle 输出目录抗断流解压、按最新步数整理至 output/<lora_name>/，按需同步 ComfyUI 并检索 metrics.jsonl。"""
     dl_path = Path(download_dir)
     out_root = Path(output_dir) if output_dir else (PROJECT_ROOT / "output")
     lora_out_dir = out_root / lora_name
     lora_out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_archive_dir = lora_out_dir / "checkpoints"
+
+    if dl_path.exists():
+        _clean_partial_and_empty_downloads(dl_path, lora_out_dir)
 
     extracted_files = []
-    for zfile in sorted(dl_path.rglob("*.zip")):
+    # 1. 先整理散落文件（严格过滤 0 字节，并按 (is_in_output_dir, step_num, mtime) 升序让最新步数覆盖旧步数）
+    main_candidates = []
+    for extra in sorted(dl_path.rglob("*")) if dl_path.exists() else []:
+        if not extra.is_file() or _is_under_dir(extra, lora_out_dir):
+            continue
+        lname = extra.name.lower()
+        if lname.endswith(".kaggle-partial") or lname.endswith(".zip"):
+            continue
+        if "moss_image" in lname or "qwen" in lname or "flux2" in lname:
+            continue
+        try:
+            fsize = extra.stat().st_size
+            fmtime = extra.stat().st_mtime
+        except OSError:
+            continue
+        if fsize <= 0:
+            continue
+
+        rel_parts = extra.relative_to(dl_path).parts
+        rel_lower = [p.lower() for p in rel_parts]
+        in_checkpoints_tree = "checkpoints" in rel_lower
+
+        if in_checkpoints_tree and extra.suffix.lower() == ".safetensors":
+            if "output" in rel_lower and ("_step" in lname or "-step" in lname):
+                ckpt_archive_dir.mkdir(parents=True, exist_ok=True)
+                dst_ck = ckpt_archive_dir / extra.name
+                shutil.copy2(extra, dst_ck)
+                extracted_files.append(dst_ck)
+                continue
+            step_n = _extract_step_num_from_path(extra)
+            if step_n > 0 and ("-comfy" in lname or extra.stem.lower().endswith("_comfy")):
+                ckpt_archive_dir.mkdir(parents=True, exist_ok=True)
+                dst_ck = ckpt_archive_dir / f"{lora_name}_step{step_n:06d}-comfy.safetensors"
+                shutil.copy2(extra, dst_ck)
+                extracted_files.append(dst_ck)
+            elif step_n > 0 and ("-lycoris" in lname or extra.stem.lower().endswith("_lycoris")):
+                ckpt_archive_dir.mkdir(parents=True, exist_ok=True)
+                dst_ck = ckpt_archive_dir / f"{lora_name}_step{step_n:06d}-lycoris.safetensors"
+                shutil.copy2(extra, dst_ck)
+                extracted_files.append(dst_ck)
+
+        if extra.suffix.lower() == ".safetensors" or lname in ("training_summary.json", "metrics.jsonl"):
+            if lname == "trainable.safetensors":
+                dst_name = f"{lora_name}-trainable.safetensors"
+            elif "-comfy" in lname or extra.stem.lower().endswith("_comfy"):
+                dst_name = f"{lora_name}-comfy.safetensors"
+            elif "-lycoris" in lname or extra.stem.lower().endswith("_lycoris"):
+                dst_name = f"{lora_name}-lycoris.safetensors"
+            else:
+                dst_name = extra.name
+            is_in_output_dir = 1 if (rel_lower and rel_lower[0] == "output") else 0
+            step_num = _extract_step_num_from_path(extra)
+            main_candidates.append((is_in_output_dir, step_num, fmtime, extra, dst_name))
+
+    main_candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+    for _in_out, _step, _mt, src_file, dst_name in main_candidates:
+        dst = lora_out_dir / dst_name
+        shutil.copy2(src_file, dst)
+        extracted_files.append(dst)
+
+    # 2. 最后解压合法非空 ZIP 成品包，确保最新聚合包覆盖任何残余旧步数文件
+    for zfile in sorted(dl_path.rglob("*.zip")) if dl_path.exists() else []:
+        try:
+            if zfile.stat().st_size <= 22 or not zipfile.is_zipfile(zfile):
+                continue
+        except OSError:
+            continue
         if on_log:
             on_log(f"[解压产物] 正在解包 {zfile.name} -> {lora_out_dir}\n")
         extracted_files.extend(_safe_extract_zip(zfile, lora_out_dir))
-
-    # 兜底复制顶层或子目录中散落的 .safetensors / training_summary.json / metrics.jsonl
-    for extra in sorted(dl_path.rglob("*")):
-        if not extra.is_file():
-            continue
-        lname = extra.name.lower()
-        if extra.suffix.lower() == ".safetensors" or lname in ("training_summary.json", "metrics.jsonl"):
-            dst = lora_out_dir / extra.name
-            if not dst.exists():
-                shutil.copy2(extra, dst)
-                extracted_files.append(dst)
 
     comfy_synced = []
     if copy_to_comfy and comfy_models_dir:
@@ -1741,17 +2020,23 @@ def extract_kaggle_outputs_from_dir(
             target_comfy_dir.mkdir(parents=True, exist_ok=True)
             for sf in sorted(lora_out_dir.glob("*.safetensors")):
                 sl = sf.name.lower()
-                if "-comfy" in sl or "_comfy" in sl:
+                if sl.endswith("-trainable.safetensors") or sl == "ema.safetensors":
+                    continue
+                if "-comfy" in sl or "_comfy" in sl or "-lycoris" in sl or "_lycoris" in sl:
                     dst_c = target_comfy_dir / sf.name
                     shutil.copy2(sf, dst_c)
                     comfy_synced.append(str(dst_c))
 
     metrics_candidates = list(lora_out_dir.rglob("metrics.jsonl"))
     metrics_path = str(metrics_candidates[0]) if metrics_candidates else ""
-    safetensors_list = [str(p) for p in sorted(lora_out_dir.rglob("*.safetensors"))]
+    safetensors_list = [str(p) for p in sorted(lora_out_dir.rglob("*.safetensors")) if p.is_file() and p.stat().st_size > 0]
+
+    ok_flag = len(safetensors_list) > 0
+    if ok_flag and prune_download_dir and dl_path.exists():
+        _prune_kaggle_download_cache(dl_path, lora_out_dir, on_log=on_log)
 
     return {
-        "ok": len(extracted_files) > 0 or len(safetensors_list) > 0,
+        "ok": ok_flag,
         "output_dir": str(lora_out_dir),
         "safetensors": safetensors_list,
         "comfy_synced": comfy_synced,
@@ -1770,7 +2055,7 @@ def pull_and_extract_kaggle_outputs(
     kaggle_json_path: Path = None,
     on_log=None,
 ) -> dict:
-    """调用 Kaggle CLI 拉回云端内核产出并自动解压、同步 ComfyUI 与定位 Loss 指标文件。"""
+    """调用 Kaggle CLI 拉回云端内核产出并自动解压、同步 ComfyUI 与定位 Loss 指标文件（支持断流自愈）。"""
     cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
     if not cli.get("found"):
         return {"ok": False, "error": "未找到 Kaggle CLI。"}
@@ -1781,8 +2066,6 @@ def pull_and_extract_kaggle_outputs(
     if on_log:
         on_log(f"[Kaggle 拉回] 正在下载 {kernel_id} 云端产物到 {dl_dir}...\n")
     rc, out = _stream_subprocess(cmd, PROJECT_ROOT, on_log=on_log, env=_build_kaggle_env(kaggle_json_path))
-    if rc != 0:
-        return {"ok": False, "error": f"下载云端输出失败 (Exit={rc})：\n{out[-300:]}"}
 
     res = extract_kaggle_outputs_from_dir(
         dl_dir,
@@ -1792,6 +2075,18 @@ def pull_and_extract_kaggle_outputs(
         copy_to_comfy=copy_to_comfy,
         on_log=on_log,
     )
+    if rc != 0:
+        if res.get("ok"):
+            warn_msg = (
+                f"⚠️ Kaggle CLI 下载过程出现部分中断 (Exit={rc})，但已从本地已落盘的完整成品包中成功恢复 "
+                f"{len(res['safetensors'])} 个权重至 {res['output_dir']}。"
+            )
+            res["partial_warning"] = warn_msg
+            if on_log:
+                on_log(f"{warn_msg}\n")
+            return res
+        return {"ok": False, "error": f"下载云端输出失败 (Exit={rc})：\n{out[-300:]}"}
+
     if not res.get("ok"):
         res["error"] = "下载成功但未在云端输出中找到 LoRA 权重文件，请确认训练是否完整结束。"
     return res

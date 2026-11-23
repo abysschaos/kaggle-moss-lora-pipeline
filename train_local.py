@@ -49,7 +49,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.8.0"
+    return "1.8.1"
 
 
 APP_VERSION = _load_app_version()
@@ -506,6 +506,10 @@ def list_lora_checkpoints(trainer_dir: Path, lora_name: str, custom_dir: str = "
     if default_ckpt_root.exists() and default_ckpt_root not in search_roots:
         search_roots.append(default_ckpt_root)
 
+    cloud_ckpt_root = trainer_dir.parent / "workspace" / "kaggle_outputs" / lora_name / "runs" / "moss" / lora_name / "checkpoints"
+    if cloud_ckpt_root.exists() and cloud_ckpt_root.resolve() not in [r.resolve() for r in search_roots]:
+        search_roots.append(cloud_ckpt_root)
+
     for root in search_roots:
         for p in root.glob("step_*"):
             if p.is_dir() and (p / "state.json").exists() and (p / "trainable.safetensors").exists():
@@ -560,7 +564,12 @@ def prepare_init_from_checkpoint(source_path_str: str, workspace_dir: Path, lora
             f"未找到可用于继续训练 (init_from) 的已有 LoRA 权重文件！请确认路径或先选择一个已训练的 .safetensors 文件。"
         )
 
-    stage_dir = workspace_dir / "init_from_stage" / lora_name
+    init_root = workspace_dir / "init_from_stage"
+    if init_root.is_dir():
+        for old_sub in list(init_root.iterdir()):
+            if old_sub.is_dir() and old_sub.name != lora_name:
+                shutil.rmtree(old_sub, ignore_errors=True)
+    stage_dir = init_root / lora_name
     stage_dir.mkdir(parents=True, exist_ok=True)
     target_trainable = stage_dir / "trainable.safetensors"
     if target_trainable.exists():
@@ -687,8 +696,10 @@ def export_and_sync_weights(
             exported_files.append(dst)
 
     if copy_to_comfy and comfy_models_dir and os.path.exists(comfy_models_dir):
-        comfy_loras_dir = Path(comfy_models_dir) / "loras"
-        if comfy_loras_dir.exists():
+        comfy_base = Path(comfy_models_dir)
+        comfy_loras_dir = (comfy_base / "models" / "loras") if (comfy_base / "models").is_dir() else (comfy_base / "loras")
+        if comfy_loras_dir.parent.is_dir():
+            comfy_loras_dir.mkdir(parents=True, exist_ok=True)
             target_comfy_sub = comfy_loras_dir / lora_name
             target_comfy_sub.mkdir(parents=True, exist_ok=True)
             for ef in exported_files:
@@ -699,6 +710,12 @@ def export_and_sync_weights(
                     shutil.copy2(str(ef), str(target_comfy_dst))
                     if not quiet:
                         print(f" [ComfyUI Synced] {ef.name} -> {target_comfy_dst}")
+
+    run_metrics = run_dir / "metrics.jsonl"
+    if run_metrics.is_file() and run_metrics.stat().st_size > 0:
+        dst_metrics = lora_dedicated_folder / "metrics.jsonl"
+        if not dst_metrics.exists() or run_metrics.stat().st_mtime > dst_metrics.stat().st_mtime + 0.5 or run_metrics.stat().st_size != dst_metrics.stat().st_size:
+            shutil.copy2(str(run_metrics), str(dst_metrics))
 
     return exported_files, latest_step
 
@@ -1479,10 +1496,9 @@ def main():
     workspace_dir = project_root / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
     
-    # 建立以用户自定义 LoRA 名称命名的专属产出文件夹
+    # 计算以用户自定义 LoRA 名称命名的专属产出文件夹（延后至实际产出权重或摘要时创建，避免早退留空目录）
     base_output_dir = Path(args.output_dir).resolve()
     lora_dedicated_folder = base_output_dir / args.lora_name
-    lora_dedicated_folder.mkdir(parents=True, exist_ok=True)
 
     print_banner(f"OpenMOSS MOSS-Image Local LoRA Training Pipeline v{APP_VERSION}: {args.lora_name}")
     print(f"Target LoRA Name & Subfolder: {args.lora_name}")
@@ -1985,6 +2001,7 @@ SAVE_FUSED_QKV = False
         subprocess.run(train_cmd, cwd=str(trainer_dir), env=sub_env, creationflags=_NO_WINDOW, check=True)
     finally:
         stop_sync_event.set()
+        shutil.rmtree(workspace_dir / "init_from_stage", ignore_errors=True)
 
     elapsed = time.time() - start_time
 
@@ -2006,6 +2023,7 @@ SAVE_FUSED_QKV = False
     status_label = f"paused_at_step_{actual_final_step}" if is_paused_early else "completed"
 
     # 生成训练摘要与触发词元数据文件
+    lora_dedicated_folder.mkdir(parents=True, exist_ok=True)
     summary_file = lora_dedicated_folder / "training_summary.json"
     summary_data = {
         "lora_name": args.lora_name,

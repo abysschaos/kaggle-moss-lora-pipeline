@@ -22,13 +22,19 @@ if str(PROJECT_ROOT) not in sys.path:
 from core import (
     PROJECT_ROOT as CORE_ROOT,
     build_cloud_config_payload,
+    cleanup_workspace_staging,
+    extract_kaggle_outputs_from_dir,
+    fetch_kaggle_kernel_status,
     generate_r2_presigned_url,
+    pull_and_extract_kaggle_outputs,
     read_r2_credentials,
+    sanitize_external_dataset_url,
     save_r2_credentials,
     stage_external_dataset_zip,
     stage_kernel_bundle,
     upload_dataset_to_cloudflare_r2,
     upload_dataset_to_hf_repo,
+    upload_external_dataset,
     upload_kaggle_dataset,
     upload_zip_to_external_mirrors,
     validate_training_params,
@@ -258,10 +264,12 @@ class ExternalUrlFlowTests(unittest.TestCase):
             th.start()
             try:
                 dest_zip = str(root / "out.zip")
-                spec = f"http://127.0.0.1:{port}/bad|http://127.0.0.1:{port}/good.zip"
+                spec = f"https://x0.at/blocked.zip|http://127.0.0.1:{port}/bad|http://127.0.0.1:{port}/good.zip"
                 used = ns["_download_dataset_archive"](spec, dest_zip)
                 self.assertTrue(used.endswith("/good.zip"))
                 self.assertTrue(zipfile.is_zipfile(dest_zip))
+                with self.assertRaises(RuntimeError):
+                    ns["_download_dataset_archive"]("https://x0.at/only.zip", dest_zip)
             finally:
                 srv.shutdown()
                 srv.server_close()
@@ -400,18 +408,19 @@ class ExternalUrlFlowTests(unittest.TestCase):
             self.assertIn("images/sample_0001.jpg", captured["files"])
             self.assertIn("images/sample_0001.txt", captured["files"])
 
-    def test_6_mirror_rotation_parsers(self):
+    def test_5_mirror_rotation_parsers_exclude_x0at(self):
         with tempfile.TemporaryDirectory() as td:
             zpath = Path(td) / "pack.zip"
             with zipfile.ZipFile(zpath, "w") as zf:
                 zf.writestr("hello.txt", "ok")
 
+            called_urls = []
+
             def _fake_subproc(cmd, **kwargs):
                 joined = " ".join(str(x) for x in cmd)
+                called_urls.append(joined)
                 if "temp.sh/upload" in joined:
                     return mock.Mock(returncode=0, stdout="https://temp.sh/AbC12/pack.zip\n", stderr="")
-                if "x0.at" in joined:
-                    return mock.Mock(returncode=0, stdout="https://x0.at/xYz9.zip\n", stderr="")
                 if "filebin.net" in joined:
                     return mock.Mock(returncode=0, stdout='{"bin":{"id":"moss-12345678"}}', stderr="")
                 if "transfer.whalebone.io" in joined:
@@ -425,11 +434,177 @@ class ExternalUrlFlowTests(unittest.TestCase):
             with mock.patch("core.kaggle_bridge.subprocess.run", side_effect=_fake_subproc):
                 ok, combined, mirrors = upload_zip_to_external_mirrors(zpath, max_mirrors=6)
             self.assertTrue(ok, combined)
-            self.assertEqual(len(mirrors), 6)
+            self.assertEqual(len(mirrors), 5)
             self.assertEqual(
                 [m["host"] for m in mirrors],
-                ["temp.sh", "x0.at", "filebin.net", "transfer.whalebone.io", "trystocare.com", "tmpfiles.org"],
+                ["temp.sh", "filebin.net", "transfer.whalebone.io", "trystocare.com", "tmpfiles.org"],
             )
+            self.assertFalse(any("x0.at" in u for u in called_urls))
+
+    def test_sanitize_x0at_and_kernel_failure_message_surfacing(self):
+        raw_spec = "https://x0.at/agQX.zip|https://filebin.net/moss-1/a.zip|https://transfer.whalebone.io/2/a.zip"
+        expected = "https://filebin.net/moss-1/a.zip|https://transfer.whalebone.io/2/a.zip"
+        self.assertEqual(sanitize_external_dataset_url(raw_spec), expected)
+        self.assertEqual(sanitize_external_dataset_url("https://x0.at/only.zip"), "")
+
+        with tempfile.TemporaryDirectory() as td:
+            ds = Path(td)
+            (ds / "img.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+            (ds / "img.txt").write_text("clean art", encoding="utf-8")
+            cleaned, _ = _sample_cleaned_and_raw(ds)
+            payload = build_cloud_config_payload(
+                cleaned,
+                {"accelerator": "NvidiaTeslaT4", "dataset_source": "url", "dataset_url": raw_spec},
+            )
+            self.assertEqual(payload.get("dataset_url"), expected)
+
+        fake_cli = {"found": True, "cmd": ["kaggle"], "exe_path": "kaggle", "version": "2.2.5", "source": "test"}
+        cancel_stdout = 'norrisgavincortni/moss-train-d1a has status "KernelWorkerStatus.CANCEL_ACKNOWLEDGED"\n'
+        with (
+            mock.patch("core.kaggle_bridge.subprocess.run", return_value=mock.Mock(returncode=0, stdout=cancel_stdout, stderr="")),
+            mock.patch("core.kaggle_bridge._probe_kernel_failure_message", return_value="Canceled by backend."),
+        ):
+            st = fetch_kaggle_kernel_status("norrisgavincortni/moss-train-d1a", cli_info=fake_cli)
+        self.assertEqual(st["state"], "cancel")
+        self.assertEqual(st["failure_message"], "Canceled by backend.")
+        self.assertIn("Canceled by backend.", st["label"])
+
+    def test_extract_prefers_latest_step_and_archives_checkpoints_without_zip(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dl_dir = root / "dl"
+            out_dir = root / "out"
+            lora = "my_test_style"
+
+            for step_num, tag in ((350, b"OLD_350"), (540, b"NEW_540")):
+                ck_dir = dl_dir / "runs" / "moss" / lora / "checkpoints" / f"step_{step_num:08d}"
+                exp_dir = ck_dir / "export"
+                exp_dir.mkdir(parents=True)
+                (ck_dir / "state.json").write_text(json.dumps({"step": step_num}), encoding="utf-8")
+                (ck_dir / "optim.pt").write_bytes(b"OPT" * 100)
+                (ck_dir / "trainable.safetensors").write_bytes(b"TRN_" + tag)
+                (ck_dir / "ema.safetensors").write_bytes(b"EMA_" + tag)
+                (exp_dir / f"{lora}-comfy.safetensors").write_bytes(b"COMFY_" + tag)
+                (exp_dir / f"{lora}-lycoris.safetensors").write_bytes(b"LYCO_" + tag)
+
+            res = extract_kaggle_outputs_from_dir(dl_dir, lora_name=lora, output_dir=str(out_dir))
+            self.assertTrue(res["ok"])
+            lora_out = out_dir / lora
+            self.assertEqual((lora_out / f"{lora}-comfy.safetensors").read_bytes(), b"COMFY_NEW_540")
+            self.assertEqual((lora_out / f"{lora}-lycoris.safetensors").read_bytes(), b"LYCO_NEW_540")
+            self.assertEqual((lora_out / f"{lora}-trainable.safetensors").read_bytes(), b"TRN_NEW_540")
+            self.assertEqual((lora_out / "ema.safetensors").read_bytes(), b"EMA_NEW_540")
+            self.assertEqual((lora_out / "checkpoints" / f"{lora}_step000350-comfy.safetensors").read_bytes(), b"COMFY_OLD_350")
+            self.assertEqual((lora_out / "checkpoints" / f"{lora}_step000540-comfy.safetensors").read_bytes(), b"COMFY_NEW_540")
+            # 验证已精简掉旧步数与最新步数的 optim.pt，保留 step_00000540 用于断点续炼
+            self.assertFalse((dl_dir / "runs" / "moss" / lora / "checkpoints" / "step_00000350").exists())
+            kept_latest = dl_dir / "runs" / "moss" / lora / "checkpoints" / "step_00000540"
+            self.assertTrue((kept_latest / "state.json").is_file())
+            self.assertTrue((kept_latest / "trainable.safetensors").is_file())
+            self.assertFalse((kept_latest / "optim.pt").exists())
+
+    def test_pull_recovers_weights_when_cli_fails_with_partial_and_zero_byte_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake_proj = root / "proj"
+            dl_dir = fake_proj / "workspace" / "kaggle_outputs" / "partial_lora"
+            dl_dir.mkdir(parents=True)
+            out_dir = fake_proj / "output"
+
+            zip_path = dl_dir / "partial_lora_lora_results.zip"
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("partial_lora-comfy.safetensors", b"ZIP_COMFY_OK")
+                zf.writestr("partial_lora-lycoris.safetensors", b"ZIP_LYCO_OK")
+                zf.writestr("metrics.jsonl", '{"step": 1, "loss": 0.3}\n')
+
+            top_exp = dl_dir / "runs" / "moss" / "partial_lora" / "export"
+            top_exp.mkdir(parents=True)
+            (top_exp / "partial_lora-lycoris.safetensors").write_bytes(b"")
+            (top_exp / "partial_lora-lycoris.safetensors.kaggle-partial").write_text('{"size": 123}', encoding="utf-8")
+
+            fake_cli = {"found": True, "cmd": ["kaggle"], "exe_path": "kaggle", "version": "2.2.5", "source": "test"}
+            with (
+                mock.patch("core.kaggle_bridge.PROJECT_ROOT", fake_proj),
+                mock.patch("core.kaggle_bridge._stream_subprocess", return_value=(1, "ReadTimeout on .kaggle-partial")),
+            ):
+                res = pull_and_extract_kaggle_outputs("user/kernel", "partial_lora", str(out_dir), cli_info=fake_cli)
+
+            self.assertTrue(res["ok"], res)
+            self.assertIn("partial_warning", res)
+            self.assertEqual((out_dir / "partial_lora" / "partial_lora-comfy.safetensors").read_bytes(), b"ZIP_COMFY_OK")
+            self.assertEqual((out_dir / "partial_lora" / "partial_lora-lycoris.safetensors").read_bytes(), b"ZIP_LYCO_OK")
+            self.assertTrue(Path(res["metrics_path"]).is_file())
+            self.assertFalse((top_exp / "partial_lora-lycoris.safetensors.kaggle-partial").exists())
+            self.assertFalse(zip_path.exists())
+
+    def test_upload_external_and_r2_clean_temporary_zip_after_upload(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ds = root / "ds"
+            ds.mkdir()
+            (ds / "img.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+            (ds / "img.txt").write_text("clean style", encoding="utf-8")
+            _, raw = _sample_cleaned_and_raw(ds)
+            stage_root = root / "kaggle_dataset_stage"
+
+            with mock.patch("core.kaggle_bridge.upload_zip_to_external_mirrors", return_value=(True, "https://temp.sh/abc/x.zip", [])):
+                ok_ext, _url_ext, _ = upload_external_dataset(raw, dataset_slug="ext-clean", stage_root=stage_root)
+            self.assertTrue(ok_ext)
+            self.assertEqual(list(stage_root.glob("*.zip")), [])
+
+            fake_put = mock.Mock(returncode=0, stdout="\n__HTTP_CODE__:200\n", stderr="")
+            with mock.patch("core.kaggle_bridge.subprocess.run", return_value=fake_put):
+                ok_r2, _url_r2, _ = upload_dataset_to_cloudflare_r2(
+                    raw,
+                    {"account_id": "a", "access_key_id": "b", "secret_access_key": "c", "bucket": "bkt"},
+                    dataset_slug="r2-clean",
+                    stage_root=stage_root,
+                )
+            self.assertTrue(ok_r2)
+            self.assertEqual(list(stage_root.glob("*.zip")), [])
+
+    def test_cleanup_workspace_staging_rescues_outputs_removes_empty_and_protects_models(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            ws = proj / "workspace"
+            out = proj / "output"
+
+            # 保护目录与有效成品
+            (ws / "models" / "vae").mkdir(parents=True)
+            (ws / "models" / "vae" / "kept.safetensors").write_bytes(b"MODEL_OK")
+            (ws / "temp").mkdir(parents=True)
+            (ws / "temp" / "inductor.txt").write_text("ok", encoding="utf-8")
+            (out / "valid_lora").mkdir(parents=True)
+            (out / "valid_lora" / "valid_lora-comfy.safetensors").write_bytes(b"VALID")
+
+            # 待清理空目录与过期中转
+            (out / "empty_old").mkdir(parents=True)
+            (ws / "kaggle_dataset_stage" / "old").mkdir(parents=True)
+            (ws / "kaggle_dataset_stage" / "old" / "junk.zip").write_bytes(b"J" * 1024)
+            (ws / "kaggle_kernel_stage" / "old_k").mkdir(parents=True)
+            (ws / "kaggle_kernel_stage" / "old_k" / "train_moss.py").write_text("x", encoding="utf-8")
+            (ws / "init_from_stage" / "old_init").mkdir(parents=True)
+            (ws / "init_from_stage" / "old_init" / "trainable.safetensors").write_bytes(b"T" * 1024)
+            (ws / "trainer_main.zip").write_bytes(b"")
+
+            # 待自愈归档的云端拉回缓存
+            ko = ws / "kaggle_outputs" / "unpacked_style"
+            ko.mkdir(parents=True)
+            with zipfile.ZipFile(ko / "unpacked_style_lora_results.zip", "w") as zf:
+                zf.writestr("unpacked_style-comfy.safetensors", b"RESCUED_COMFY")
+
+            report = cleanup_workspace_staging(project_root=proj, output_dir=str(out))
+            self.assertIn("unpacked_style", report["rescued_loras"])
+            self.assertTrue((out / "unpacked_style" / "unpacked_style-comfy.safetensors").is_file())
+            self.assertTrue((out / "valid_lora" / "valid_lora-comfy.safetensors").is_file())
+            self.assertTrue((ws / "models" / "vae" / "kept.safetensors").is_file())
+            self.assertTrue((ws / "temp" / "inductor.txt").is_file())
+            self.assertFalse((out / "empty_old").exists())
+            self.assertFalse((ws / "kaggle_dataset_stage").exists())
+            self.assertFalse((ws / "kaggle_kernel_stage").exists())
+            self.assertFalse((ws / "init_from_stage").exists())
+            self.assertFalse((ws / "trainer_main.zip").exists())
+            self.assertFalse((ko / "unpacked_style_lora_results.zip").exists())
 
 
 if __name__ == "__main__":

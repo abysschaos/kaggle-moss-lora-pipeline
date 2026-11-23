@@ -101,4 +101,14 @@ def build_help_tab(parent, app) -> ScrollableFrame:
                 command=cmd,
             ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
 
+    FlatButton(
+        tools_card,
+        text="🧹 一键清理临时工作区与空目录 (释放过期中转空间并保护底模硬链接)",
+        bg=c["input_bg"],
+        fg=c["accent_yellow"],
+        font=(c["font_family"], 8, "bold"),
+        pady=6,
+        command=app.clean_workspace_caches_ui,
+    ).pack(fill=tk.X, pady=(2, 0))
+
     return scroll

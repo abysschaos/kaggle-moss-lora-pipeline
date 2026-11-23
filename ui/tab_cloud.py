@@ -201,7 +201,7 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
         src_row,
         variable=app.var_kaggle_dataset_source,
         options=[
-            ("url", "🔗 临时外链 (6站免配)", c["accent_green"]),
+            ("url", "🔗 临时外链 (5站免配)", c["accent_green"]),
             ("hf", "🤗 HF 私有仓库", c["accent_yellow"]),
             ("r2", "☁️ R2 私有存储", c["accent_peach"]),
             ("local", "📦 Kaggle 私有集", c["accent_blue"]),
@@ -209,7 +209,7 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
         command=app.on_cloud_dataset_source_changed,
     ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-    # 动态源区 U：外链自动中转直拉（6 站高可用容灾）
+    # 动态源区 U：外链自动中转直拉（5 站高可用容灾）
     app.cloud_url_frame = tk.Frame(cfg_card, bg=c["card_bg"], padx=8, pady=6)
     app.cloud_url_frame.columnconfigure(1, weight=1)
 
@@ -234,7 +234,7 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
     HoverTooltip(
         ent_ext_url,
         "可留空自动生成，或手动粘贴外部图集 .zip 直链（支持 | 分隔多镜像）。\n"
-        "自动上传按 temp.sh / x0.at / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org 顺序选取 3 条可用线路容灾。",
+        "自动上传按 temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org 顺序选取 3 条可用线路容灾。",
     )
     FlatButton(
         app.cloud_url_frame,
@@ -249,8 +249,8 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
 
     url_hint_lbl = tk.Label(
         app.cloud_url_frame,
-        text="💡 可留空：点【📤 1. 仅打包图集上传外链】或【🚀 一键全自动】自动打包上传至 6 站容灾节点"
-             "（temp.sh / x0.at / filebin.net / whalebone / trystocare / tmpfiles），Kaggle 开机 curl 直拉进 /tmp/，免建 Kaggle 数据集。",
+        text="💡 可留空：点【📤 1. 仅打包图集上传外链】或【🚀 一键全自动】自动打包上传至 5 站容灾节点"
+             "（temp.sh / filebin.net / whalebone / trystocare / tmpfiles），Kaggle 开机 curl 直拉进 /tmp/，免建 Kaggle 数据集。",
         bg=c["card_bg"],
         fg=c["text_sub"],
         font=(c["font_family"], 8),

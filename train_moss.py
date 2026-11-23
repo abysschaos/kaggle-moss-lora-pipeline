@@ -23,7 +23,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.8.0"
+    return "1.8.1"
 
 
 def _normalize_hf_dataset_repo(raw: str) -> str:
@@ -61,9 +61,18 @@ def _download_dataset_archive(raw_url_spec: str, dest_zip: str) -> str:
     下载外链数据集 ZIP 归档；支持以 '|' 分隔的多镜像容灾，并自动适配 temp.sh / filebin.net / tmpfiles.org 与通用直链。
     返回实际下载成功的镜像 URL；全部失败时抛出 RuntimeError。
     """
-    candidates = [u.strip() for u in str(raw_url_spec or "").split("|") if u.strip()]
-    if not candidates:
+    raw_candidates = [u.strip() for u in str(raw_url_spec or "").split("|") if u.strip()]
+    if not raw_candidates:
         raise ValueError("Empty --dataset_url specification.")
+
+    candidates = [u for u in raw_candidates if not re.match(r"^https?://(?:www\.)?x0\.at(?:/|$)", u, re.IGNORECASE)]
+    if len(candidates) < len(raw_candidates):
+        print("Warning: Skipping x0.at mirror(s) to prevent Kaggle container backend cancellation.", flush=True)
+    if not candidates:
+        raise RuntimeError(
+            "All external dataset URLs point to x0.at, which triggers Kaggle container cancellation. "
+            "Please re-upload via safe mirrors, HF, or R2."
+        )
 
     Path(dest_zip).parent.mkdir(parents=True, exist_ok=True)
     errors = []
@@ -1560,42 +1569,136 @@ print(f" [OK] Core training completed in {elapsed / 60:.2f} minutes ({elapsed / 
 print("\n>>> Locating and packaging all generated .safetensors weights...")
 output_lora_dir = f"/kaggle/working/output/{args.lora_name}"
 os.makedirs(output_lora_dir, exist_ok=True)
+ckpt_archive_dir = os.path.join(output_lora_dir, "checkpoints")
+run_lora_dir = os.path.join(working_runs, "moss", args.lora_name)
+run_ckpts_root = os.path.join(run_lora_dir, "checkpoints")
+if not os.path.isdir(run_lora_dir):
+    alt_dirs = [
+        p for p in glob.glob(f"{trainer_dir}/**/runs/moss/{args.lora_name}", recursive=True)
+        if os.path.isdir(p)
+    ]
+    if alt_dirs:
+        run_lora_dir = alt_dirs[0]
+        run_ckpts_root = os.path.join(run_lora_dir, "checkpoints")
 
-safetensors_files = glob.glob(f"{working_runs}/moss/{args.lora_name}/**/*.safetensors", recursive=True)
-if not safetensors_files:
-    safetensors_files = glob.glob(f"{trainer_dir}/**/runs/**/*.safetensors", recursive=True) + \
-                        glob.glob("/kaggle/working/runs/**/*.safetensors", recursive=True)
 
-safetensors_files = [
-    f for f in set(safetensors_files)
-    if "/tmp/models" not in f
-    and "moss_image" not in os.path.basename(f).lower()
-    and "qwen" not in os.path.basename(f).lower()
-    and "flux2" not in os.path.basename(f).lower()
-]
+def _extract_ckpt_step(step_dir: str) -> int:
+    st_file = os.path.join(step_dir, "state.json")
+    if os.path.isfile(st_file):
+        try:
+            st_obj = json.loads(Path(st_file).read_text(encoding="utf-8"))
+            if "step" in st_obj:
+                return int(st_obj["step"])
+        except Exception:
+            pass
+    m_st = re.search(r"step_(\d+)", os.path.basename(step_dir))
+    return int(m_st.group(1)) if m_st else 0
 
-# 按修改时间排序，确保最终同名的 comfy / lycoris 归档版本始终为最新步数产物
-safetensors_files.sort(key=lambda x: os.path.getmtime(x))
 
-print(f"Found {len(safetensors_files)} LoRA weight files:")
-for sf in safetensors_files:
-    fname = os.path.basename(sf)
-    sf_lower = sf.lower()
-    if "-comfy" in sf_lower or fname.endswith("_comfy.safetensors"):
-        dest_name = f"{args.lora_name}-comfy.safetensors"
-    elif "-lycoris" in sf_lower or fname.endswith("_lycoris.safetensors"):
-        dest_name = f"{args.lora_name}-lycoris.safetensors"
-    elif fname == "trainable.safetensors":
-        dest_name = f"{args.lora_name}-trainable.safetensors"
-    else:
-        dest_name = fname
-    dest = os.path.join(output_lora_dir, dest_name)
-    print(f" - Archiving {sf} -> {dest}")
-    shutil.copy2(sf, dest)
+step_records = []
+if os.path.isdir(run_ckpts_root):
+    for step_dir in sorted(glob.glob(os.path.join(run_ckpts_root, "step_*"))):
+        if not os.path.isdir(step_dir) or step_dir.endswith(".partial"):
+            continue
+        s_num = _extract_ckpt_step(step_dir)
+        exp_dir = os.path.join(step_dir, "export")
+        comfy_f, lyco_f = None, None
+        if os.path.isdir(exp_dir):
+            for sf in sorted(glob.glob(os.path.join(exp_dir, "*.safetensors"))):
+                if os.path.getsize(sf) <= 0:
+                    continue
+                low_n = os.path.basename(sf).lower()
+                if "-comfy" in low_n or low_n.endswith("_comfy.safetensors"):
+                    comfy_f = sf
+                elif "-lycoris" in low_n or low_n.endswith("_lycoris.safetensors"):
+                    lyco_f = sf
+        train_f = os.path.join(step_dir, "trainable.safetensors")
+        train_f = train_f if (os.path.isfile(train_f) and os.path.getsize(train_f) > 0) else None
+        ema_f = os.path.join(step_dir, "ema.safetensors")
+        ema_f = ema_f if (os.path.isfile(ema_f) and os.path.getsize(ema_f) > 0) else None
+        ref_f = comfy_f or lyco_f or train_f or ema_f
+        if ref_f:
+            step_records.append((s_num, os.path.getmtime(ref_f), step_dir, comfy_f, lyco_f, train_f, ema_f))
+            os.makedirs(ckpt_archive_dir, exist_ok=True)
+            if comfy_f:
+                shutil.copy2(comfy_f, os.path.join(ckpt_archive_dir, f"{args.lora_name}_step{s_num:06d}-comfy.safetensors"))
+            if lyco_f:
+                shutil.copy2(lyco_f, os.path.join(ckpt_archive_dir, f"{args.lora_name}_step{s_num:06d}-lycoris.safetensors"))
+
+final_exp_dir = os.path.join(run_lora_dir, "export")
+if os.path.isdir(final_exp_dir):
+    f_comfy, f_lyco, f_step = None, None, 0
+    for sf in sorted(glob.glob(os.path.join(final_exp_dir, "*.safetensors"))):
+        if os.path.getsize(sf) <= 0:
+            continue
+        info = _inspect_safetensors(sf)
+        if info.get("step"):
+            f_step = max(f_step, int(info["step"]))
+        low_n = os.path.basename(sf).lower()
+        if "-comfy" in low_n or low_n.endswith("_comfy.safetensors"):
+            f_comfy = sf
+        elif "-lycoris" in low_n or low_n.endswith("_lycoris.safetensors"):
+            f_lyco = sf
+    ref_top = f_comfy or f_lyco
+    if ref_top:
+        step_records.append((f_step, os.path.getmtime(ref_top), "", f_comfy, f_lyco, None, None))
+
+step_records.sort(key=lambda x: (x[0], x[1]))
+
+best_targets = {
+    f"{args.lora_name}-comfy.safetensors": None,
+    f"{args.lora_name}-lycoris.safetensors": None,
+    f"{args.lora_name}-trainable.safetensors": None,
+    "ema.safetensors": None,
+}
+for _sn, _mt, _sd, cf, lf, tf, ef in step_records:
+    if cf:
+        best_targets[f"{args.lora_name}-comfy.safetensors"] = cf
+    if lf:
+        best_targets[f"{args.lora_name}-lycoris.safetensors"] = lf
+    if tf:
+        best_targets[f"{args.lora_name}-trainable.safetensors"] = tf
+    if ef:
+        best_targets["ema.safetensors"] = ef
+
+copied_weights = 0
+for dest_name, src_sf in best_targets.items():
+    if src_sf and os.path.isfile(src_sf):
+        dest = os.path.join(output_lora_dir, dest_name)
+        print(f" - Archiving {src_sf} -> {dest}")
+        shutil.copy2(src_sf, dest)
+        copied_weights += 1
+
+if copied_weights == 0:
+    fallback_sfs = glob.glob(f"{working_runs}/moss/{args.lora_name}/**/*.safetensors", recursive=True) + \
+                   glob.glob("/kaggle/working/runs/**/*.safetensors", recursive=True)
+    fallback_sfs = [
+        f for f in set(fallback_sfs)
+        if "/tmp/models" not in f
+        and os.path.getsize(f) > 0
+        and "moss_image" not in os.path.basename(f).lower()
+        and "qwen" not in os.path.basename(f).lower()
+        and "flux2" not in os.path.basename(f).lower()
+    ]
+    fallback_sfs.sort(key=lambda x: os.path.getmtime(x))
+    for sf in fallback_sfs:
+        fname = os.path.basename(sf)
+        sf_lower = sf.lower()
+        if "-comfy" in sf_lower or fname.endswith("_comfy.safetensors"):
+            dest_name = f"{args.lora_name}-comfy.safetensors"
+        elif "-lycoris" in sf_lower or fname.endswith("_lycoris.safetensors"):
+            dest_name = f"{args.lora_name}-lycoris.safetensors"
+        elif fname == "trainable.safetensors":
+            dest_name = f"{args.lora_name}-trainable.safetensors"
+        else:
+            dest_name = fname
+        dest = os.path.join(output_lora_dir, dest_name)
+        print(f" - Archiving (fallback) {sf} -> {dest}")
+        shutil.copy2(sf, dest)
 
 # 归档训练指标 metrics.jsonl，供本地桌面 UI 直接加载绘出云端 Loss/EMA 收敛曲线
 metrics_candidates = []
-preferred_metrics = os.path.join(working_runs, "moss", args.lora_name, "metrics.jsonl")
+preferred_metrics = os.path.join(run_lora_dir, "metrics.jsonl")
 if os.path.isfile(preferred_metrics):
     metrics_candidates.append(preferred_metrics)
 else:
@@ -1673,6 +1776,29 @@ with open(summary_file, "w", encoding="utf-8") as sf:
 archive_path = f"/kaggle/working/{args.lora_name}_lora_results"
 shutil.make_archive(archive_path, 'zip', output_lora_dir)
 print(f"\nFinal archive created: {archive_path}.zip (Size: {os.path.getsize(archive_path + '.zip') / (1024**2):.2f} MB)")
+
+# 清理 /kaggle/working/runs 冗余重复文件与大体积 optim.pt，防止拉回超时与 .kaggle-partial 断流
+if os.path.isdir(final_exp_dir):
+    shutil.rmtree(final_exp_dir, ignore_errors=True)
+if os.path.isdir(run_ckpts_root):
+    ckpt_dirs = sorted(
+        [d for d in glob.glob(os.path.join(run_ckpts_root, "step_*")) if os.path.isdir(d)],
+        key=lambda d: (_extract_ckpt_step(d), os.path.getmtime(d)),
+    )
+    if ckpt_dirs:
+        latest_ckpt_dir = ckpt_dirs[-1]
+        for old_dir in ckpt_dirs[:-1]:
+            shutil.rmtree(old_dir, ignore_errors=True)
+        for heavy_name in ("optim.pt", "export"):
+            heavy_p = os.path.join(latest_ckpt_dir, heavy_name)
+            if os.path.isdir(heavy_p):
+                shutil.rmtree(heavy_p, ignore_errors=True)
+            elif os.path.isfile(heavy_p):
+                try:
+                    os.remove(heavy_p)
+                except OSError:
+                    pass
+        print(f"Pruned bloated working runs; kept latest resume checkpoint: {os.path.basename(latest_ckpt_dir)} (state.json + trainable.safetensors)")
 print("=" * 75)
 print(f">>> MOSS-Image Deep LoRA Training '{args.lora_name}' Finished Successfully! <<<")
 print("=" * 75)

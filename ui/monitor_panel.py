@@ -6,6 +6,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from core.config_store import PROJECT_ROOT
+
 from .theme import PALETTE
 from .widgets import FlatButton, ToggleButton
 
@@ -452,15 +454,25 @@ class MonitorPanel:
 
     def load_history_metrics(self, silent: bool = False):
         lora_name = self.app.var_lora_name.get().strip() or "my_lora"
-        metrics_path = Path("./KohakuMossTrainer/runs/moss") / lora_name / "metrics.jsonl"
-        if not metrics_path.exists():
+        out_root_str = self.app.var_output_dir.get().strip() if hasattr(self.app, "var_output_dir") else ""
+        out_root = Path(out_root_str) if out_root_str else (PROJECT_ROOT / "output")
+        candidates = [
+            PROJECT_ROOT / "KohakuMossTrainer" / "runs" / "moss" / lora_name / "metrics.jsonl",
+            out_root / lora_name / "metrics.jsonl",
+            PROJECT_ROOT / "workspace" / "kaggle_outputs" / lora_name / "metrics.jsonl",
+            PROJECT_ROOT / "workspace" / "kaggle_outputs" / lora_name / "output" / lora_name / "metrics.jsonl",
+            PROJECT_ROOT / "workspace" / "kaggle_outputs" / lora_name / "runs" / "moss" / lora_name / "metrics.jsonl",
+        ]
+        valid = [p for p in candidates if p.is_file() and p.stat().st_size > 0]
+        if not valid:
             if not silent:
                 messagebox.showinfo(
                     "未找到历史曲线",
-                    f"尚未在运行目录中找到 [{lora_name}] 的 metrics.jsonl 指标记录。\n启动训练后折线图将实时自动绘制！",
+                    f"尚未在运行目录、成品输出目录或云端回传缓存中找到 [{lora_name}] 的 metrics.jsonl 指标记录。\n启动训练或拉回云端结果后折线图将自动绘制！",
                 )
             return
-        self.load_metrics_from_path(metrics_path, label=lora_name, silent=silent)
+        valid.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        self.load_metrics_from_path(valid[0], label=lora_name, silent=silent)
 
     def start_metrics_polling(self, reset_chart: bool = True):
         self.stop_metrics_polling()
@@ -474,7 +486,7 @@ class MonitorPanel:
                 return
             try:
                 lora_name = self.app.var_lora_name.get().strip() or "my_lora"
-                metrics_path = Path("./KohakuMossTrainer/runs/moss") / lora_name / "metrics.jsonl"
+                metrics_path = PROJECT_ROOT / "KohakuMossTrainer" / "runs" / "moss" / lora_name / "metrics.jsonl"
                 if metrics_path.exists():
                     fsize = metrics_path.stat().st_size
                     if fsize < self._metrics_file_offset:

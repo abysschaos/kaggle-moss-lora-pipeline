@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +27,7 @@ COMPUTE_TARGET_PROFILES = {
 }
 
 
-def load_app_version(fallback: str = "1.8.0") -> str:
+def load_app_version(fallback: str = "1.8.1") -> str:
     """读取项目根目录 VERSION 单一版本信源，缺失时安全回退。"""
     ver_file = PROJECT_ROOT / "VERSION"
     try:
@@ -236,3 +237,150 @@ def compute_exposure_summary(
     total_exposures = img_count * rep * ep
     rec = max(1, total_exposures // divisor)
     return False, img_count, rep, ep, total_exposures, rec, eff_batch, imgs_per_pack, acc, mu, divisor
+
+
+def _dir_size_bytes(path_obj: Path) -> int:
+    total = 0
+    if path_obj.is_file():
+        try:
+            return path_obj.stat().st_size
+        except OSError:
+            return 0
+    if not path_obj.is_dir():
+        return 0
+    for fp in path_obj.rglob("*"):
+        if fp.is_file():
+            try:
+                total += fp.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def cleanup_workspace_staging(project_root: Path = None, output_dir: str = "") -> dict:
+    """
+    安全精简临时工作区 (workspace/) 与空输出子目录：
+    1. 若 workspace/kaggle_outputs/<name> 中尚有未归档到 output/<name> 的权重，先无损抢救归档；
+    2. 清理过期暂存区 (kaggle_dataset_stage / kaggle_kernel_stage / init_from_stage / _trainer_stage / _trainer_extract / trainer_main.zip)、
+       *.kaggle-partial、0 字节损坏文件，并精简 kaggle_outputs/* 冗余副本；
+    3. 删除 output/ 下 0 文件的空子目录，严格保护 workspace/models 硬链接、workspace/temp 与非空成品目录。
+    """
+    from .kaggle_bridge import (
+        _clean_partial_and_empty_downloads,
+        _prune_kaggle_download_cache,
+        extract_kaggle_outputs_from_dir,
+    )
+
+    root = Path(project_root).resolve() if project_root else PROJECT_ROOT
+    ws_dir = root / "workspace"
+    default_out = (root / "output").resolve()
+    configured_out = Path(output_dir).resolve() if str(output_dir or "").strip() else default_out
+
+    removed_items = []
+    rescued_loras = []
+    freed_bytes = 0
+
+    # 1. 优先扫描并自愈归档 workspace/kaggle_outputs/* 中的云端成品，随后精简冗余缓存
+    ko_root = ws_dir / "kaggle_outputs"
+    if ko_root.is_dir():
+        for dl_dir in sorted(ko_root.iterdir()):
+            if not dl_dir.is_dir():
+                continue
+            lora_name = dl_dir.name
+            target_out_lora = configured_out / lora_name
+            has_valid_out = target_out_lora.is_dir() and any(
+                f.is_file() and f.stat().st_size > 0 for f in target_out_lora.rglob("*.safetensors")
+            )
+            has_cloud_artifacts = any(
+                f.is_file() and f.stat().st_size > 0 and f.suffix.lower() in (".safetensors", ".zip")
+                for f in dl_dir.rglob("*")
+            )
+            before_sz = _dir_size_bytes(dl_dir)
+            if not has_valid_out and has_cloud_artifacts:
+                res = extract_kaggle_outputs_from_dir(
+                    dl_dir,
+                    lora_name=lora_name,
+                    output_dir=str(configured_out),
+                    prune_download_dir=True,
+                )
+                if res.get("ok"):
+                    rescued_loras.append(lora_name)
+            else:
+                _clean_partial_and_empty_downloads(dl_dir, target_out_lora)
+                _prune_kaggle_download_cache(dl_dir, target_out_lora)
+            after_sz = _dir_size_bytes(dl_dir)
+            if before_sz > after_sz:
+                diff = before_sz - after_sz
+                freed_bytes += diff
+                removed_items.append(f"kaggle_outputs/{lora_name} 冗余副本 (-{diff / (1024**2):.1f} MB)")
+
+    # 2. 清理过期暂存区目录与临时包（严格避开 models/ 与 temp/）
+    stale_targets = [
+        "kaggle_dataset_stage",
+        "kaggle_kernel_stage",
+        "init_from_stage",
+        "_trainer_stage",
+        "_trainer_extract",
+        "_trainer_preserve",
+        "_trainer_clone_stage",
+        "trainer_main.zip",
+    ]
+    if ws_dir.is_dir():
+        for rel_name in stale_targets:
+            cand = ws_dir / rel_name
+            if not cand.exists() and not cand.is_symlink():
+                continue
+            sz = _dir_size_bytes(cand)
+            try:
+                if cand.is_dir():
+                    shutil.rmtree(cand, ignore_errors=True)
+                else:
+                    cand.unlink(missing_ok=True)
+                freed_bytes += sz
+                removed_items.append(f"workspace/{rel_name} (-{sz / (1024**2):.2f} MB)")
+            except OSError:
+                pass
+
+        for fp in list(ws_dir.rglob("*")):
+            if not fp.is_file():
+                continue
+            try:
+                rel_parts = fp.relative_to(ws_dir).parts
+            except ValueError:
+                continue
+            if rel_parts and rel_parts[0].lower() in ("models", "temp"):
+                continue
+            is_partial = fp.name.endswith(".kaggle-partial")
+            is_zero = (fp.stat().st_size == 0) and (not rel_parts or rel_parts[0].lower() != "dataset")
+            if is_partial or is_zero:
+                try:
+                    fp.unlink(missing_ok=True)
+                    removed_items.append(f"workspace/{fp.relative_to(ws_dir).as_posix()}")
+                except OSError:
+                    pass
+
+    # 3. 清理 output/ 目录下 0 文件的空子目录，严格保留任何含文件成品目录
+    out_roots_to_scan = [default_out]
+    if configured_out != default_out:
+        out_roots_to_scan.append(configured_out)
+
+    for out_root in out_roots_to_scan:
+        if not out_root.is_dir():
+            continue
+        for sub in sorted(out_root.iterdir()):
+            if not sub.is_dir():
+                continue
+            has_any_file = any(item.is_file() for item in sub.rglob("*"))
+            if not has_any_file:
+                try:
+                    shutil.rmtree(sub, ignore_errors=True)
+                    removed_items.append(f"{out_root.name}/{sub.name} (空目录)")
+                except OSError:
+                    pass
+
+    return {
+        "freed_bytes": freed_bytes,
+        "freed_mb": round(freed_bytes / (1024**2), 2),
+        "removed_items": removed_items,
+        "rescued_loras": rescued_loras,
+    }

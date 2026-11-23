@@ -369,6 +369,13 @@ def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict = None) ->
     if save_fmt not in ("both", "comfy", "hf", "lycoris"):
         save_fmt = "both"
 
+    raw_max_min = opts.get("max_run_minutes", 540)
+    max_run_minutes = (
+        540
+        if (raw_max_min is None or str(raw_max_min).strip() == "")
+        else max(0, int(float(str(raw_max_min).strip())))
+    )
+
     payload = {
         "lora_name": cleaned_params["lora_name"],
         "trigger_word": cleaned_params["trigger_word"],
@@ -417,7 +424,7 @@ def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict = None) ->
         "parallel": parallel_val,
         "max_tokens": 0,
         "train_mode": "fresh",
-        "max_run_minutes": max(0, int(float(str(opts.get("max_run_minutes", 540) or 540).strip()))),
+        "max_run_minutes": max_run_minutes,
     }
 
     ds_source = str(opts.get("dataset_source", "local") or "local").strip().lower()
@@ -1705,7 +1712,218 @@ _PUSH_ERROR_MARKERS = (
     "500 server error",
     "traceback (most recent call last)",
     "valueerror:",
+    "connectionreseterror",
+    "connection aborted",
 )
+
+_PUSH_TRANSIENT_MARKERS = (
+    "connectionreseterror",
+    "connection aborted",
+    "10054",
+    "remotedisconnected",
+    "sslerror",
+    "eof occurred in violation of protocol",
+    "read timed out",
+    "connecttimeout",
+    "max retries exceeded",
+    "connectionerror",
+    "proxyerror",
+    "broken pipe",
+)
+
+
+def _read_raw_kaggle_auth(kaggle_json_path: Path = None) -> tuple:
+    """内部读取 Kaggle 认证信息 `(username, key, token, proxy)`，严禁直接日志输出或暴露给界面。"""
+    path = Path(kaggle_json_path) if kaggle_json_path else get_kaggle_json_path()
+    user = os.environ.get("KAGGLE_USERNAME", "").strip()
+    key = os.environ.get("KAGGLE_KEY", "").strip()
+    token = os.environ.get("KAGGLE_API_TOKEN", "").strip()
+    proxy = ""
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            if isinstance(data, dict):
+                user = str(data.get("username", "") or "").strip() or user
+                key = str(data.get("key", "") or "").strip() or key
+                token = str(data.get("token", "") or "").strip() or token
+                proxy = str(data.get("proxy", "") or "").strip()
+        except Exception:
+            pass
+    return user, key, token, proxy
+
+
+def _meta_bool(val, default: bool = False) -> bool:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _push_kaggle_kernel_via_curl(
+    stage_dir: Path,
+    accelerator: str = "NvidiaTeslaT4",
+    no_run: bool = False,
+    kaggle_json_path: Path = None,
+    on_log=None,
+) -> tuple:
+    """当 Kaggle CLI 因代理/TLS 重置 (WinError 10054) 失败时，回退通过系统原生 curl 直连 SaveKernel API。"""
+    stage = Path(stage_dir)
+    meta_file = stage / "kernel-metadata.json"
+    if not meta_file.is_file():
+        return False, "https://www.kaggle.com/code", "curl 直推失败：缺少 kernel-metadata.json。"
+
+    try:
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception as err:
+        return False, "https://www.kaggle.com/code", f"curl 直推失败：解析 kernel-metadata.json 异常 ({err})。"
+
+    kernel_id = str(meta.get("id", "") or "").strip()
+    kernel_url = (
+        (f"https://www.kaggle.com/code/{kernel_id}/edit" if no_run else f"https://www.kaggle.com/code/{kernel_id}")
+        if kernel_id
+        else "https://www.kaggle.com/code"
+    )
+    code_name = str(meta.get("code_file", "") or "").strip()
+    code_file = stage / code_name if code_name else None
+    if not code_file or not code_file.is_file():
+        return False, kernel_url, f"curl 直推失败：未找到代码文件 {code_name or '<empty>'}。"
+
+    script_body = code_file.read_text(encoding="utf-8")
+    kernel_type = str(meta.get("kernel_type", "script") or "script").strip().lower()
+    if kernel_type == "notebook":
+        nb_json = json.loads(script_body)
+        for cell in nb_json.get("cells") or []:
+            if cell.get("cell_type") == "code" and "outputs" in cell:
+                cell["outputs"] = []
+            if isinstance(cell.get("source"), list):
+                cell["source"] = "".join(cell["source"])
+        script_body = json.dumps(nb_json, ensure_ascii=False)
+
+    user, key, token, proxy_cfg = _read_raw_kaggle_auth(kaggle_json_path=kaggle_json_path)
+    if not token and not (user and key):
+        return False, kernel_url, "无法回退 curl 直推：缺少 Kaggle API 凭证（请先导入或保存 kaggle.json）。"
+
+    curl_exe = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl_exe:
+        return False, kernel_url, "无法回退 curl 直推：系统未找到 curl.exe。"
+
+    req_payload = {
+        "slug": kernel_id,
+        "newTitle": str(meta.get("title") or kernel_id.split("/")[-1]),
+        "text": script_body,
+        "language": str(meta.get("language", "python") or "python"),
+        "kernelType": kernel_type,
+        "isPrivate": _meta_bool(meta.get("is_private"), True),
+        "enableGpu": _meta_bool(meta.get("enable_gpu"), True),
+        "enableTpu": _meta_bool(meta.get("enable_tpu"), False),
+        "enableInternet": _meta_bool(meta.get("enable_internet"), True),
+        "datasetDataSources": list(meta.get("dataset_sources") or []),
+        "competitionDataSources": list(meta.get("competition_sources") or []),
+        "kernelDataSources": list(meta.get("kernel_sources") or []),
+    }
+    shape = accelerator if accelerator in ("NvidiaTeslaT4", "NvidiaTeslaP100") else str(meta.get("machine_shape", "") or "").strip()
+    if shape and shape.lower() != "none":
+        req_payload["machineShape"] = shape
+    if no_run:
+        req_payload["kernelExecutionType"] = "QUICK_SAVE"
+
+    cfg_lines = []
+    if user and key:
+        safe_u = user.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
+        safe_k = key.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
+        cfg_lines.append(f'user = "{safe_u}:{safe_k}"')
+    elif token:
+        safe_t = token.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
+        cfg_lines.append(f'header = "Authorization: Bearer {safe_t}"')
+    if proxy_cfg:
+        safe_p = proxy_cfg.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
+        cfg_lines.append(f'proxy = "{safe_p}"')
+
+    tmp_json_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix="_save_kernel.json",
+            delete=False,
+            encoding="utf-8",
+        ) as tf:
+            json.dump(req_payload, tf, ensure_ascii=False)
+            tmp_json_path = Path(tf.name)
+
+        cmd = [
+            curl_exe,
+            "-sS",
+            "--connect-timeout", "20",
+            "--max-time", "90",
+            "--retry", "2",
+            "--retry-delay", "2",
+            "-K", "-",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-H", "User-Agent: kaggle-api/2.2.5",
+            "--data-binary", f"@{tmp_json_path}",
+            "-w", "\n__HTTP_CODE__:%{http_code}\n",
+            "https://api.kaggle.com/v1/kernels.KernelsApiService/SaveKernel",
+        ]
+        res = subprocess.run(
+            cmd,
+            input="\n".join(cfg_lines) + "\n",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            creationflags=NO_WINDOW,
+        )
+    except Exception as err:
+        return False, kernel_url, f"curl 直推异常：{err}"
+    finally:
+        if tmp_json_path is not None:
+            try:
+                tmp_json_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    stdout_txt = (res.stdout or "").strip()
+    stderr_txt = (res.stderr or "").strip()
+    body_text = stdout_txt
+    http_code = 0
+    marker = "__HTTP_CODE__:"
+    if marker in stdout_txt:
+        body_part, code_part = stdout_txt.rsplit(marker, 1)
+        body_text = body_part.strip()
+        try:
+            http_code = int(code_part.strip().splitlines()[0])
+        except Exception:
+            http_code = 0
+
+    data = {}
+    try:
+        parsed = json.loads(body_text) if body_text else {}
+        if isinstance(parsed, dict):
+            data = parsed
+    except Exception:
+        data = {}
+
+    if res.returncode == 0 and 200 <= http_code < 300 and not data.get("error"):
+        resp_url = str(data.get("url", "") or "").strip().rstrip(".,)")
+        if resp_url:
+            kernel_url = f"{resp_url}/edit" if (no_run and not resp_url.endswith("/edit")) else resp_url
+        ver_num = data.get("versionNumber")
+        ver_tag = f"v{ver_num}" if ver_num else "saved"
+        if on_log:
+            on_log(f"[Kaggle 推送] ✅ 已通过原生 curl 容灾通道提交成功 ({ver_tag}): {kernel_url}\n")
+        ok_msg = f"已通过 curl 容灾保存交互式 Notebook ({ver_tag})：{kernel_id}" if no_run else f"已通过 curl 容灾提交云端任务 ({ver_tag})：{kernel_id}"
+        return True, kernel_url, ok_msg
+
+    detail = (
+        str(data.get("error") or data.get("message") or "").strip()
+        or body_text[-350:]
+        or stderr_txt[-350:]
+        or "未知错误"
+    )
+    return False, kernel_url, f"curl 直推失败 (HTTP {http_code}, Exit={res.returncode})：\n{detail}"
 
 
 def push_kaggle_kernel(
@@ -1715,8 +1933,9 @@ def push_kaggle_kernel(
     kaggle_json_path: Path = None,
     on_log=None,
     no_run: bool = False,
+    max_retries: int = 3,
 ) -> tuple:
-    """将阶段化后的训练内核推送至 Kaggle 云端队列或 Quick-Save 为交互式 Notebook（`no_run=True`）。"""
+    """将阶段化后的训练内核推送至 Kaggle 云端队列或 Quick-Save 为交互式 Notebook（含断链重试与 curl 容灾回退）。"""
     cli = cli_info if (cli_info and cli_info.get("found")) else find_kaggle_cli()
     if not cli.get("found"):
         return False, "", "未找到 Kaggle CLI，请先安装并配置凭证。"
@@ -1740,31 +1959,54 @@ def push_kaggle_kernel(
     if no_run:
         cmd.append("--no-run")
 
-    if on_log:
-        action_lbl = "正在 Quick-Save 为交互式 Notebook (免排队)" if no_run else "正在提交任务"
-        on_log(f"[Kaggle 推送] {action_lbl} {kernel_id}...\n")
-    rc, out = _stream_subprocess(cmd, Path(stage_dir), on_log=on_log, env=_build_kaggle_env(kaggle_json_path))
-    out_text = (out or "").strip()
-    out_lower = out_text.lower()
-    has_push_err = (
-        rc != 0
-        or "kernel push error" in out_lower
-        or ("successfully" not in out_lower and any(marker in out_lower for marker in _PUSH_ERROR_MARKERS))
-    )
-    if has_push_err:
-        m_err = re.search(r"(Kernel push error:[^\r\n]+)", out_text, re.IGNORECASE)
-        detail = m_err.group(1).strip() if m_err else out_text[-400:]
-        return False, kernel_url, f"推送任务失败 (Exit={rc})：\n{detail}"
+    attempts = max(1, int(max_retries or 1))
+    last_rc = 1
+    last_out = ""
+    for attempt in range(1, attempts + 1):
+        if on_log and attempt == 1:
+            action_lbl = "正在 Quick-Save 为交互式 Notebook (免排队)" if no_run else "正在提交任务"
+            on_log(f"[Kaggle 推送] {action_lbl} {kernel_id}...\n")
+        rc, out = _stream_subprocess(cmd, Path(stage_dir), on_log=on_log, env=_build_kaggle_env(kaggle_json_path))
+        last_rc = rc
+        last_out = (out or "").strip()
+        out_lower = last_out.lower()
+        has_push_err = (
+            rc != 0
+            or "kernel push error" in out_lower
+            or ("successfully" not in out_lower and any(marker in out_lower for marker in _PUSH_ERROR_MARKERS))
+        )
+        if not has_push_err:
+            m_url = re.search(r"https://www\.kaggle\.com/code/[^\s\"'<>]+", last_out)
+            if m_url:
+                matched_url = m_url.group(0).rstrip(".,)")
+                kernel_url = f"{matched_url}/edit" if (no_run and not matched_url.endswith("/edit")) else matched_url
+            ok_msg = f"已免排队保存交互式 Notebook：{kernel_id}" if no_run else f"任务已提交云端：{kernel_id}"
+            return True, kernel_url, ok_msg
 
-    m_url = re.search(r"https://www\.kaggle\.com/code/[^\s\"'<>]+", out_text)
-    if m_url:
-        matched_url = m_url.group(0).rstrip(".,)")
-        if no_run and not matched_url.endswith("/edit"):
-            kernel_url = f"{matched_url}/edit"
-        else:
-            kernel_url = matched_url
-    ok_msg = f"已免排队保存交互式 Notebook：{kernel_id}" if no_run else f"任务已提交云端：{kernel_id}"
-    return True, kernel_url, ok_msg
+        is_transient = any(marker in out_lower for marker in _PUSH_TRANSIENT_MARKERS)
+        if not is_transient:
+            m_err = re.search(r"(Kernel push error:[^\r\n]+)", last_out, re.IGNORECASE)
+            detail = m_err.group(1).strip() if m_err else last_out[-400:]
+            return False, kernel_url, f"推送任务失败 (Exit={rc})：\n{detail}"
+
+        if attempt < attempts:
+            delay_sec = attempt * 2
+            if on_log:
+                on_log(f"[Kaggle 推送] ⚠️ 检测到网络/代理连接重置，{delay_sec} 秒后自动重试 ({attempt + 1}/{attempts})...\n")
+            time.sleep(delay_sec)
+
+    if on_log:
+        on_log("[Kaggle 推送] 🔄 Kaggle CLI 连续断链，自动切换 Windows 原生 curl 直推 SaveKernel API...\n")
+    ok_curl, url_curl, msg_curl = _push_kaggle_kernel_via_curl(
+        Path(stage_dir),
+        accelerator=accelerator,
+        no_run=no_run,
+        kaggle_json_path=kaggle_json_path,
+        on_log=on_log,
+    )
+    if ok_curl:
+        return True, url_curl, msg_curl
+    return False, kernel_url, f"推送任务失败 (CLI Exit={last_rc} 且 curl 容灾未通)：\n{msg_curl}\n\n[CLI 原始输出]\n{last_out[-240:]}"
 
 
 def _extract_kernel_failure_message(raw: str) -> str:

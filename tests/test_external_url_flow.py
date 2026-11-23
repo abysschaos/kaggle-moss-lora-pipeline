@@ -698,6 +698,98 @@ class ExternalUrlFlowTests(unittest.TestCase):
         self.assertIn("notebookf3d6dacb8f", st["queue_hint"])
         self.assertIn("old-job", st["label"])
 
+    def test_push_kaggle_kernel_retries_and_curl_fallback_on_10054(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cleaned, _ = _sample_cleaned_and_raw(root)
+            p_zero = build_cloud_config_payload(cleaned, {"max_run_minutes": 0})
+            self.assertEqual(p_zero["max_run_minutes"], 0)
+            p_empty = build_cloud_config_payload(cleaned, {"max_run_minutes": ""})
+            self.assertEqual(p_empty["max_run_minutes"], 540)
+
+            stage_dir = root / "stage"
+            stage_dir.mkdir()
+            (stage_dir / "train_moss.py").write_text("print('hi')\n", encoding="utf-8")
+            (stage_dir / "kernel-metadata.json").write_text(json.dumps({
+                "id": "testuser/k1",
+                "title": "k1",
+                "code_file": "train_moss.py",
+                "language": "python",
+                "kernel_type": "script",
+                "is_private": "true",
+                "enable_gpu": "true",
+                "enable_tpu": "false",
+                "enable_internet": "true",
+                "dataset_sources": [],
+                "competition_sources": [],
+                "kernel_sources": [],
+                "machine_shape": "NvidiaTeslaT4",
+            }), encoding="utf-8")
+            kj = root / "kaggle.json"
+            kj.write_text(json.dumps({"username": "testuser", "key": "secret_key_val"}), encoding="utf-8")
+
+            cli_mock = {"found": True, "cmd": ["kaggle"]}
+            err_10054 = (1, "('Connection aborted.', ConnectionResetError(10054, 'reset', None, 10054, None))\n")
+            ok_out = (0, "Kernel version 1 successfully pushed.  Please check progress at https://www.kaggle.com/code/testuser/k1\n")
+
+            with mock.patch("core.kaggle_bridge.find_kaggle_cli", return_value=cli_mock), \
+                 mock.patch("core.kaggle_bridge.time.sleep") as m_sleep, \
+                 mock.patch("core.kaggle_bridge._stream_subprocess", side_effect=[err_10054, ok_out]):
+                ok1, url1, _msg1 = push_kaggle_kernel(stage_dir, accelerator="NvidiaTeslaT4", kaggle_json_path=kj)
+            self.assertTrue(ok1)
+            self.assertEqual(url1, "https://www.kaggle.com/code/testuser/k1")
+            m_sleep.assert_called_once()
+
+            seen_curl = []
+
+            def _fake_curl(cmd, **kw):
+                seen_curl.append((list(cmd), kw.get("input", "")))
+                return mock.Mock(
+                    returncode=0,
+                    stdout='{"url": "https://www.kaggle.com/code/testuser/k1", "versionNumber": 2}\n__HTTP_CODE__:200\n',
+                    stderr="",
+                )
+
+            with mock.patch("core.kaggle_bridge.find_kaggle_cli", return_value=cli_mock), \
+                 mock.patch("core.kaggle_bridge.time.sleep"), \
+                 mock.patch("core.kaggle_bridge.shutil.which", return_value="curl.exe"), \
+                 mock.patch("core.kaggle_bridge._stream_subprocess", side_effect=[err_10054, err_10054, err_10054]), \
+                 mock.patch("core.kaggle_bridge.subprocess.run", side_effect=_fake_curl):
+                ok2, url2, msg2 = push_kaggle_kernel(stage_dir, accelerator="NvidiaTeslaT4", kaggle_json_path=kj)
+            self.assertTrue(ok2)
+            self.assertEqual(url2, "https://www.kaggle.com/code/testuser/k1")
+            self.assertIn("v2", msg2)
+            self.assertEqual(len(seen_curl), 1)
+            self.assertTrue(all("secret_key_val" not in arg for arg in seen_curl[0][0]))
+            self.assertIn("secret_key_val", seen_curl[0][1])
+
+            def _fake_curl_err(cmd, **kw):
+                return mock.Mock(
+                    returncode=0,
+                    stdout='{"error": "Max GPU session count reached"}\n__HTTP_CODE__:400\n',
+                    stderr="",
+                )
+
+            with mock.patch("core.kaggle_bridge.find_kaggle_cli", return_value=cli_mock), \
+                 mock.patch("core.kaggle_bridge.time.sleep"), \
+                 mock.patch("core.kaggle_bridge.shutil.which", return_value="curl.exe"), \
+                 mock.patch("core.kaggle_bridge._stream_subprocess", side_effect=[err_10054, err_10054, err_10054]), \
+                 mock.patch("core.kaggle_bridge.subprocess.run", side_effect=_fake_curl_err):
+                ok3, _url3, msg3 = push_kaggle_kernel(stage_dir, accelerator="NvidiaTeslaT4", kaggle_json_path=kj)
+            self.assertFalse(ok3)
+            self.assertIn("Max GPU session count reached", msg3)
+
+            with mock.patch("core.kaggle_bridge.find_kaggle_cli", return_value=cli_mock), \
+                 mock.patch("core.kaggle_bridge.time.sleep") as m_sleep_nt, \
+                 mock.patch("core.kaggle_bridge._stream_subprocess", return_value=(0, "Kernel push error: Notebook not found\n")) as m_sub_nt, \
+                 mock.patch("core.kaggle_bridge.subprocess.run") as m_curl_nt:
+                ok4, _url4, msg4 = push_kaggle_kernel(stage_dir, accelerator="NvidiaTeslaT4", kaggle_json_path=kj)
+            self.assertFalse(ok4)
+            self.assertIn("Notebook not found", msg4)
+            m_sleep_nt.assert_not_called()
+            self.assertEqual(m_sub_nt.call_count, 1)
+            m_curl_nt.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

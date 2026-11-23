@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
 
+## [1.8.4] - 2026-11-23
+
+### Fixed & Improved
+- **Kaggle 推包 `WinError 10054` 自动退避重试与系统原生 `curl` `SaveKernel` 容灾直推（[`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`tests/test_external_url_flow.py`](tests/test_external_url_flow.py)）**：
+  - 针对本地代理环境（`HTTP_PROXY` / 系统代理）下 `kaggle.EXE`（`kagglesdk` 无重试机制）向 `api.kaggle.com` 提交大脚本偶发或连续触发 `ConnectionResetError(10054)` 的问题，`push_kaggle_kernel()` 新增 `max_retries: int = 3` 瞬时断链识别（`_PUSH_TRANSIENT_MARKERS`）与指数退避自动重试；非网络类错误（如 `Notebook not found` / `403` / `409`）则立即返回不浪费重试；
+  - 新增内部高可用回退函数 `_push_kaggle_kernel_via_curl()` 与 `_read_raw_kaggle_auth()`：当 CLI 连续 3 次网络断链后自动切换 Windows 原生 `curl.exe` 直连 `https://api.kaggle.com/v1/kernels.KernelsApiService/SaveKernel`，认证凭据严格经由 `stdin` 管道传给 `curl -K -`（严禁出现在命令行参数或日志中），完整对齐脚本/交互式 `.ipynb` 与 `QUICK_SAVE` 参数；
+  - 修复 `build_cloud_config_payload()` 中显式传入 `max_run_minutes=0` 被假值回退误覆盖为 `540` 的缺陷（仅 `None` 或空字符串回退 `540`，`0` 准确保持不限时长），并在 `tests/test_external_url_flow.py` 增补 `test_push_kaggle_kernel_retries_and_curl_fallback_on_10054` 覆盖全部重试、curl 回退、密钥隔离与非瞬时失败场景。
+
 ## [1.8.3] - 2026-11-23
 
 ### Fixed & Improved
@@ -292,7 +300,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.3...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.4...HEAD
+[1.8.4]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.3...v1.8.4
 [1.8.3]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.2...v1.8.3
 [1.8.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.0...v1.8.1

@@ -1,4 +1,11 @@
-"""Declarative preset definitions for basic and v1.5+ specialized LoRA training templates."""
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+八大场景黄金超参数预设矩阵与高阶默认基线 (Single Source of Truth)
+严格对齐上游 KohakuBlueleaf/KohakuMossTrainer 源码架构 (configs/moss/algo/*, quality_lokr16.py, muon.py)
+与 MOSS-Image 5B 单流 DiT + Qwen3.5-9B 因果注意力训练动力学规范。
+同时声明本机单卡基准与云端 Kaggle T4×2 DDP 等效 Batch 自适应校准映射。
+"""
 
 ADVANCED_DEFAULTS = {
     "lokr_factor": "8",
@@ -21,6 +28,23 @@ ADVANCED_DEFAULTS = {
     "save_format": "both",
 }
 
+# 防欠拟合优化器更新步数安全下限（尤其针对 Dual-T4 DDP 4 图/步吞吐下的 10~25 张小图集）
+MIN_RECOMMENDED_STEPS_SINGLE = 180
+MIN_RECOMMENDED_STEPS_LOKR = 200
+MIN_RECOMMENDED_STEPS_MULTI = 240
+
+# Kaggle 双卡 T4 DDP（MAX_TOKENS=9216, 1024px 下 2图/卡 × 2卡 = 4图/步）相对本机单卡的参数自适应修正
+CLOUD_T4X2_OVERRIDES = {
+    "style": {"grad_acc": "1", "lr": "1.2e-4"},
+    "character": {"grad_acc": "1", "lr": "1e-4"},
+    "multi_char": {"grad_acc": "1", "lr": "1e-4"},
+    "multi_style": {"grad_acc": "1", "lr": "1.2e-4"},
+    "concept": {"grad_acc": "1", "lr": "1.2e-4"},
+    "lokr_style": {"grad_acc": "1", "lr": "2.5e-4"},
+    "antifit_char": {"grad_acc": "1", "lr": "1e-4"},
+    "muon_style": {"grad_acc": "1", "lr": "1.3e-4"},
+}
+
 PRESETS = [
     {
         "id": "style",
@@ -32,26 +56,30 @@ PRESETS = [
         "multi_subset": False,
         "align_steps": True,
         "values": {
-            "repeats": 3,
-            "epochs": 5,
-            "rank": 32,
-            "alpha": 32.0,
+            "repeats": "4",
+            "epochs": "6",
+            "rank": "32",
+            "alpha": "32.0",
             "algo": "lora",
             "dora": False,
             "target_preset": "attn-mlp",
             "loraplus_ratio": "1.0",
             "lr": "1e-4",
             "grad_acc": "1",
-            "timestep_mu": "-1.09",
+            "timestep_mu": "-0.85",
+            "text_drop": "0.05",
+            "ema": "0.0",
             "lora_name": "my_art_style",
-            "trigger_word": "in the style of my_art_style",
+            "trigger_word": "",
         },
-        "dialog_title": "模板切换",
+        "dialog_title": "🎨 艺术画风预设已加载",
         "dialog_message": (
-            "已成功加载【艺术画风模板】(极速画风黄金配比)：\n"
-            "LoRA名称: my_art_style | 算法: LoRA (attn-mlp) | LoRA+=1.0\n"
-            "Repeats=3, Epochs=5, Rank=32, Alpha=32.0, LR=1e-4\n"
-            "GradAcc=1, Mu=-1.09 (按真实等效Batch计步，40图约600步)"
+            "已配置标准【艺术画风 LoRA】稳健方案：\n"
+            "• 算法结构：标准 LoRA (Rank=32 / Alpha=32.0, DoRA 关闭防锁死构图轮廓)\n"
+            "• 注入范围：attn-mlp（注意力 + 前馈网络双覆盖，兼顾光影排布与色彩渲染）\n"
+            "• 时间步重心：moss (mu=-0.85)，覆盖约 83% 中高噪构图色温区，同时保留约 17% 低噪笔触质感\n"
+            "• 曝光与优化：Repeats=4 / Epochs=6（24 次/图），AdamW LR=1e-4（双卡 T4 自动升至 1.2e-4），EMA=0.0\n"
+            "• 提示词建议：触发词栏已保留您的原有输入（无固定风格触发词亦可留空），建议将画风本体词从 .txt 中剪枝以集中学习笔触。"
         ),
     },
     {
@@ -64,10 +92,10 @@ PRESETS = [
         "multi_subset": False,
         "align_steps": True,
         "values": {
-            "repeats": 6,
-            "epochs": 4,
-            "rank": 32,
-            "alpha": 32.0,
+            "repeats": "7",
+            "epochs": "4",
+            "rank": "24",
+            "alpha": "24.0",
             "algo": "lora",
             "dora": True,
             "target_preset": "attn-mlp",
@@ -75,15 +103,18 @@ PRESETS = [
             "lr": "8e-5",
             "grad_acc": "2",
             "timestep_mu": "0.35",
+            "text_drop": "0.02",
+            "ema": "0.0",
             "lora_name": "my_character",
-            "trigger_word": "my_character_char",
+            "trigger_word": "",
         },
-        "dialog_title": "模板切换",
+        "dialog_title": "👤 单人角色预设已加载",
         "dialog_message": (
-            "已成功加载【单人角色模板】(高精度五官服饰版)：\n"
-            "LoRA名称: my_character | 算法: LoRA + DoRA (attn-mlp) | LoRA+=2.0\n"
-            "Repeats=6, Epochs=4, Rank=32, Alpha=32.0, LR=8e-5\n"
-            "GradAcc=2, Mu=0.35 (强化中低噪面部结构与细节一致)"
+            "已配置高精度【单人角色 DoRA】方案：\n"
+            "• 权重解耦：开启 DoRA + Rank=24 / Alpha=24.0（精准锁定五官瞳孔与发饰裁片，抑制 32+ 高秩带来的训练背景死记）\n"
+            "• 加速收敛：开启 LoRA+ (2.0) + GradAcc=2 平滑单图梯度方差 + LR=8e-5（双卡 T4 自动设为 GradAcc=1 / LR=1e-4）\n"
+            "• 时间步重心：moss (mu=+0.35)，将低噪高频细节区采样占比提升至约 27.5%，专攻瞳孔高光与复杂服饰纹理\n"
+            "• 触发词保护：Text Drop 压低至 0.02 防稀释角色触发词绑定；请在【核心触发词】栏填入角色英文名，并从 .txt 删除发色/瞳色等固有特征词。"
         ),
     },
     {
@@ -96,9 +127,10 @@ PRESETS = [
         "multi_subset": True,
         "align_steps": False,
         "values": {
-            "epochs": 4,
-            "rank": 48,
-            "alpha": 48.0,
+            "repeats": "6",
+            "epochs": "4",
+            "rank": "48",
+            "alpha": "48.0",
             "algo": "lora",
             "dora": True,
             "target_preset": "attn-mlp+text-refiner",
@@ -106,15 +138,17 @@ PRESETS = [
             "lr": "8e-5",
             "grad_acc": "2",
             "timestep_mu": "0.35",
-            "lora_name": "multi_char_pack",
+            "text_drop": "0.02",
+            "ema": "0.0",
+            "lora_name": "my_multi_char",
             "trigger_word": "",
         },
-        "dialog_title": "多人物模板就绪",
+        "dialog_title": "👥 多人物混合预设已加载",
         "dialog_message": (
-            "已加载【多人物配比模板】并切换为多子集配比模式！\n"
-            "• 架构配置：LoRA + DoRA (Rank=48, Alpha=48.0, attn-mlp+text-refiner, LoRA+=2.0)\n"
-            "• 进阶调度：GradAcc=2 (稳梯度防串角), Mu=0.35 (精细五官服饰对齐)\n"
-            "• 使用提示：请在【📂 数据与续炼】选项卡中添加各角色子集并点击【⚖️ 一键配平 Repeat】。"
+            "已为您自动开启【多子集配比】并配置防串脸参数：\n"
+            "• 专属注入：attn-mlp+text-refiner（训练文本重整层，强化 Qwen3.5-9B 区分不同角色专属触发词的语义边界）\n"
+            "• 充足容量：DoRA + Rank=48 / Alpha=48.0 + LoRA+ (2.0) + Text Drop=0.02 + mu=+0.35\n"
+            "• 下一步操作：请切换到上方【📂 数据与续炼】标签页添加各角色文件夹与独立触发词，点击【⚖️ 自动反比配平 Repeats】后再对齐步数（保底 >=240 步）。"
         ),
     },
     {
@@ -127,9 +161,10 @@ PRESETS = [
         "multi_subset": True,
         "align_steps": False,
         "values": {
-            "epochs": 5,
-            "rank": 48,
-            "alpha": 48.0,
+            "repeats": "4",
+            "epochs": "5",
+            "rank": "48",
+            "alpha": "48.0",
             "algo": "lora",
             "dora": True,
             "target_preset": "attn-mlp+modulation",
@@ -137,15 +172,17 @@ PRESETS = [
             "lr": "1e-4",
             "grad_acc": "2",
             "timestep_mu": "-0.60",
-            "lora_name": "multi_style_pack",
+            "text_drop": "0.05",
+            "ema": "0.0",
+            "lora_name": "my_multi_style",
             "trigger_word": "",
         },
-        "dialog_title": "多画风模板就绪",
+        "dialog_title": "🎭 多画风混合预设已加载",
         "dialog_message": (
-            "已加载【多画风配比模板】并切换为多子集配比模式！\n"
-            "• 架构配置：LoRA + DoRA (Rank=48, Alpha=48.0, attn-mlp+modulation, LoRA+=2.0)\n"
-            "• 进阶调度：GradAcc=2 (降方差防风格糊化), Mu=-0.60 (兼顾宏观笔触与线条锐度)\n"
-            "• 使用提示：请在【📂 数据与续炼】选项卡分别添加不同画风子目录并绑定唯一触发词！"
+            "已自动开启【多子集配比】并配置多画风融合参数：\n"
+            "• 专属注入：attn-mlp+modulation（额外纳入 AdaLN 全局调制投影，解耦不同画风的色彩氛围与光影基底）\n"
+            "• 容量与采样：DoRA + Rank=48 / Alpha=48.0 + LR=1e-4 + mu=-0.60（兼顾宏观色调与中频肌理）\n"
+            "• 下一步操作：请在【📂 数据与续炼】中为各画风子集设置不同触发前缀（如 style_ink, style_cel），点击【⚖️ 自动反比配平 Repeats】后再对齐步数。"
         ),
     },
     {
@@ -158,10 +195,10 @@ PRESETS = [
         "multi_subset": False,
         "align_steps": True,
         "values": {
-            "repeats": 5,
-            "epochs": 4,
-            "rank": 32,
-            "alpha": 32.0,
+            "repeats": "6",
+            "epochs": "4",
+            "rank": "32",
+            "alpha": "32.0",
             "algo": "lora",
             "dora": True,
             "target_preset": "attn-mlp+text-refiner",
@@ -169,139 +206,161 @@ PRESETS = [
             "lr": "1e-4",
             "grad_acc": "2",
             "timestep_mu": "0.0",
+            "text_drop": "0.05",
+            "ema": "0.0",
             "lora_name": "my_concept",
-            "trigger_word": "my_concept_v1",
+            "trigger_word": "",
         },
-        "dialog_title": "概念/动作模板就绪",
+        "dialog_title": "💡 概念与动作预设已加载",
         "dialog_message": (
-            "已加载【概念/动作/材质模板】：\n"
-            "• 架构配置：LoRA + DoRA (Rank=32, Alpha=32.0, attn-mlp+text-refiner, LoRA+=2.0)\n"
-            "• 进阶调度：GradAcc=2, Mu=0.0 (全时间段对称采样，兼顾动态肢体与局部材质)\n"
-            "• 建议图集保持主体与背景高度随机，仅目标动作/镜头/材质保持一致。"
+            "已配置【特定概念 / 复杂动作 / 特殊构图视角】方案：\n"
+            "• 注入范围：attn-mlp+text-refiner + DoRA (Rank=32 / Alpha=32.0) + LoRA+ (2.0)\n"
+            "• 对称时间步：moss (mu=0.0)，全频段均衡覆盖大肢体骨架排布与局部手部/道具交互细节\n"
+            "• 曝光建议：Repeats=6 / Epochs=4（24 次/图），请在 .txt 中使用准确英文自然语言描述空间方位与交互关系。"
         ),
     },
     {
         "id": "lokr_style",
         "row": 2,
-        "label": "💎 LoKr 高还原画风",
+        "label": "💎 LoKr 满秩画风",
         "bg": "#313244",
         "fg_key": "accent_peach",
         "active_bg_key": "accent_peach",
         "multi_subset": False,
         "align_steps": True,
         "values": {
-            "repeats": 4,
-            "epochs": 5,
-            "rank": 32,
-            "alpha": 32.0,
+            "repeats": "5",
+            "epochs": "5",
+            "rank": "32",
+            "alpha": "32.0",
             "algo": "lokr",
-            "lokr_factor": "8",
-            "lokr_full_matrix": False,
-            "lokr_decompose_both": False,
             "dora": False,
+            "lokr_factor": "16",
+            "lokr_full_matrix": True,
+            "lokr_decompose_both": False,
             "target_preset": "attn-mlp+modulation",
             "loraplus_ratio": "1.0",
-            "lr": "1.5e-4",
+            "lr": "2e-4",
             "grad_acc": "1",
-            "timestep": "moss",
-            "timestep_mu": "-1.09",
-            "ema": "0.99",
+            "timestep_mu": "-0.30",
+            "text_drop": "0.05",
+            "ema": "0.0",
             "lora_name": "my_lokr_style",
-            "trigger_word": "in the style of my_lokr_style",
+            "trigger_word": "",
         },
-        "dialog_title": "特色实战预设：💎 LoKr 高还原画风",
+        "dialog_title": "💎 LoKr 满秩高还原画风预设已加载",
         "dialog_message": (
-            "已加载【💎 LoKr 高还原画风预设】：\n"
-            "• 算法：LoKr (Factor=8) + attn-mlp+modulation | Rank=32, Alpha=32.0\n"
-            "• 调度：LR=1.5e-4, Mu=-1.09, EMA=0.99 (兼顾极小产出体积与高频笔触还原)"
+            "已对齐上游 KohakuMossTrainer (quality_lokr16) 满秩高保真画风方案：\n"
+            "• 算法矩阵：LoKr + Full Matrix 开启 + Factor=16（精确满秩 Kronecker 乘积，消除旧版三矩阵低秩瓶颈，体积仅约 36MB BF16，约为标准 LoRA 的 1/4）\n"
+            "• 注入与学习率：attn-mlp+modulation + LR=2e-4（双卡 T4 自动升至 2.5e-4，适配乘积因子梯度范数）\n"
+            "• 纹理时间步：moss (mu=-0.30)，大幅提升中低噪区采样占比，兼顾全局厚涂色温、锐利勾线与像素硬边肌理\n"
+            "• 产物加载：默认导出 -comfy 与 -lycoris 双格式（EMA=0.0 零冗余），ComfyUI 原生 Load LoRA 或 LycorisLoader 均可直读。"
         ),
     },
     {
         "id": "antifit_char",
         "row": 2,
-        "label": "🛡️ 小图集防过拟合角色",
+        "label": "🛡️ 小图防过拟合",
         "bg": "#313244",
         "fg_key": "accent_yellow",
         "active_bg_key": "accent_yellow",
         "multi_subset": False,
         "align_steps": True,
         "values": {
-            "repeats": 6,
-            "epochs": 4,
-            "rank": 32,
-            "alpha": 32.0,
+            "repeats": "8",
+            "epochs": "4",
+            "rank": "16",
+            "alpha": "8.0",
             "algo": "lora",
             "dora": True,
             "target_preset": "attn-mlp",
-            "loraplus_ratio": "2.0",
-            "lr": "6e-5",
+            "loraplus_ratio": "1.5",
+            "lr": "8e-5",
             "grad_acc": "2",
-            "timestep": "moss",
             "timestep_mu": "0.35",
-            "rank_dropout": "0.1",
+            "rank_dropout": "0.05",
             "module_dropout": "0.05",
             "input_dropout": "0.0",
-            "text_drop": "0.1",
-            "ema": "0.99",
-            "lora_name": "my_char_antifit",
-            "trigger_word": "my_char_v1",
+            "text_drop": "0.02",
+            "ema": "0.0",
+            "lora_name": "my_antifit_lora",
+            "trigger_word": "",
         },
-        "dialog_title": "特色实战预设：🛡️ 小图集防过拟合角色",
+        "dialog_title": "🛡️ 稀缺小图集防过拟合预设已加载",
         "dialog_message": (
-            "已加载【🛡️ 小图集防过拟合角色预设】(专治 10~20 张小样本衣服/背景死锁)：\n"
-            "• 架构：LoRA + DoRA (attn-mlp, LoRA+=2.0) | LR=6e-5, GradAcc=2, Mu=0.35\n"
-            "• 防过拟合：RankDrop=0.1, ModDrop=0.05, InDrop=0.0(DoRA锁定), TextDrop=0.1, EMA=0.99"
+            "已针对 8~18 张稀缺角色/概念图集配置【半秩物理阻尼 + 防欠拟合保底】方案：\n"
+            "• 结构阻尼：DoRA + Rank=16 / Alpha=8.0（0.5 倍缩放比物理抑制背景死记与色块烤焦，替代旧版高秩+超低LR欠拟合组合）\n"
+            "• 温和正则：Rank Dropout=0.05 + Module Dropout=0.05（DoRA 下自动锁死 Input Dropout=0.0）+ Text Drop=0.02 保住触发词\n"
+            "• 充足更新：Repeats=8 / Epochs=4 + LoRA+ (1.5) + LR=8e-5（双卡 T4 自动升至 1e-4 并执行 >=180 步防坍缩保底）。"
         ),
     },
     {
         "id": "muon_style",
         "row": 2,
-        "label": "⚡ Muon 画风加速",
+        "label": "⚡ Muon 加速(>=12G)",
         "bg": "#313244",
         "fg_key": "accent_green",
         "active_bg_key": "accent_green",
         "multi_subset": False,
         "align_steps": True,
         "values": {
-            "repeats": 3,
-            "epochs": 5,
-            "rank": 32,
-            "alpha": 32.0,
+            "repeats": "4",
+            "epochs": "5",
+            "rank": "32",
+            "alpha": "32.0",
             "algo": "lora",
             "dora": False,
             "target_preset": "attn-mlp",
             "loraplus_ratio": "1.0",
-            "optimizer": "muon",
             "lr": "1e-4",
             "grad_acc": "1",
-            "timestep": "moss",
-            "timestep_mu": "-1.09",
+            "timestep_mu": "-0.85",
+            "optimizer": "muon",
+            "weight_decay": "0.02",
+            "text_drop": "0.05",
+            "ema": "0.0",
             "lora_name": "my_muon_style",
-            "trigger_word": "in the style of my_muon_style",
+            "trigger_word": "",
         },
-        "dialog_title": "特色实战预设：⚡ Muon 画风加速",
+        "dialog_title": "⚡ Muon 正交优化器加速预设已加载",
         "dialog_message": (
-            "已加载【⚡ Muon 画风加速预设】：\n"
-            "• 优化器：Muon (正交矩阵动量加速画风早期收敛)，后端自动切入 GPU 状态安全流式显存档位\n"
-            "• 配置：LoRA (Rank=32, Alpha=32.0), LR=1e-4, Mu=-1.09"
+            "已启用上游 Newton-Schulz 正交矩阵更新【Muon 优化器】方案：\n"
+            "• 正交收敛：引擎内置 0.2*sqrt(max(m,n)) RMS 尺度对齐，LR=1e-4（双卡 T4 自动升至 1.3e-4）+ Weight Decay=0.02\n"
+            "• 步数精简：Repeats=4 / Epochs=5（20 次/图，同质量收敛比标准 AdamW 快约 25%~35%）+ mu=-0.85\n"
+            "• 硬件提示：Muon 要求优化器状态驻留 GPU（自动禁用 optcpu/gradoff），强烈推荐本地 >=12GB 显存或云端 T4 运行；6G/8G 显卡建议改用【🎨 艺术画风】或【💎 LoKr 满秩画风】。"
         ),
     },
 ]
 
 _PRESET_MAP = {p["id"]: p for p in PRESETS}
+PRESET_ORDER = [p["id"] for p in PRESETS]
 
-# 针对 Kaggle T4 x2 DDP（MAX_TOKENS=9216 x 2卡, 1024px=4图/步）的预设智能派生覆盖：
-# Batch 放大后默认归 1 GradAcc（单步已 4 图足够稳定），并按平方根法则温和调整学习率。
-CLOUD_T4X2_OVERRIDES = {
-    "style": {"grad_acc": "1", "lr": "1.2e-4"},
-    "character": {"grad_acc": "1", "lr": "1e-4"},
-    "multi_char": {"grad_acc": "1", "lr": "1e-4"},
-    "multi_style": {"grad_acc": "1", "lr": "1.2e-4"},
-    "concept": {"grad_acc": "1", "lr": "1.2e-4"},
-    "lokr_style": {"grad_acc": "1", "lr": "1.8e-4"},
-    "antifit_char": {"grad_acc": "1", "lr": "8e-5"},
-    "muon_style": {"grad_acc": "1", "lr": "1.3e-4"},
-}
+# 仅当用户尚未自定义名称/触发词（仍处于系统占位状态）时才填入模板默认名，防止覆盖用户已输入的项目名与触发词
+DEFAULT_PLACEHOLDER_LORA_NAMES = frozenset(
+    {
+        "",
+        "my_lora",
+        "my_moss_lora",
+        "multi_char_pack",
+        "multi_style_pack",
+        "my_char_antifit",
+    }
+    | {str(p["values"]["lora_name"]) for p in PRESETS}
+)
+
+DEFAULT_LEGACY_TRIGGERS = frozenset(
+    {
+        "",
+        "in the style of my_art_style",
+        "in the style of my_lokr_style",
+        "in the style of my_muon_style",
+        "my_char",
+        "my_character_char",
+        "my_concept",
+        "my_concept_v1",
+        "my_char_v1",
+    }
+)
 
 
 def get_preset_by_id(preset_id: str):
@@ -309,45 +368,63 @@ def get_preset_by_id(preset_id: str):
     return _PRESET_MAP.get(preset_id)
 
 
-def recommend_save_every_and_ema(rec_steps: int, base_ema: str = "0.0") -> tuple:
-    """根据推荐总步数自适应建议存档间隔与短步数 EMA，避免总步数骤降后检查点过稀或 EMA 滞后。"""
-    steps = max(0, int(rec_steps or 0))
-    if steps <= 0:
-        save_every = "100"
-    elif steps <= 120:
-        save_every = "30"
-    elif steps <= 320:
-        save_every = "50"
-    else:
-        save_every = "100"
-
-    ema_raw = str(base_ema if base_ema is not None else "0.0").strip() or "0.0"
-    try:
-        ema_val = float(ema_raw)
-    except Exception:
-        ema_val = 0.0
-
-    if ema_val >= 0.985 and 0 < steps < 250:
-        return save_every, "0.97", f"短步数({steps} < 250)已将 EMA {ema_raw} 调平至 0.97 防收敛滞后"
-    return save_every, ema_raw, ""
+def recommend_min_steps(algo: str = "lora", multi_subset: bool = False) -> int:
+    """返回防止大等效 Batch 下小图集优化器更新次数过少导致欠拟合的安全最低步数。"""
+    if multi_subset:
+        return MIN_RECOMMENDED_STEPS_MULTI
+    if str(algo or "lora").strip().lower() == "lokr":
+        return MIN_RECOMMENDED_STEPS_LOKR
+    return MIN_RECOMMENDED_STEPS_SINGLE
 
 
 def resolve_preset_for_target(preset_id: str, target_compute: str = "local") -> tuple:
-    """按目标算力环境返回 (派生后的参数字典, 云端自适应说明列表)。"""
+    """
+    根据目标算力（local | kaggle_t4x2 | kaggle_t4x1）返回 (resolved_values_dict, notes_list)。
+    双卡 T4 DDP 单步等效吞吐较高（1024px 下 4 图/步），自动将 GradAcc 归 1 并微幅补偿学习率。
+    """
     preset = get_preset_by_id(preset_id)
     if not preset:
         return {}, []
+    vals = dict(preset["values"])
+    notes = []
+    target_key = (target_compute or "local").strip().lower()
+    if target_key == "kaggle_t4x2" and preset_id in CLOUD_T4X2_OVERRIDES:
+        ov = CLOUD_T4X2_OVERRIDES[preset_id]
+        old_ga = vals.get("grad_acc", "1")
+        old_lr = vals.get("lr", "1e-4")
+        vals.update(ov)
+        if old_ga != vals.get("grad_acc"):
+            notes.append(f"Kaggle 双卡 T4 DDP 单步已并发 4 张图，GradAcc 已自动由 {old_ga} 归 1。")
+        if old_lr != vals.get("lr"):
+            notes.append(f"匹配双卡大等效 Batch (√B 缩放)，学习率已由 {old_lr} 微调至 {vals['lr']}。")
+        return vals, notes
+    if target_key == "kaggle_t4x1":
+        return vals, ["已按 Kaggle 单卡 T4（MAX_TOKENS=8192）核算单步吞吐与步数。"]
+    return vals, notes
 
-    merged = dict(preset.get("values", {}))
-    tc = (target_compute or "local").strip().lower()
-    if tc == "kaggle_t4x2":
-        overrides = CLOUD_T4X2_OVERRIDES.get(preset_id, {})
-        merged.update(overrides)
-        notes = [
-            f"Kaggle T4×2 DDP 单步并发 4 图（MAX_TOKENS=9216×2卡），已自动将 GradAcc 设为 {merged.get('grad_acc', '1')}，"
-            f"并按 √B 法则温和校准 LR={merged.get('lr', '1e-4')}。"
-        ]
-        return merged, notes
-    if tc == "kaggle_t4x1":
-        return merged, ["已按 Kaggle 单卡 T4（MAX_TOKENS=8192）核算单步吞吐与步数。"]
-    return merged, []
+
+def recommend_save_every_and_ema(rec_steps: int, base_ema: str) -> tuple:
+    """
+    针对云端短总步数场景，自动推荐合理的 SaveEvery 间隔与短程 EMA 衰减率。
+    返回 (save_every_str, adjusted_ema_str, note_or_empty)。
+    """
+    steps_int = max(1, int(rec_steps or 100))
+    if steps_int <= 120:
+        save_every = "30"
+    elif steps_int <= 260:
+        save_every = "50"
+    elif steps_int <= 450:
+        save_every = "80"
+    else:
+        save_every = "100"
+
+    ema_str = str(base_ema or "0.0").strip()
+    note = ""
+    try:
+        ema_val = float(ema_str)
+    except Exception:
+        ema_val = 0.0
+    if ema_val >= 0.985 and steps_int < 250:
+        ema_str = "0.97"
+        note = f"总步数约 {steps_int} 步 (<250)，已将手动开启的 EMA 由 {base_ema} 下调至 0.97 以缩短平滑预热期。"
+    return save_every, ema_str, note

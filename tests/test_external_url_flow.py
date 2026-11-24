@@ -445,6 +445,72 @@ class ExternalUrlFlowTests(unittest.TestCase):
             )
             self.assertFalse(any("x0.at" in u for u in called_urls))
 
+    def test_external_mirrors_default_stops_after_first_success_and_falls_back(self):
+        with tempfile.TemporaryDirectory() as td:
+            zpath = Path(td) / "pack.zip"
+            with zipfile.ZipFile(zpath, "w") as zf:
+                zf.writestr("hello.txt", "ok")
+
+            # 1) 默认调用且首站 temp.sh 成功时：仅执行 1 次上传即停止，返回纯单条直链（无 '|'）
+            calls_1 = []
+
+            def _first_ok(cmd, **kwargs):
+                joined = " ".join(str(x) for x in cmd)
+                calls_1.append(joined)
+                return mock.Mock(returncode=0, stdout="https://temp.sh/FirstOk/pack.zip\n", stderr="")
+
+            with mock.patch("core.kaggle_bridge.subprocess.run", side_effect=_first_ok):
+                ok1, url1, mirrors1 = upload_zip_to_external_mirrors(zpath)
+            self.assertTrue(ok1, url1)
+            self.assertEqual(len(calls_1), 1)
+            self.assertEqual(len(mirrors1), 1)
+            self.assertEqual(mirrors1[0]["host"], "temp.sh")
+            self.assertEqual(url1, "https://temp.sh/FirstOk/pack.zip")
+            self.assertNotIn("|", url1)
+
+            # 2) 首站 temp.sh 失败时自动顺延第 2 站 filebin.net，成功即止不再尝试后续 3 站
+            calls_2 = []
+            logs_2 = []
+
+            def _second_ok(cmd, **kwargs):
+                joined = " ".join(str(x) for x in cmd)
+                calls_2.append(joined)
+                if "temp.sh/upload" in joined:
+                    return mock.Mock(returncode=28, stdout="", stderr="Connection timed out")
+                if "filebin.net" in joined:
+                    return mock.Mock(returncode=0, stdout='{"bin":{"id":"moss-9988"}}', stderr="")
+                return mock.Mock(returncode=1, stdout="", stderr="should not run")
+
+            with mock.patch("core.kaggle_bridge.subprocess.run", side_effect=_second_ok):
+                ok2, url2, mirrors2 = upload_zip_to_external_mirrors(zpath, on_log=logs_2.append)
+            self.assertTrue(ok2, url2)
+            self.assertEqual(len(calls_2), 2)
+            self.assertIn("temp.sh", calls_2[0])
+            self.assertIn("filebin.net", calls_2[1])
+            self.assertEqual(len(mirrors2), 1)
+            self.assertEqual(mirrors2[0]["host"], "filebin.net")
+            self.assertNotIn("|", url2)
+            self.assertTrue(any("自动顺延" in line for line in logs_2))
+
+            # 3) upload_external_dataset 默认透传单站即止语义
+            ds = Path(td) / "ds"
+            ds.mkdir()
+            (ds / "img.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+            (ds / "img.txt").write_text("clean style", encoding="utf-8")
+            _, raw = _sample_cleaned_and_raw(ds)
+            calls_3 = []
+
+            def _ds_first_ok(cmd, **kwargs):
+                calls_3.append(" ".join(str(x) for x in cmd))
+                return mock.Mock(returncode=0, stdout="https://temp.sh/DsOne/test.zip\n", stderr="")
+
+            with mock.patch("core.kaggle_bridge.subprocess.run", side_effect=_ds_first_ok):
+                ok3, url3, stats3 = upload_external_dataset(raw, dataset_slug="single-stop", stage_root=Path(td) / "stg")
+            self.assertTrue(ok3, url3)
+            self.assertEqual(len(calls_3), 1)
+            self.assertEqual(len(stats3["mirrors"]), 1)
+            self.assertEqual(url3, "https://temp.sh/DsOne/test.zip")
+
     def test_sanitize_x0at_and_kernel_failure_message_surfacing(self):
         raw_spec = "https://x0.at/agQX.zip|https://filebin.net/moss-1/a.zip|https://transfer.whalebone.io/2/a.zip"
         expected = "https://filebin.net/moss-1/a.zip|https://transfer.whalebone.io/2/a.zip"

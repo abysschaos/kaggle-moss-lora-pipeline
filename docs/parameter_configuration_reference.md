@@ -30,11 +30,11 @@
 | **预热步数 (`warmup`)** | 学习率线性爬升步数；`-1` 为总步数的 5%（限 `[5, 100]`），并对 `STEPS` 自动裁剪 `< STEPS` | `-1`（自动）或 `0 ~ 100` | `--warmup_steps`（默认 `-1`） | `--warmup_steps` / `WARMUP_STEPS`（默认 `-1`） |
 | **权重衰减 (`WEIGHT_DECAY`)** | 解耦权重衰减惩罚系数，抑制参数爆炸过拟合 | `0.0 ~ 0.05`（推荐 `0.01`） | `--weight_decay`（默认 `0.01`） | `--weight_decay` / `WEIGHT_DECAY`（默认 `0.01`） |
 | **衰减规则 (`WD_RULES`)** | 决定哪些层参与 Weight Decay 约束 | `moss` / `none` / `all` | `--wd_rules`（默认 `"moss"`） | `--wd_rules` / `WD_RULES`（默认 `"moss"`） |
-| **EMA 衰减率 (`EMA`)** | 指数移动平均权重平滑；`0.0` 关闭，长步数微调建议开启滤除末期震荡 | `0.0` 或 `0.99 ~ 0.995` | `--ema`（默认 `0.0`） | `--ema` / `EMA`（默认 `0.0`） |
+| **EMA 衰减率 (`EMA`)** | 指数移动平均权重平滑；默认 `0.0` 关闭，开启 `>0` 时兼容钩子同步导出 `-ema*-comfy/-lycoris.safetensors` | `0.0` 或 `0.97 ~ 0.995` | `--ema`（默认 `0.0`） | `--ema` / `EMA`（默认 `0.0`） |
 | **梯度累积 (`GRAD_ACC`)** | 微批次累计 N 步再执行一次权重更新，降低单人物/多子集混合梯度方差 | 画风 `1`，人物/多子集 `2~4` | `--grad_acc`（默认 `1`） | `--grad_acc` / `GRAD_ACC`（默认 `1`） |
 | **时间步分布 (`TIMESTEP`)** | 控制噪声轨迹抽样方式（训练期间 `shift` 恒定锁定 `1.0`） | `moss` / `uniform` / `logit_normal` | `--timestep`（默认 `"moss"`） | `--timestep` / `TIMESTEP`（默认 `"moss"`） |
-| **时间步重心 (`TIMESTEP_MU`)** | 偏置采样区间；`moss` 下正数偏细节、`logit_normal` 下负数偏细节（符号相反），`uniform` 不使用 | `moss`: `-1.09` 画风 / `0.35` 角色 | `--timestep_mu`（默认 `-1.09`） | `--timestep_mu` / `TIMESTEP_MU`（默认 `-1.09`） |
-| **基础学习率** | 优化器基础学习速率 | `6e-5 ~ 1.5e-4` | `--lr`（默认 `1e-4`） | `--lr` / `LR`（默认 `"1e-4"`） |
+| **时间步重心 (`TIMESTEP_MU`)** | 偏置采样区间；`moss` 下正数偏细节、`logit_normal` 下负数偏细节（符号相反），`uniform` 不使用 | `moss`: `-0.85` 画风 / `-0.30` LoKr / `0.35` 角色 | `--timestep_mu`（默认 `-1.09`） | `--timestep_mu` / `TIMESTEP_MU`（默认 `-1.09`） |
+| **基础学习率** | 优化器基础学习速率 | `8e-5 ~ 2.5e-4` | `--lr`（默认 `1e-4`） | `--lr` / `LR`（默认 `"1e-4"`） |
 
 ### 1.3 低秩适配器架构、防过拟合与数据增强
 
@@ -68,7 +68,7 @@
 | **训练目标分辨率** | 动态分桶像素面积基准 (`TARGET_AREA = resolution^2`)；`896` 对应 `3136` 视觉 Token，可在 `8192` 下打包 2 图/步 | `1024` / `896` / `768` / `512` | `--resolution`（默认 `1024`） | `--resolution` / `RESOLUTION`（默认 `1024`） |
 | **计算精度** | 主训练张量精度（无原生 BF16 显卡自动回退 FP16，非 Heal 自动开启 `FP16_FIX="online"` 与 `FP16_FIX_KWARGS={"c": 1/16}`） | 本地 `bf16`/`fp16`；云端增设 `auto` | `--precision`（默认 `"bf16"`） | `--precision` / `PRECISION`（默认 `"auto"`） |
 | **Triton 内核调优 (`TUNE`)** | 控制 Triton 矩阵乘法内核自动调优缓存模式（`table` 首次慢但长训更快） | `off` / `table` | `--tune`（默认 `"off"`） | `--tune` / `TUNE`（默认 `"off"`） |
-| **超长样本策略 (`OVERLONG`)** | 当单图视觉 + `.txt` 总 Token 超出 `MAX_TOKENS` 时的处理策略 | `drop_tokens`（仅截断超限文本保留图像）/ `drop` | `--overlong`（默认 `"drop_tokens"`） | `--overlong` / `OVERLONG`（默认 `"drop_tokens"`） |
+| **超长样本策略 (`OVERLONG`)** | 当单图视觉 + `.txt` 总 Token 超出 `MAX_TOKENS` 时的处理策略 | `drop_tokens`（保留全部文本并随机丢弃多余图像 Patch；6g/8g 长文本推荐配 `--resolution 896`）/ `drop` | `--overlong`（默认 `"drop_tokens"`） | `--overlong` / `OVERLONG`（默认 `"drop_tokens"`） |
 | **文本提取设备** | Qwen3.5-9B 离线文本特征提取宿主设备 | 本地 `cpu`/`cuda`；云端 `auto`/`cuda`/`cpu` | `--text_device`（默认 `"cpu"`） | `--text_device` / `TEXT_DEVICE`（默认 `"auto"`） |
 | **VAE 提取设备** | FLUX.2 VAE 潜空间压缩设备 | `cuda` / `cpu` | `--vae_device`（默认 `"cuda"`） | `--vae_device` / `VAE_DEVICE`（默认 `"cuda"`） |
 | **云端 GPU 数量** | 控制并发训练使用的 CUDA 设备数（检测到 T4 x2 且在 Linux 下默认 `2`） | `auto` / `1` / `2` | — | `--gpus` / `GPUS`（默认 `"auto"`） |

@@ -21,8 +21,11 @@ from .config_store import (
 from .presets import (
     ADVANCED_DEFAULTS,
     CLOUD_T4X2_OVERRIDES,
+    DEFAULT_LEGACY_TRIGGERS,
+    DEFAULT_PLACEHOLDER_LORA_NAMES,
     PRESETS,
     get_preset_by_id,
+    recommend_min_steps,
     recommend_save_every_and_ema,
     resolve_preset_for_target,
 )
@@ -94,6 +97,9 @@ __all__ = [
     "resolve_max_tokens_budget",
     "compute_exposure_summary",
     "get_preset_by_id",
+    "DEFAULT_PLACEHOLDER_LORA_NAMES",
+    "DEFAULT_LEGACY_TRIGGERS",
+    "recommend_min_steps",
     "resolve_preset_for_target",
     "recommend_save_every_and_ema",
     "validate_training_params",

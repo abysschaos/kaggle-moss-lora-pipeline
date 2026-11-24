@@ -233,8 +233,8 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
     ent_ext_url.bind("<KeyRelease>", lambda _e: app.refresh_cloud_sync_summary())
     HoverTooltip(
         ent_ext_url,
-        "可留空自动生成，或手动粘贴外部图集 .zip 直链（支持 | 分隔多镜像）。\n"
-        "自动上传按 temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org 顺序选取 3 条可用线路容灾。",
+        "可留空自动生成，或手动粘贴外部图集 .zip 直链（兼容 | 分隔多镜像）。\n"
+        "自动上传按 temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org 顺序尝试，成功上传 1 站即止（失败自动顺延下一站）。",
     )
     FlatButton(
         app.cloud_url_frame,
@@ -249,8 +249,8 @@ def build_cloud_tab(parent, app) -> ScrollableFrame:
 
     url_hint_lbl = tk.Label(
         app.cloud_url_frame,
-        text="💡 可留空：点【📤 1. 仅打包图集上传外链】或【🚀 一键全自动】自动打包上传至 5 站容灾节点"
-             "（temp.sh / filebin.net / whalebone / trystocare / tmpfiles），Kaggle 开机 curl 直拉进 /tmp/，免建 Kaggle 数据集。",
+        text="💡 可留空：点【📤 1. 仅打包图集上传外链】或【🚀 一键全自动】按序尝试 5 站候选节点"
+             "（temp.sh / filebin.net / whalebone / trystocare / tmpfiles），成功 1 站即完成（失败自动顺延），Kaggle 开机 curl 直拉进 /tmp/。",
         bg=c["card_bg"],
         fg=c["text_sub"],
         font=(c["font_family"], 8),

@@ -314,12 +314,12 @@ def build_train_tab(parent, app) -> ScrollableFrame:
 
     cb_algo = _add_labeled_combo(
         hp_grid, 3, 0, "微调算法 (Algo):", app.var_algo, ["lora", "loha", "lokr"],
-        tip="通用选 lora；高密度/复杂多风格可试 loha；追求极小产物文件且保留精细笔触可选 lokr。",
+        tip="通用选 lora；高密度多风格可试 loha；追求满秩细腻笔触且控制体积约 36MB 推荐 lokr（配 Full Matrix + Factor=16）。",
     )
-    cb_algo.bind("<<ComboboxSelected>>", lambda _e: app.on_dynamic_controls_changed())
+    cb_algo.bind("<<ComboboxSelected>>", lambda _e: (app.on_dynamic_controls_changed(), app.recalculate_math()))
     _add_labeled_entry(
         hp_grid, 3, 2, "LoRA Rank (维度秩):", app.var_rank,
-        tip="单画风/单人角色通常 16~32；多人物或多画风混合建议 48。",
+        tip="单人角色推荐 24（稀缺小图集防过拟合选 16 + Alpha=8.0）；单画风/概念选 32；多人物或多画风混合建议 48。",
     )
 
     _add_labeled_entry(
@@ -349,8 +349,10 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     )
 
     _add_labeled_combo(
-        hp_grid, 6, 0, "学习率 (LR):", app.var_lr, ["1e-4", "1.2e-4", "1.3e-4", "8e-5", "6e-5", "1.5e-4", "1.8e-4", "2e-4"], state="normal",
-        tip="画风常用 1e-4（双卡 T4 推荐 1.2e-4 / LoKr 1.8e-4 / Muon 1.3e-4）；人物五官常用 6e-5~8e-5（双卡 T4 推荐 1e-4）。",
+        hp_grid, 6, 0, "学习率 (LR):", app.var_lr,
+        ["8e-5", "1e-4", "1.2e-4", "1.3e-4", "1.5e-4", "2e-4", "2.5e-4", "6e-5"],
+        state="normal",
+        tip="人物/防过拟合常用 8e-5（双卡 T4 1e-4）；标准画风/概念 1e-4（双卡 T4 1.2e-4 / Muon 1.3e-4）；满秩 LoKr 推荐 2e-4（双卡 T4 2.5e-4）。",
     )
     ent_rep = _add_labeled_entry(
         hp_grid, 6, 2, "每图重复 (Repeats):", app.var_repeats,
@@ -376,8 +378,10 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     cb_acc.bind("<KeyRelease>", lambda _e: app.recalculate_math())
 
     app.cb_mu = _add_labeled_combo(
-        hp_grid, 8, 2, "时间步重心 (Mu):", app.var_timestep_mu, ["-1.09", "-0.60", "0.0", "0.35", "0.50"], state="normal",
-        tip="官方 moss 模式下：-1.09 偏高噪画风；0.0 对称；0.35~0.50 专攻低噪面部五官与服饰细节（注：logit_normal 模式正负号相反）。",
+        hp_grid, 8, 2, "时间步重心 (Mu):", app.var_timestep_mu,
+        ["-1.09", "-0.85", "-0.60", "-0.30", "0.0", "0.35", "0.50"],
+        state="normal",
+        tip="官方 moss 模式下：-0.85 标准画风；-0.60 多画风；-0.30 满秩 LoKr 精细笔触/像素硬边；0.0 对称概念；0.35~0.50 面部五官与服饰细节（logit_normal 符号相反）。",
     )
     app.cb_mu.bind("<<ComboboxSelected>>", lambda _e: app.recalculate_math())
     app.cb_mu.bind("<KeyRelease>", lambda _e: app.recalculate_math())
@@ -513,7 +517,7 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     )
     app.lbl_dora_drop_lock.pack(side=tk.LEFT, padx=(0, 10))
     tk.Label(drop_row, text="TextDrop (无字丢弃):", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
-    ttk.Combobox(drop_row, textvariable=app.var_text_drop, values=["0.0", "0.05", "0.1", "0.15", "0.2"], width=6).pack(side=tk.LEFT, padx=(3, 0))
+    ttk.Combobox(drop_row, textvariable=app.var_text_drop, values=["0.0", "0.02", "0.05", "0.1", "0.15", "0.2"], width=6).pack(side=tk.LEFT, padx=(3, 0))
 
     # 优化器与学习率调度行 1
     opt_row1 = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])

@@ -680,6 +680,11 @@ class ModernLocalTrainerGUI:
         target_compute = (self.var_target_compute.get() or "local").strip().lower()
         resolved_vals, cloud_notes = resolve_preset_for_target(preset_id, target_compute)
 
+        from core.presets import DEFAULT_LEGACY_TRIGGERS, DEFAULT_PLACEHOLDER_LORA_NAMES
+
+        cur_lora_name = (self.var_lora_name.get() or "").strip()
+        cur_trigger = (self.var_trigger.get() or "").strip()
+
         var_map = {
             "repeats": self.var_repeats,
             "epochs": self.var_epochs,
@@ -704,9 +709,14 @@ class ModernLocalTrainerGUI:
             "text_drop": self.var_text_drop,
             "ema": self.var_ema,
             "optimizer": self.var_optimizer,
+            "weight_decay": self.var_weight_decay,
             "timestep": self.var_timestep,
         }
         for key, val in resolved_vals.items():
+            if key == "lora_name" and cur_lora_name not in DEFAULT_PLACEHOLDER_LORA_NAMES:
+                continue
+            if key == "trigger_word" and cur_trigger not in DEFAULT_LEGACY_TRIGGERS:
+                continue
             if key in var_map:
                 var_map[key].set(val)
 
@@ -1467,6 +1477,7 @@ class ModernLocalTrainerGUI:
             active_gpus=active_gpus,
             max_tokens_override=tok_budget,
             img_count_override=self._resolve_manual_img_override(),
+            algo=self.var_algo.get(),
         )
 
     def _apply_target_save_and_ema(self, target_compute: str, preset_id: str = None) -> list:
@@ -1568,16 +1579,19 @@ class ModernLocalTrainerGUI:
 
             manual_used = self._resolve_manual_img_override() > 0
             cnt_note = f"(预估{img_count}图)" if manual_used else f"{img_count}图"
+            import math as _math
+            raw_formula = _math.ceil(total_exp / max(1, eff_batch)) if total_exp > 0 else 1
+            floor_tag = f" [含防欠拟合保底，原始公式 {raw_formula} 步]" if (img_count > 0 and rec > raw_formula) else ""
             if is_multi:
                 enabled_cnt = sum(1 for s in self.subsets if s.get("enabled", True))
                 base_msg = (
                     f"📊 [{short_badge} | MAX_TOKENS={tok_desc}] ({enabled_cnt}子集/{img_count}图) 单轮{factor}曝光 × {ep}Epochs = {total_exp}\n"
-                    f"📦 单步等效 Batch = {batch_expr} → 建议 Max Steps ≈ {rec} 步 ({mu_hint})"
+                    f"📦 单步等效 Batch = {batch_expr} → 建议 Max Steps ≈ {rec} 步{floor_tag} ({mu_hint})"
                 )
             else:
                 base_msg = (
                     f"📊 [{short_badge} | MAX_TOKENS={tok_desc}] {cnt_note} × {factor}Repeats × {ep}Epochs = {total_exp}次总曝光\n"
-                    f"📦 单步等效 Batch = {batch_expr} → 建议 Max Steps ≈ {rec} 步 ({mu_hint})"
+                    f"📦 单步等效 Batch = {batch_expr} → 建议 Max Steps ≈ {rec} 步{floor_tag} ({mu_hint})"
                 )
 
             warn_color = self.accent_green
@@ -1638,13 +1652,20 @@ class ModernLocalTrainerGUI:
 
     def align_steps_by_formula(self, silent: bool = False):
         try:
-            _, _, _, _, total_exp, rec, eff_batch, _, _, _, _ = self._compute_math_summary()
+            import math as _math
+            _, img_count, _, _, total_exp, rec, eff_batch, _, _, _, _ = self._compute_math_summary()
             self.var_steps.set(str(rec))
             if not silent:
+                raw_formula = _math.ceil(total_exp / max(1, eff_batch)) if total_exp > 0 else 1
+                floor_note = (
+                    f"\n（注：原始公式仅 {raw_formula} 步，已触发防欠拟合安全下限保底至 {rec} 步）"
+                    if (img_count > 0 and rec > raw_formula)
+                    else ""
+                )
                 messagebox.showinfo(
                     "📐 步数对齐成功",
                     f"总曝光 {total_exp} 次 ÷ 等效 Batch {eff_batch} 图/步\n"
-                    f"已自动将【总步数 (Max Steps)】设为 {rec} 步。",
+                    f"已自动将【总步数 (Max Steps)】设为 {rec} 步。{floor_note}",
                 )
         except Exception as err:
             if not silent:
@@ -2109,8 +2130,8 @@ class ModernLocalTrainerGUI:
         self._run_cloud_worker("⏳ 正在安装官方 Kaggle CLI...", _worker)
 
     def _upload_external_step(self, raw_params: dict, ds_slug: str, log_cb) -> tuple:
-        """打包本地图集并上传 5 站外链中转矩阵，成功后在 UI 线程回填直链并持久化配置。"""
-        log_cb("\n[云端流水线 · 5站外链中转] 正在打包本地图集并上传多线路外链中转站...\n")
+        """打包本地图集并按序上传至 5 站候选外链（成功 1 站即止，失败自动顺延），成功后回填直链并持久化配置。"""
+        log_cb("\n[云端流水线 · 外链中转] 正在打包本地图集并按序上传候选外链站（成功 1 站即止）...\n")
         ok, url_or_err, stats = upload_external_dataset(raw_params, dataset_slug=ds_slug, on_log=log_cb)
         if ok:
             def _save_url():
@@ -2243,23 +2264,29 @@ class ModernLocalTrainerGUI:
                 log_cb = lambda s: self._enqueue_ui(lambda txt=s: self.monitor.log(txt))
                 ok, url_or_err, stats = self._upload_external_step(raw_params, ds_slug, log_cb)
                 if ok:
+                    mirrors_ok = stats.get("mirrors", [])
+                    host_desc = (
+                        f"站 [{mirrors_ok[0].get('host', '外链')}]"
+                        if len(mirrors_ok) == 1
+                        else f"至 {len(mirrors_ok)} 条外链中转站"
+                    )
                     self._enqueue_ui(
                         lambda: self.var_cloud_job_status.set(
                             "✅ 外链图集已上传并回填（下一步可点【2️⃣ 仅推送参数开炼】）"
                         )
                     )
                     self._enqueue_ui(
-                        lambda u=url_or_err, st=stats: messagebox.showinfo(
+                        lambda u=url_or_err, st=stats, hd=host_desc: messagebox.showinfo(
                             "🔗 外链图集上传成功",
                             f"已打包 {st['images']} 张图 / {st['captions']} 份标注（{st['zip_mb']} MB），\n"
-                            f"并已上传至 {len(st.get('mirrors', []))} 条外链中转站：\n\n{u}",
+                            f"并已成功上传{hd}：\n\n{u}",
                         )
                     )
                 else:
                     self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 外链图集上传失败，请查看控制台报错"))
                     self._enqueue_ui(lambda m=url_or_err: messagebox.showerror("外链上传失败", m))
 
-            self._run_cloud_worker("⏳ 正在打包并上传图集至 5 站外链中转站...", _url_worker)
+            self._run_cloud_worker("⏳ 正在打包并上传图集至外链中转站（成功 1 站即止）...", _url_worker)
             return
 
         ident = self._resolve_kaggle_identity(require_creds=True)
@@ -2306,11 +2333,16 @@ class ModernLocalTrainerGUI:
         ga1_batch = imgs_per_pack * 2
         cur_steps = max(1, int(cleaned.get("steps", 1)))
 
+        import math as _math
+        from core.presets import recommend_min_steps
+
         _, img_count, _, _, total_exp, _, _, _, _, _, _ = self._compute_math_summary(target_override="kaggle_t4x2")
-        rec_ga1 = max(1, total_exp // ga1_batch) if img_count > 0 else 0
+        floor_steps = recommend_min_steps(algo=str(cleaned.get("algo", "lora")), multi_subset=bool(self.var_multi_subset.get()))
+        rec_ga1 = max(floor_steps, _math.ceil(total_exp / ga1_batch)) if img_count > 0 else 0
+        baseline_exp = max(total_exp, rec_ga1 * ga1_batch)
 
         high_ga = cur_ga >= 2 and cur_batch >= 8
-        over_exposed = img_count > 0 and (cur_steps * cur_batch >= total_exp * 1.8)
+        over_exposed = img_count > 0 and (cur_steps * cur_batch >= baseline_exp * 1.8)
         if not (high_ga or over_exposed):
             return True
 
@@ -2577,21 +2609,36 @@ class ModernLocalTrainerGUI:
         if src == "url":
             ext_stats = None
             if ctx["has_local"]:
-                log_cb(f"\n{'='*70}\n🔗 [一键 5 站外链直拉流水线] 1/2 打包图集并上传多线路外链中转站（免 Kaggle 审核）\n")
+                log_cb(f"\n{'='*70}\n🔗 [一键外链直拉流水线] 1/2 打包图集并按序上传候选外链（成功 1 站即止，免 Kaggle 审核）\n")
                 ok_ext, url_or_err, ext_stats = self._upload_external_step(raw_params, ds_slug, log_cb)
                 if not ok_ext:
                     self._enqueue_ui(lambda: self.var_cloud_job_status.set("🔴 第一步上传外链失败，已中止推送"))
                     self._enqueue_ui(lambda m=url_or_err: messagebox.showerror("外链上传失败", m))
                     return False, {}
                 cloud_opts["dataset_url"] = url_or_err
-            mirror_cnt = len(cloud_opts.get("dataset_url", "").split("|"))
-            summary_txt = (
-                f"已将 {ext_stats['images']} 张图上传至 {mirror_cnt} 条外链容灾镜像，并推送无数据集挂载（dataset_sources=[]）训练任务！"
-                if ext_stats
-                else f"已注入外链直拉地址（{mirror_cnt} 条镜像）并推送任务！"
+            url_parts = [u.strip() for u in cloud_opts.get("dataset_url", "").split("|") if u.strip()]
+            mirror_cnt = len(url_parts)
+            mirrors_list = (ext_stats or {}).get("mirrors", [])
+            host_tag = (
+                mirrors_list[0].get("host", "外链直拉")
+                if len(mirrors_list) == 1
+                else f"{mirror_cnt}条镜像"
             )
+            if ext_stats:
+                summary_txt = (
+                    f"已将 {ext_stats['images']} 张图上传至 [{host_tag}]，并推送无数据集挂载（dataset_sources=[]）训练任务！"
+                    if mirror_cnt == 1
+                    else f"已将 {ext_stats['images']} 张图上传至 {mirror_cnt} 条外链镜像，并推送无数据集挂载（dataset_sources=[]）训练任务！"
+                )
+            else:
+                summary_txt = (
+                    "已注入外链直拉地址并推送任务！"
+                    if mirror_cnt == 1
+                    else f"已注入外链直拉地址（{mirror_cnt} 条镜像）并推送任务！"
+                )
+            note_desc = host_tag if mirror_cnt == 1 else f"{mirror_cnt}条镜像"
             return True, {
-                "src_note": f"🔗 5站外链直拉 ({mirror_cnt}条镜像, dataset_sources=[])",
+                "src_note": f"🔗 外链直拉 ({note_desc}, dataset_sources=[])",
                 "queued_prefix": "🟡 外链直拉训练已排队：",
                 "success_title": "🚀 外链直拉云端部署成功！",
                 "success_summary": summary_txt,
@@ -2646,7 +2693,7 @@ class ModernLocalTrainerGUI:
         title_map = {
             "hf": f"⏳ 正在执行 HF 私有仓流水线 ({ctx['cloud_opts'].get('hf_dataset_repo', '')})...",
             "r2": "⏳ 正在执行 Cloudflare R2 私有上传 + 推云端...",
-            "url": "⏳ 正在执行 5 站外链中转 + 推云端直拉开炼...",
+            "url": "⏳ 正在执行外链中转（成功 1 站即止）+ 推云端直拉开炼...",
             "local": "⏳ 全自动流水线执行中：传图集 + 推云端...",
         }
         self._run_cloud_worker(title_map.get(ctx["src"], title_map["local"]), _worker)

@@ -16,6 +16,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
 
+## [1.8.5] - 2026-11-25
+
+### Changed
+- **八大黄金超参数预设矩阵源码级调优升级（[`core/presets.py`](core/presets.py) / [`ui/tab_train.py`](ui/tab_train.py)）**：
+  - **`lokr_style`（LoKr 高还原画风）**：对齐上游 `KohakuMossTrainer/configs/moss/quality/quality_lokr16.py` 与 `algo_lokr.py`，由旧版三矩阵低秩压缩（`full_matrix=False, factor=8, lr=1.5e-4, mu=-1.09`）升级为满秩 Kronecker 乘积（`lokr_full_matrix=True, lokr_factor=16`），学习率上调至 `2e-4`（Kaggle 双卡 T4 DDP 派生 `2.5e-4`），时间步重心调整至 `moss (mu=-0.30)` 兼顾宏观色温与锐利笔触/像素硬边；
+  - **`antifit_char`（稀缺小图集防过拟合）**：对齐上游 `algo_dora.py`，由高秩配五重阻尼导致的严重欠拟合（`Rank=32/32.0 + LR=6e-5 + TextDrop=0.1 + EMA=0.99`）重构为半秩物理阻尼（`DoRA + Rank=16 / Alpha=8.0`），优化为 `Repeats=8 / Epochs=4`、`LoRA+=1.5`、`LR=8e-5`（双卡 T4 `1e-4`）、`RankDrop=0.05 / ModDrop=0.05` 与 `TextDrop=0.02`；
+  - **其余 6 套预设精细校准**：`style` 升级为 `Repeats=4/Epochs=6, mu=-0.85` 补足低噪笔触覆盖；`character` 收敛为 `Rank=24/24.0, Repeats=7/Epochs=4, TextDrop=0.02` 防高秩死记背景；`multi_char` 将 `TextDrop` 压低至 `0.02` 保护多角色独立触发词；`concept` 调整为 `Repeats=6/Epochs=4`；`muon_style` 校准为 `Repeats=4/Epochs=5, WeightDecay=0.02, mu=-0.85` 并在界面明确标注 `>=12GB VRAM / 云端 T4` 硬件门槛；全部 8 套预设默认 `EMA=0.0` 且默认 `trigger_word=""`，彻底移除硬编码的 `"in the style of my_art_style"` 等假触发词污染。
+  - **5 站临时外链上传改为单站成功即止（[`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`ui/tab_cloud.py`](ui/tab_cloud.py) / [`ui/app.py`](ui/app.py) / [`tests/test_external_url_flow.py`](tests/test_external_url_flow.py)）**：`upload_zip_to_external_mirrors()` 与 `upload_external_dataset()` 默认 `max_mirrors` 由 `3` 调整为 `1`，按序尝试 5 个免登录候选站并在首站成功后即刻停止，仅在当前站点失败时记录提示并自动顺延下一站；同时保留 `train_moss.py` 对手动 `|` 多镜像的完整兼容。
+
+### Added
+- **防欠拟合最低优化步数安全下限（[`core/presets.py`](core/presets.py) / [`core/config_store.py`](core/config_store.py) / [`ui/app.py`](ui/app.py)）**：
+  - 新增 `recommend_min_steps()` 与 `compute_exposure_summary()` 步数保底（单图集 `>=180` 步、LoKr `>=200` 步、多子集 `>=240` 步），采用精确向上取整 `math.ceil` 并跳过已禁用子集，防止 10~25 张小图集在 Dual-T4 DDP（`4 图/步`）下跌落至百步以内引发欠拟合，同时同步校准 `_confirm_cloud_batch_sanity()` 防误报过曝；
+- **真实 EMA 平滑权重导出闭环（[`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py)）**：
+  - 修复上游 `entry.py` 仅将 `built.trainable` 原始权重导出为 `-comfy/-lycoris.safetensors` 而忽略 `parts.ema` 缓冲区的缺口；在兼容补丁中幂等注入 `MOSS_PIPELINE_PATCH_EMA_EXPORT` 钩子，当手动启用 `--ema > 0` 时零重加载即时导出 `<lora_name>-ema<decay>-comfy.safetensors` 与 `-lycoris.safetensors` 并原样回滚在训张量，同时在 `export_and_sync_weights` 中隔离归档原始权重与 EMA 权重；
+- **新增预设、算步与导出单元测试套件（[`tests/test_presets_and_math.py`](tests/test_presets_and_math.py)）**：覆盖 8 套预设本地/双卡校验、云端 `--dry_config_check`、小图集双卡步数保底、自定义 `lora_name`/`trigger_word` 防覆盖、EMA 补丁幂等与满秩 LoKr 文件头嗅探。
+
+### Fixed
+- **预设切换保留自定义项目名与触发词（[`ui/app.py`](ui/app.py)）**：`apply_preset()` 补充 `weight_decay` 映射，且仅当 `lora_name` 或 `trigger_word` 仍处于系统默认占位符集合时才替换，彻底解决切换预设时覆盖用户已填好的自定义名称与触发词的问题；
+- **满秩 LoKr 架构头嗅探与 `init_from` 可训练权重优先匹配（[`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py)）**：`inspect_safetensors_adapter()` 支持解析 `ss_network_args` 及全秩 Kronecker 张量形状，`prepare_init_from_checkpoint()` 自动优先匹配同目录 `-trainable.safetensors`，保障满秩 LoKr 二阶段续炼与架构回填准确无误；
+- **修正 `OVERLONG="drop_tokens"` 体检与文档口径（[`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py) / [`notebooks/kaggle_moss_lora_training.ipynb`](notebooks/kaggle_moss_lora_training.ipynb) / `docs/*.md`）**：严格对齐上游 `docs/concepts/data.md`，阐明 `drop_tokens` 会完整保留文本 Token 并随机丢弃超限图像 Patch Token，引导 6G/8G 长文本训练切换 `--resolution 896`。
+
 ## [1.8.4] - 2026-11-23
 
 ### Fixed & Improved
@@ -300,7 +321,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.4...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.5...HEAD
+[1.8.5]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.4...v1.8.5
 [1.8.4]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.3...v1.8.4
 [1.8.3]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.2...v1.8.3
 [1.8.2]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.1...v1.8.2

@@ -49,7 +49,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.8.4"
+    return "1.8.5"
 
 
 APP_VERSION = _load_app_version()
@@ -392,6 +392,55 @@ def apply_compatibility_patches(trainer_dir: Path):
         except Exception as e:
             print(f" Warning patching native.py: {e}")
 
+    # 5. 为 entry.py 注入 EMA 真实平滑权重导出钩子（上游默认仅导出 raw trainable，开启 EMA>0 时同步产出 -ema*-comfy/-lycoris）
+    entry_file = trainer_dir / "src" / "kohakumoss" / "training" / "entry.py"
+    if entry_file.exists():
+        try:
+            content = entry_file.read_text(encoding="utf-8")
+            if "MOSS_PIPELINE_PATCH_EMA_EXPORT" not in content:
+                target_export_block = (
+                    '            try:\n'
+                    '                for path in export(k, built, root, meta):\n'
+                    '                    log.info(f"exported {path}")\n'
+                    '            except OSError as err:\n'
+                    '                log.error(f"export of step {step} into {root} failed: {err}")'
+                )
+                ema_export_block = (
+                    '            try:\n'
+                    '                for path in export(k, built, root, meta):\n'
+                    '                    log.info(f"exported {path}")\n'
+                    '                # [MOSS_PIPELINE_PATCH_EMA_EXPORT]\n'
+                    '                _ema_obj = getattr(parts, "ema", None)\n'
+                    '                _ema_tags = tuple(getattr(_ema_obj, "tags", ()) or ())\n'
+                    '                if _ema_tags and k.get("ALGO") != "full":\n'
+                    '                    from kohakumoss.training.exports import write_exports as _write_exports\n'
+                    '                    _named_p = list(built.trainable.named_trainable())\n'
+                    '                    for _etag in _ema_tags:\n'
+                    '                        _avg = _ema_obj.averaged(_etag)\n'
+                    '                        if _avg and len(_avg) == len(_named_p) and all(_n in _avg for _n, _ in _named_p):\n'
+                    '                            with torch.no_grad():\n'
+                    '                                _bak = [_p.detach().clone() for _, _p in _named_p]\n'
+                    '                                try:\n'
+                    '                                    for _n, _p in _named_p:\n'
+                    '                                        _p.copy_(_avg[_n].to(device=_p.device, dtype=_p.dtype))\n'
+                    '                                    _efiles = export_files(k, fused_qkv(k))\n'
+                    '                                    _emeta = {**meta, "kohakumoss_ema": str(_etag)}\n'
+                    '                                    for _epath in _write_exports(_efiles, built.trainable, built.backbone, root, f"{run_name(k)}-{_etag}", _emeta):\n'
+                    '                                        log.info(f"exported EMA ({_etag}) {_epath}")\n'
+                    '                                finally:\n'
+                    '                                    for (_, _p), _orig in zip(_named_p, _bak):\n'
+                    '                                        _p.copy_(_orig)\n'
+                    '            except OSError as err:\n'
+                    '                log.error(f"export of step {step} into {root} failed: {err}")'
+                )
+                if target_export_block in content:
+                    patched_entry = content.replace(target_export_block, ema_export_block, 1)
+                    compile(patched_entry, str(entry_file), "exec")
+                    entry_file.write_text(patched_entry, encoding="utf-8")
+                    print(" [OK] Injected real EMA adapter export hook into training/entry.py.")
+        except Exception as e:
+            print(f" Warning patching entry.py for EMA export: {e}")
+
 
 def inspect_safetensors_lora(sf_path: Path) -> dict:
     """秒级解析 .safetensors 文件头，提取 Rank(Dim)、Alpha、算法、LoKr 因子、Norms、DoRA、步数与键数量（零显存占用）。"""
@@ -461,8 +510,24 @@ def inspect_safetensors_lora(sf_path: Path) -> dict:
                         info["lokr_decompose_both"] = bool(akw["decompose_both"])
             except Exception:
                 pass
+        if "ss_network_args" in meta:
+            try:
+                net_args = json.loads(meta["ss_network_args"])
+                if isinstance(net_args, dict):
+                    if net_args.get("algo") and info["algo"] == "lora":
+                        info["algo"] = str(net_args["algo"]).lower()
+                    if info["lokr_factor"] is None and "factor" in net_args:
+                        info["lokr_factor"] = int(net_args["factor"])
+                    if info["lokr_full_matrix"] is None and "full_matrix" in net_args:
+                        info["lokr_full_matrix"] = bool(net_args["full_matrix"])
+                    if info["lokr_decompose_both"] is None and "decompose_both" in net_args:
+                        info["lokr_decompose_both"] = bool(net_args["decompose_both"])
+                    if "weight_decompose" in net_args:
+                        info["dora"] = bool(net_args["weight_decompose"])
+            except Exception:
+                pass
 
-        # 2. 从张量命名与形状兜底推断算法、DoRA 与真实 Rank
+        # 2. 从张量命名与形状兜底推断算法、DoRA、LoKr 满秩/因子与真实 Rank
         if any(k.endswith(".dora_scale") for k in tensor_keys):
             info["dora"] = True
         if info["algo"] == "lora":
@@ -471,6 +536,18 @@ def inspect_safetensors_lora(sf_path: Path) -> dict:
             elif any(".lokr_w" in k for k in tensor_keys):
                 info["algo"] = "lokr"
 
+        if info["algo"] == "lokr":
+            if info["lokr_full_matrix"] is None:
+                if any(k.endswith(".lokr_w2") for k in tensor_keys) and not any(k.endswith(".lokr_w2_b") for k in tensor_keys):
+                    info["lokr_full_matrix"] = True
+            if info["lokr_factor"] is None:
+                for k in tensor_keys:
+                    if k.endswith(".lokr_w1"):
+                        w1_shape = header[k].get("shape", [])
+                        if len(w1_shape) >= 2:
+                            info["lokr_factor"] = int(max(w1_shape[0], w1_shape[1]))
+                            break
+
         if info["rank"] is None:
             for k in tensor_keys:
                 if k.endswith(".lora_down.weight") or k.endswith(".hada_w1_b") or k.endswith(".lokr_w2_b"):
@@ -478,6 +555,16 @@ def inspect_safetensors_lora(sf_path: Path) -> dict:
                     if len(shape) >= 2:
                         info["rank"] = int(shape[0])
                         break
+            if info["rank"] is None and info["algo"] == "lokr" and any(k.endswith(".lokr_w2") for k in tensor_keys):
+                info["lokr_full_matrix"] = True
+                info["rank"] = 32
+                info["alpha"] = 1.0
+                for k in tensor_keys:
+                    if k.endswith(".lokr_w1"):
+                        w1_shape = header[k].get("shape", [])
+                        if len(w1_shape) >= 2:
+                            info["lokr_factor"] = int(max(w1_shape[0], w1_shape[1]))
+                            break
         if info["alpha"] is None and info["rank"] is not None:
             info["alpha"] = float(info["rank"])
     except Exception as e:
@@ -534,16 +621,28 @@ def prepare_init_from_checkpoint(source_path_str: str, workspace_dir: Path, lora
     if source_path_str and os.path.exists(source_path_str):
         sp = Path(source_path_str).resolve()
         if sp.is_file() and sp.suffix.lower() == ".safetensors":
+            # 若用户手动点选了同目录下的 -comfy/-lycoris 导出件，优先自动切换到旁边的原生 -trainable.safetensors 以严格匹配 INIT_FROM 键名
             chosen_sf = sp
+            low_sp = sp.name.lower()
+            for suf in ("-comfy.safetensors", "-lycoris.safetensors"):
+                if low_sp.endswith(suf):
+                    sib = sp.with_name(sp.name[: -len(suf)] + "-trainable.safetensors")
+                    if sib.is_file() and sib.stat().st_size > 0:
+                        chosen_sf = sib
+                    break
         elif sp.is_dir():
             if (sp / "trainable.safetensors").exists():
                 chosen_sf = sp / "trainable.safetensors"
             else:
-                sfs = sorted(sp.glob("*.safetensors"), key=lambda x: x.stat().st_mtime, reverse=True)
+                sfs = sorted(
+                    sp.glob("*.safetensors"),
+                    key=lambda x: (1 if x.name.lower().endswith("-trainable.safetensors") else 0, x.stat().st_mtime),
+                    reverse=True,
+                )
                 if sfs:
                     chosen_sf = sfs[0]
     else:
-        # 自动从 output/<lora_name> 或 runs/moss/<lora_name> 检索已训好的最新权重
+        # 自动从 output/<lora_name> 或 runs/moss/<lora_name> 检索已训好的最新权重（优先 trainable 状态文件）
         auto_candidates = []
         out_folder = base_output_dir / lora_name
         if out_folder.exists():
@@ -556,7 +655,13 @@ def prepare_init_from_checkpoint(source_path_str: str, workspace_dir: Path, lora
             if "moss_image" not in f.name.lower() and "qwen" not in f.name.lower() and "flux2" not in f.name.lower()
         ]
         if auto_candidates:
-            auto_candidates.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+            auto_candidates.sort(
+                key=lambda x: (
+                    2 if x.name.lower() == "trainable.safetensors" or x.name.lower().endswith("-trainable.safetensors") else 0,
+                    x.stat().st_mtime,
+                ),
+                reverse=True,
+            )
             chosen_sf = auto_candidates[0]
 
     if not chosen_sf or not chosen_sf.exists():
@@ -624,11 +729,15 @@ def export_and_sync_weights(
             exp_dir = step_dir / "export"
             comfy_f = None
             lyco_f = None
+            ema_exports = []
             if exp_dir.exists():
-                for sf in exp_dir.glob("*.safetensors"):
-                    if "-comfy" in sf.name.lower() or sf.stem.endswith("_comfy"):
+                for sf in sorted(exp_dir.glob("*.safetensors")):
+                    sf_low = sf.name.lower()
+                    if "-ema" in sf_low:
+                        ema_exports.append(sf)
+                    elif "-comfy" in sf_low or sf.stem.endswith("_comfy"):
                         comfy_f = sf
-                    elif "-lycoris" in sf.name.lower() or sf.stem.endswith("_lycoris"):
+                    elif "-lycoris" in sf_low or sf.stem.endswith("_lycoris"):
                         lyco_f = sf
             train_f = step_dir / "trainable.safetensors"
             if not train_f.exists():
@@ -636,7 +745,7 @@ def export_and_sync_weights(
 
             if comfy_f or lyco_f or train_f:
                 ref_f = comfy_f or lyco_f or train_f
-                step_records.append((step_num, ref_f.stat().st_mtime, comfy_f, lyco_f, train_f))
+                step_records.append((step_num, ref_f.stat().st_mtime, comfy_f, lyco_f, train_f, ema_exports))
 
                 # 同步阶段性权重到 output/<lora_name>/checkpoints/
                 ckpt_archive_dir.mkdir(parents=True, exist_ok=True)
@@ -654,25 +763,29 @@ def export_and_sync_weights(
     if final_exp_dir.exists():
         comfy_f = None
         lyco_f = None
+        ema_exports = []
         step_num = 0
-        for sf in final_exp_dir.glob("*.safetensors"):
+        for sf in sorted(final_exp_dir.glob("*.safetensors")):
             info = inspect_safetensors_lora(sf)
             if info.get("step"):
                 step_num = max(step_num, int(info["step"]))
-            if "-comfy" in sf.name.lower() or sf.stem.endswith("_comfy"):
+            sf_low = sf.name.lower()
+            if "-ema" in sf_low:
+                ema_exports.append(sf)
+            elif "-comfy" in sf_low or sf.stem.endswith("_comfy"):
                 comfy_f = sf
-            elif "-lycoris" in sf.name.lower() or sf.stem.endswith("_lycoris"):
+            elif "-lycoris" in sf_low or sf.stem.endswith("_lycoris"):
                 lyco_f = sf
-        if comfy_f or lyco_f:
-            ref_f = comfy_f or lyco_f
-            step_records.append((step_num, ref_f.stat().st_mtime, comfy_f, lyco_f, None))
+        if comfy_f or lyco_f or ema_exports:
+            ref_f = comfy_f or lyco_f or ema_exports[0]
+            step_records.append((step_num, ref_f.stat().st_mtime, comfy_f, lyco_f, None, ema_exports))
 
     if not step_records:
         return [], 0
 
     # 按 (step_num, mtime) 升序排列，取最后一个即为最新最完整的版本
     step_records.sort(key=lambda x: (x[0], x[1]))
-    latest_step, _, latest_comfy, latest_lyco, latest_trainable = step_records[-1]
+    latest_step, _, latest_comfy, latest_lyco, latest_trainable, latest_ema_exports = step_records[-1]
 
     # 如果顶层 export 没有 trainable_f，从最后一个含 trainable 的记录中取
     if latest_trainable is None:
@@ -682,11 +795,15 @@ def export_and_sync_weights(
                 break
 
     exported_files = []
-    for src_f, suffix in [
+    copy_pairs = [
         (latest_comfy, f"{lora_name}-comfy.safetensors"),
         (latest_lyco, f"{lora_name}-lycoris.safetensors"),
-        (latest_trainable, f"{lora_name}-trainable.safetensors")
-    ]:
+        (latest_trainable, f"{lora_name}-trainable.safetensors"),
+    ]
+    for ema_sf in (latest_ema_exports or []):
+        copy_pairs.append((ema_sf, ema_sf.name))
+
+    for src_f, suffix in copy_pairs:
         if src_f and src_f.exists():
             dst = lora_dedicated_folder / suffix
             if not dst.exists() or src_f.stat().st_mtime > dst.stat().st_mtime + 0.5 or src_f.stat().st_size != dst.stat().st_size:
@@ -1071,8 +1188,9 @@ def _is_suspected_tag_soup(caption_text: str) -> bool:
 def audit_dataset_directories(targets: list, max_tokens: int = 4352, resolution: int = 1024) -> dict:
     """
     训练前本地图集体检器（支持单图集与多子集）：
-    检查缺/空 .txt 标注、低于 768px 的低分辨率图、超出 ASPECT_RANGE=(0.33, 3.0) 的极端长宽比图、
-    按当前 MAX_TOKENS/分辨率预算估算会触发文本截断的超长 .txt，以及疑似纯 Danbooru 逗号堆砌标注。
+    检查缺/空 .txt 标注、低于 768px 面积的低分辨率图、超出 ASPECT_RANGE=(0.33, 3.0) 的极端长宽比图、
+    按当前 MAX_TOKENS/分辨率预算估算在 OVERLONG='drop_tokens' 下会挤占并随机丢弃图像 Patch Token 的超长 .txt，
+    以及疑似纯 Danbooru 逗号堆砌标注。
     """
     img_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
     target_area = max(256, int(resolution)) * max(256, int(resolution))
@@ -1196,9 +1314,9 @@ def audit_dataset_directories(targets: list, max_tokens: int = 4352, resolution:
         "超出引擎 ASPECT_RANGE=(0.33, 3.0) 的长图或超宽图会被过滤或裁边，建议先手动裁剪。"
     )
     _append_section(
-        f"疑似超长文本 (超出 MAX_TOKENS={max_tokens})",
+        f"疑似超长文本 (超出 MAX_TOKENS={max_tokens}，在 drop_tokens 下将随机丢弃部分图像 Patch)",
         overlong_txt,
-        "精简冗余描述，或将【训练分辨率】切到 896 / 提升显存档位至 12g/16g 释放更多文本空间。"
+        "精简冗余描述，或将【训练分辨率】切到 896 / 提升显存档位至 12g/16g 以同时保留完整文本与全部图像 Patch。"
     )
     _append_section(
         "疑似纯逗号标签堆砌 (Danbooru Tag Soup)",
@@ -1471,7 +1589,7 @@ def main():
     parser.add_argument("--tune", type=str, default="off", choices=["off", "table"],
                         help="Triton/kernel autotuner mode: off (fast start) or table (benchmark & cache best kernels)")
     parser.add_argument("--overlong", type=str, default="drop_tokens", choices=["drop_tokens", "drop"],
-                        help="Strategy when image+text tokens exceed MAX_TOKENS (default: drop_tokens to preserve long captions)")
+                        help="Strategy when image+text tokens exceed MAX_TOKENS (default: drop_tokens keeps full caption and drops excess image patches; use --resolution 896 on 6g/8g for long captions)")
     parser.add_argument("--vram_preset", type=str, default="auto", choices=["auto", "6g", "8g", "12g", "16g"],
                         help="VRAM optimization preset (auto, 6g, 8g, 12g, 16g)")
     parser.add_argument("--resolution", type=int, default=1024,

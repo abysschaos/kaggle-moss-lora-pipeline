@@ -8,18 +8,19 @@
 传统的卷积神经网络（UNet）通常采用固定的图像张数批次（如 `batch_size = 1`）。而本项目依托的 KohakuMossTrainer 采用基于连续流序列长度的自适应 Token 打包机制，并按显存档位校准 `MAX_TOKENS`：
 ```python
 BATCHING = "tokens"
-OVERLONG = "drop_tokens"  # 仅截断超限文本尾部，绝不静默丢图
-# 6g/8g -> MAX_TOKENS = 4352 | 12g -> MAX_TOKENS = 6144 | 16g -> MAX_TOKENS = 8192
+OVERLONG = "drop_tokens"  # 完整保留全部文本 Token，超出 MAX_TOKENS 时仅随机丢弃多余图像 Patch（严禁用 drop 整条丢弃）
+# 6g/8g -> MAX_TOKENS = 4352 | 12g -> MAX_TOKENS = 6144 | 16g -> MAX_TOKENS = 8192 | Dual-T4 DDP -> 9216
 ```
 在 DiT 架构中，图像潜空间视觉 Token 数约等于 `(resolution / 16)²`（例如 `1024` 为 `4096`，`896` 为 `3136`，`768` 为 `2304`），加上自然语言文本（约 `120~200` Token）即构成单样本序列长度：
-- **`1024` 分辨率**：单图约 `4256` Token，因此在 `4352 / 6144 / 8192` 下通常每包 **1 张/步**（高分辨率细节拉满）。
-- **`896` 黄金甜点分辨率**：单图仅约 `3296` Token，在 `16g (8192)` 档位下可稳定打包 **2 张/步**，兼顾精细度与双倍吞吐！
+- **`1024` 分辨率**：单图视觉即占 `4096` Token，因此在 `4352 / 6144 / 8192` 下每包 **1 张/步**（而在 Kaggle 双卡 T4 `9216` 下每卡打包 **2 张**、双卡并发 **4 张/步**）；注意 `6g/8g (4352)` 跑 `1024` 时剩余文本空间仅约 `256` Token，若标注较长会挤占图像 Patch，推荐切至 `896`。
+- **`896` 黄金甜点分辨率**：单图仅约 `3296` Token，在 `6g/8g` 下可完整保留长文本与全部图像 Patch，在 `16g (8192)` 档位下更可稳定打包 **2 张/步**！
 - **`768` 分辨率**：单图约 `2464` Token，在 `12g (6144)` 下打包 **2 张/步**，在 `16g (8192)` 下打包 **3 张/步**。
 
-### 1.2 真实有效批大小联动公式（严格消除虚假 `/ 4` 除数）
+### 1.2 真实有效批大小与防欠拟合步数保底公式
 $$\text{总图文曝光次数 (Total Exposures)} = \text{原始图片数 (Images)} \times \text{单图重复 (Repeats)} \times \text{训练轮数 (Epochs)}$$
-$$\text{等效 Batch (Effective Batch)} = \lfloor \frac{\text{MAX\_TOKENS}}{(\text{res}/16)^2 + 160} \rfloor \times \text{GRAD\_ACC}$$
-$$\text{GUI 推荐核心步数 (Steps)} = \frac{\text{总图文曝光次数}}{\max(1,\ \text{Effective Batch})}$$
+$$\text{等效 Batch (Effective Batch)} = \max\left(1,\ \left\lfloor \frac{\text{MAX\_TOKENS}}{(\text{res}/16)^2 + 160} \right\rfloor\right) \times \text{GRAD\_ACC} \times \text{Active GPUs}$$
+$$\text{GUI 推荐核心步数 (Steps)} = \max\left(\text{StepFloor},\ \left\lceil \frac{\text{总图文曝光次数}}{\text{Effective Batch}} \right\rceil\right)$$
+其中防欠拟合最低优化器更新步数 $\text{StepFloor}$ 为：**单图集 LoRA/DoRA `180` 步、满秩 LoKr `200` 步、多子集混合 `240` 步**，防止 10~25 张小图集在云端双卡 T4（4 图/步）下跌落至百步以内导致欠拟合。
 
 #### 实例推演（以默认画风工作流为例）
 - **场景**：现有 40 张画风图像，`1024px` 真实打包 1 图/包，`GradAcc=1`（真实等效 `Effective Batch = 1`），`TIMESTEP_MU=-1.09`；
@@ -104,27 +105,27 @@ $$\text{GUI 推荐核心步数 (Steps)} = \frac{\text{总图文曝光次数}}{\m
 | :--- | :--- | :--- |
 | **多子集配比 (`--subsets_json`)** | `SUBSETS_JSON` / GUI 多子集表格 | 同时炼制多位角色、多种艺术画风或互补概念时使用。强烈建议使用 GUI【⚖️ 一键配平 Repeat】按各子集图像数量反比设定 `repeats`，保证单轮中弱势少图子集的曝光占比与强势多图子集接近 1:1，并各自绑定独立触发词避免特征串味。 |
 | **DoRA 权重分解 (`--dora`)** | 勾选【启用 DoRA】 | 将权重的方向向量与幅值标量分离优化。极度适合**复杂画风细节与多人物面部五官高保真还原**。训练引擎已默认注入 `DORA_DETACH=True` 控制显存与数值稳定，在 6G~8G `int8` 底模上亦可借助引擎旁路安全运行。 |
-| **适配器算法 (`--algo`) & LoKr 全参** | `lora` / `loha` / `lokr`（含 `factor`, `full_matrix`, `decompose_both`） | `lora` 通用最稳；`loha`（Hadamard 乘积）具备更强的非线性表征容量，适合**跨风格大融合**；`lokr` 压缩比极高：`factor=8` 兼顾体积与质感，`factor=4` 或开启 `--lokr_full_matrix` 可大幅拔高高频风格细节拟真度。 |
-| **三层防过拟合 Dropout (`DROPOUT`)** | `--rank_dropout` / `--module_dropout` / `--input_dropout` | 小于 20 张图集炼制角色时，易发生服装死锁与背景迁移；设 `--rank_dropout 0.1` + `--module_dropout 0.05` + `--text_drop 0.1` 可有效遏制记忆死记。**注意：开启 `--dora` 时 `input_dropout` 会自动强制设为 `0.0`。** |
-| **优化器 (`--optimizer`) 与 EMA** | `adamw` / `adamw8bit_kernel` / `muon`；`--ema 0.99~0.995` | `muon` 对 2D 线性权重执行正交动量更新，画风前期收敛显著加快；使用非 `adamw` 优化器时系统自动重映射为 GPU 优化器安全纯流式显存档位（如 `ckpt-ring2-actoff`）。长步数任务开启 `EMA=0.99` 配合 `constant` 或 `cosine` 调度能平滑末期 Loss 抖动。 |
-| **目标注入层 (`--target_preset`) & Norms** | 6 档注入预设 + `--train_norms` | `attn-mlp` 通用均衡；**多人物/复杂动作推荐 `attn-mlp+text-refiner`**；**画风迁移推荐 `attn-mlp+modulation`**；极端全局色调重写可叠加 `--train_norms`。 |
-| **LoRA+ (`--loraplus_ratio`)** | `1.0` / `2.0 ~ 4.0` | 按 ICML 论文设定放大 B（上投影）矩阵学习率倍率。单角色/多人物/多画风设为 `2.0 ~ 4.0` 可明显加快早期特征成形；简单单画风保持 `1.0` 避免过冲。 |
-| **梯度累积 (`--grad_acc`)** | `1` / `2 ~ 4` | 累计 `N` 个微批次后执行一次参数更新。**零额外显存开销**（仅线性按倍率延长单步优化周期）。画风默认 `1` 极速收敛；人物五官及多子集混合设为 `2` 可平滑单图随机姿态/噪声梯度方差。 |
-| **时间步分布与重心 (`--timestep` & `--timestep_mu`)** | `moss` / `uniform` / `logit_normal` | 训练期始终维持 **`shift = 1.0`**。默认 `moss`（`1 - sigmoid(Z)`）：**`mu` 越大越偏向低噪细节**（`-1.09` 画风 / `0.0` 动作 / `0.35` 角色五官）。若切换至 `logit_normal`，**`mu` 符号与 `moss` 完全相反**（负数如 `-0.5` 才偏低噪细节）；`uniform` 全段均分采样则无需 `mu`。 |
-| **底模计算精度 (`--base_precision`)** | `auto` / `int8` / `fp8` / `fp8_compute` / `compute` | `int8` 底模加载 + `bf16` 训练占用极低显存（~5.4 GB 权重）且可跑满 RTX 30/40 全系；而 `bf16` 底模 + `fp8_compute` 需 Ada（RTX 40 系）/ L4 / A100 显卡（`sm89+`）并强制搭配 `FP8_DGRAD="16bit"`（否则反向保存两份转置副本将吃满 10.24 GB 毫无省显存效果），且**禁止对 `int8_convrot` 底模强开 `fp8`**。 |
+| **适配器算法 (`--algo`) & LoKr 全参** | `lora` / `loha` / `lokr`（含 `factor`, `full_matrix`, `decompose_both`） | `lora` 通用最稳；`loha`（Hadamard 乘积）具备更强的非线性表征容量；`lokr` 画风精炼强烈推荐对齐上游 `quality_lokr16` 开启 **`--lokr_full_matrix --lokr_factor 16 --lr 2e-4`**（精确满秩 Kronecker 乘积，`scale=1.0`，成品约 36MB BF16 且高频笔触与像素硬边无损）。 |
+| **三层防过拟合 Dropout (`DROPOUT`)** | `--rank_dropout` / `--module_dropout` / `--input_dropout` | 8~18 张稀缺角色图集推荐采用**半秩物理阻尼（`Rank=16, Alpha=8.0`）**搭配温和正则 `--rank_dropout 0.05 --module_dropout 0.05 --text_drop 0.02`，切勿同时叠加超低学习率与高 `text_drop` 导致欠拟合。**注意：开启 `--dora` 时 `input_dropout` 会自动强制设为 `0.0`。** |
+| **优化器 (`--optimizer`) 与 EMA** | `adamw` / `adamw8bit_kernel` / `muon`；`--ema 0.97~0.99` | `muon` 基于 Newton-Schulz 正交更新（内置 `0.2*sqrt(max(m,n))` RMS 匹配，`LR=1e-4`），由于要求 `optim_state="gpu"` 禁用 `optcpu/gradoff`，推荐本地 `>=12GB` 显存或云端 T4 使用。常规短程 LoRA 默认 `EMA=0.0`；若手动设 `--ema > 0`，引擎会同步导出真实平滑的 `<lora_name>-ema<decay>-comfy.safetensors`。 |
+| **目标注入层 (`--target_preset`) & Norms** | 6 档注入预设 + `--train_norms` | `attn-mlp` 通用均衡；**多人物/复杂动作推荐 `attn-mlp+text-refiner`**；**多画风与满秩 LoKr 推荐 `attn-mlp+modulation`**；极端全局色调重写可叠加 `--train_norms`。 |
+| **LoRA+ (`--loraplus_ratio`)** | `1.0` / `1.5 ~ 2.0` | 按 ICML 论文设定放大 B（上投影）矩阵学习率倍率。单角色/多人物/多画风设为 `2.0`（稀缺小图集 `1.5`）可明显加快早期特征成形；单画风与满秩 LoKr 保持 `1.0` 避免色温过冲。 |
+| **梯度累积 (`--grad_acc`)** | `1` / `2 ~ 4` | 累计 `N` 个微批次后执行一次参数更新。**零额外显存开销**。单卡画风默认 `1`；单卡人物及多子集设为 `2` 平滑梯度方差（云端双卡 T4 单步已并发 4 图，自动归 `1`）。 |
+| **时间步分布与重心 (`--timestep` & `--timestep_mu`)** | `moss` / `uniform` / `logit_normal` | 训练期始终维持 **`shift = 1.0`**。默认 `moss`（`1 - sigmoid(Z)`）：**`mu` 越大越偏向低噪细节**（`-0.85` 标准画风 / `-0.60` 多画风 / `-0.30` 满秩 LoKr 精细笔触 / `0.0` 对称概念 / `0.35` 角色五官）。若切换至 `logit_normal`，**`mu` 符号与 `moss` 完全相反**（负数才偏低噪细节）。 |
+| **底模计算精度 (`--base_precision`)** | `auto` / `int8` / `fp8` / `fp8_compute` / `compute` | `int8` 底模加载 + `bf16` 训练占用极低显存（~5.4 GB 权重）且可跑满 RTX 30/40 全系；而 `bf16` 底模 + `fp8_compute` 需 Ada（RTX 40 系）/ L4 / A100 显卡（`sm89+`）并强制搭配 `FP8_DGRAD="16bit"`，且**禁止对 `int8_convrot` 底模强开 `fp8`**。 |
 
-### 5.1 八大内置实战预设模板核心参数矩阵（v1.5.0）
+### 5.1 八大内置实战预设模板核心参数矩阵（v1.8.5）
 
-| 预设模板 | Repeats / Epochs | Rank / Alpha | 算法与关键策略 | LoRA+ | 优化器 / EMA | GradAcc | Timestep & Mu | LR |
+| 预设模板 | Repeats / Epochs | Rank / Alpha | 算法与关键策略 | LoRA+ | 优化器 / EMA | GradAcc | Timestep & Mu | 本地 LR (双卡 T4) |
 | :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: |
-| **🎨 艺术画风 (`style`)** | `3` / `5` | `32` / `32.0` | `lora` + `attn-mlp` | `1.0` | `adamw` / `0.0` | **`1`** | `moss` / **`-1.09`** | `1e-4` |
-| **👤 单人角色 (`character`)** | `6` / `4` | `32` / `32.0` | `lora` + `DoRA` + `attn-mlp` | `2.0` | `adamw` / `0.0` | **`2`** | `moss` / **`0.35`** | `8e-5` |
-| **👥 多人物配比 (`multi_char`)** | 反比配平 / `4` | `48` / `48.0` | `lora` + `DoRA` + `text-refiner` | `2.0` | `adamw` / `0.0` | **`2`** | `moss` / **`0.35`** | `8e-5` |
-| **🎭 多画风配比 (`multi_style`)** | 反比配平 / `5` | `48` / `48.0` | `lora` + `DoRA` + `modulation` | `2.0` | `adamw` / `0.0` | **`2`** | `moss` / **`-0.60`** | `1e-4` |
-| **💡 概念与动作 (`concept`)** | `5` / `4` | `32` / `32.0` | `lora` + `DoRA` + `text-refiner` | `2.0` | `adamw` / `0.0` | **`2`** | `moss` / **`0.0`** | `1e-4` |
-| **💎 LoKr 高还原画风** | `4` / `5` | `32` / `32.0` | `lokr(factor=8)` + `modulation` | `1.0` | `adamw` / `0.99` | **`1`** | `moss` / **`-1.09`** | `1.5e-4` |
-| **🛡️ 小图集防过拟合角色** | `6` / `4` | `32` / `32.0` | `lora` + `DoRA` + `RankDrop=0.1, ModDrop=0.05, TextDrop=0.1` | `2.0` | `adamw` / `0.99` | **`2`** | `moss` / **`0.35`** | `6e-5` |
-| **⚡ Muon 画风加速** | `3` / `5` | `32` / `32.0` | `lora` + `attn-mlp` (自动 GPU 流式映射) | `1.0` | **`muon`** / `0.0` | **`1`** | `moss` / **`-1.09`** | `1e-4` |
+| **🎨 艺术画风 (`style`)** | `4` / `6` | `32` / `32.0` | `lora` + `attn-mlp` | `1.0` | `adamw` / `0.0` | **`1`** | `moss` / **`-0.85`** | `1e-4` (`1.2e-4`) |
+| **👤 单人角色 (`character`)** | `7` / `4` | `24` / `24.0` | `lora` + `DoRA` + `attn-mlp` + `TextDrop=0.02` | `2.0` | `adamw` / `0.0` | **`2`** (`1`) | `moss` / **`0.35`** | `8e-5` (`1e-4`) |
+| **👥 多人物配比 (`multi_char`)** | 反比配平 / `4` | `48` / `48.0` | `lora` + `DoRA` + `text-refiner` + `TextDrop=0.02` | `2.0` | `adamw` / `0.0` | **`2`** (`1`) | `moss` / **`0.35`** | `8e-5` (`1e-4`) |
+| **🎭 多画风配比 (`multi_style`)** | 反比配平 / `5` | `48` / `48.0` | `lora` + `DoRA` + `modulation` | `2.0` | `adamw` / `0.0` | **`2`** (`1`) | `moss` / **`-0.60`** | `1e-4` (`1.2e-4`) |
+| **💡 概念与动作 (`concept`)** | `6` / `4` | `32` / `32.0` | `lora` + `DoRA` + `text-refiner` | `2.0` | `adamw` / `0.0` | **`2`** (`1`) | `moss` / **`0.0`** | `1e-4` (`1.2e-4`) |
+| **💎 LoKr 高还原画风 (`lokr_style`)** | `5` / `5` | `32` / `32.0` | `lokr(factor=16, full_matrix)` + `modulation` | `1.0` | `adamw` / `0.0` | **`1`** | `moss` / **`-0.30`** | `2e-4` (`2.5e-4`) |
+| **🛡️ 小图集防过拟合 (`antifit_char`)** | `8` / `4` | `16` / `8.0` | `lora` + `DoRA` + `RankDrop=0.05, ModDrop=0.05, TextDrop=0.02` | `1.5` | `adamw` / `0.0` | **`2`** (`1`) | `moss` / **`0.35`** | `8e-5` (`1e-4`) |
+| **⚡ Muon 画风加速 (`muon_style`)** | `4` / `5` | `32` / `32.0` | `lora` + `attn-mlp` + `WD=0.02` (>=12GB/云端) | `1.0` | **`muon`** / `0.0` | **`1`** | `moss` / **`-0.85`** | `1e-4` (`1.3e-4`) |
 
 ---
 

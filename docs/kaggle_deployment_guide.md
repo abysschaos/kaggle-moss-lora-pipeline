@@ -26,7 +26,7 @@
 2. **第 2 步 · 选择算力、超时存盘时限与四大图集来源**：
    - 推荐选 **🔥 双卡 T4 DDP**（与 Tab 1 目标算力双向联动）+ 底模 **🩺 Heal**，并设置 **自动存盘时限(分)**（默认 `540` 分钟 = 9 小时；到达时限容器会自动写入优雅存盘信号并生成 `{lora_name}_lora_results.zip`，防止 Kaggle 12h 硬超时丢失全部中间成果；填 `0` 则不主动限制）。
    - **训练图集来源切换（四选一）**：
-     - **`🔗 临时外链 (5站免配)`**：无需账号，自动将单/多子集打包为纯 ASCII 短名 `_direct.zip` 并依次上传 `temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org` 生成 `|` 容灾直链（已移除会触发 Kaggle 后端容器秒杀的 `x0.at`）；Kaggle 脚本不创建也不挂载 Dataset（`dataset_sources=[]`），开机直拉进 `/tmp/`。
+     - **`🔗 临时外链 (5站免配)`**：无需账号，自动将单/多子集打包为纯 ASCII 短名 `_direct.zip` 并按序尝试 `temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org` 候选节点，**成功上传 1 站即止**（失败自动顺延下一站，同时兼容手动 `|` 多镜像；已移除会触发 Kaggle 后端容器秒杀的 `x0.at`）；Kaggle 脚本不创建也不挂载 Dataset（`dataset_sources=[]`），开机直拉进 `/tmp/`。
      - **`🤗 HF 私有仓库`**：支持【开炼前自动将本地图集上传至该 HF 私有仓库】或【仅直拉已有 HF 仓库】两种子模式，自动 `create_repo(private=True)` + `upload_folder` 上传完整图片与 `.txt` / `subsets_cloud.json`（Write/Read Token 仅驻留内存不落盘）。
      - **`☁️ R2 私有存储`**：基于纯标准库 AWS SigV4 签名算法上传至用户私有 Cloudflare R2 桶，Secret Key 单独存至 `~/.kaggle/r2_credentials.json`，自动签发 7 天有效 `GET` 预签名直链注入内核直拉。
      - **`📦 Kaggle 私有集`**：打包本地图集为 Kaggle Private Dataset 并挂载（已修复新建前 `datasets.get` 403 预检误报）。

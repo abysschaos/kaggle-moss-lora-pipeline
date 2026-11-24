@@ -970,9 +970,9 @@ def stage_external_dataset_zip(
 def upload_zip_to_external_mirrors(
     zip_path: Path,
     on_log=None,
-    max_mirrors: int = 3,
+    max_mirrors: int = 1,
 ) -> tuple:
-    """将本地数据集 ZIP 依次上传至 5 个 Kaggle 安全的免登录外链站（temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org），返回 (ok, '|' 拼接直链或报错, 明细列表)。"""
+    """按序尝试 5 个 Kaggle 安全的免登录外链站（temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org）；默认任一站点上传成功即止，失败自动顺延下一站。返回 (ok, 直链或 '|' 拼接多镜像或报错, 明细列表)。"""
     zpath = Path(zip_path).resolve()
     if not zpath.is_file() or zpath.stat().st_size == 0:
         return False, f"待上传 ZIP 文件不存在或为空：{zpath}", []
@@ -996,6 +996,14 @@ def upload_zip_to_external_mirrors(
             creationflags=NO_WINDOW,
         )
 
+    def _record_fail(host: str, detail: str, has_next: bool = True):
+        errors.append(f"{host}: {detail}")
+        if on_log:
+            if has_next:
+                on_log(f"  ⚠️ {host} 上传失败，自动顺延尝试下一候选站...\n")
+            else:
+                on_log(f"  ⚠️ {host} 上传失败：{detail}\n")
+
     # 1. temp.sh（72 小时有效，单文件最高 4GB）
     if len(mirrors) < max_mirrors:
         try:
@@ -1009,9 +1017,9 @@ def upload_zip_to_external_mirrors(
                 if on_log:
                     on_log(f"  ✅ temp.sh 直链就绪: {url_out}\n")
             else:
-                errors.append(f"temp.sh: rc={res.returncode} out={url_out[:120]} err={(res.stderr or '')[:120]}")
+                _record_fail("temp.sh", f"rc={res.returncode} out={url_out[:120]} err={(res.stderr or '')[:120]}")
         except Exception as exc:
-            errors.append(f"temp.sh: {exc}")
+            _record_fail("temp.sh", str(exc))
 
     # 2. filebin.net（6 天有效）
     if len(mirrors) < max_mirrors:
@@ -1033,9 +1041,9 @@ def upload_zip_to_external_mirrors(
                 if on_log:
                     on_log(f"  ✅ filebin.net 直链就绪: {target_url}\n")
             else:
-                errors.append(f"filebin.net: rc={res.returncode} out={raw_out[:140]} err={(res.stderr or '')[:120]}")
+                _record_fail("filebin.net", f"rc={res.returncode} out={raw_out[:140]} err={(res.stderr or '')[:120]}")
         except Exception as exc:
-            errors.append(f"filebin.net: {exc}")
+            _record_fail("filebin.net", str(exc))
 
     # 3. transfer.whalebone.io（transfer.sh 开源兼容镜像）
     if len(mirrors) < max_mirrors:
@@ -1050,9 +1058,13 @@ def upload_zip_to_external_mirrors(
                 if on_log:
                     on_log(f"  ✅ transfer.whalebone.io 直链就绪: {url_out}\n")
             else:
-                errors.append(f"transfer.whalebone.io: rc={res.returncode} out={url_out[:120]} err={(res.stderr or '')[:120]}")
+                _record_fail(
+                    "transfer.whalebone.io",
+                    f"rc={res.returncode} out={url_out[:120]} err={(res.stderr or '')[:120]}",
+                    has_next=(size_mb <= 98.0),
+                )
         except Exception as exc:
-            errors.append(f"transfer.whalebone.io: {exc}")
+            _record_fail("transfer.whalebone.io", str(exc), has_next=(size_mb <= 98.0))
 
     # 4. ul.sto.care / trystocare.com（API 上限 100MB，72 小时有效）
     if len(mirrors) < max_mirrors and size_mb <= 98.0:
@@ -1069,9 +1081,9 @@ def upload_zip_to_external_mirrors(
                 if on_log:
                     on_log(f"  ✅ trystocare.com 直链就绪: {sto_url}\n")
             else:
-                errors.append(f"ul.sto.care: rc={res.returncode} out={raw_out[:140]} err={(res.stderr or '')[:120]}")
+                _record_fail("ul.sto.care", f"rc={res.returncode} out={raw_out[:140]} err={(res.stderr or '')[:120]}")
         except Exception as exc:
-            errors.append(f"ul.sto.care: {exc}")
+            _record_fail("ul.sto.care", str(exc))
 
     # 5. tmpfiles.org（60 分钟有效，上限 100MB）
     if len(mirrors) < max_mirrors and size_mb <= 98.0:
@@ -1088,9 +1100,9 @@ def upload_zip_to_external_mirrors(
                 if on_log:
                     on_log(f"  ✅ tmpfiles.org 直链就绪: {page_url}\n")
             else:
-                errors.append(f"tmpfiles.org: rc={res.returncode} out={raw_out[:140]} err={(res.stderr or '')[:120]}")
+                _record_fail("tmpfiles.org", f"rc={res.returncode} out={raw_out[:140]} err={(res.stderr or '')[:120]}", has_next=False)
         except Exception as exc:
-            errors.append(f"tmpfiles.org: {exc}")
+            _record_fail("tmpfiles.org", str(exc), has_next=False)
 
     if mirrors:
         combined_url = "|".join(m["url"] for m in mirrors)
@@ -1106,8 +1118,9 @@ def upload_external_dataset(
     stage_root: Path = None,
     on_log=None,
     cleanup_zip: bool = True,
+    max_mirrors: int = 1,
 ) -> tuple:
-    """打包本地单/多子集图集并自动上传至外链中转站，返回 (ok, '|' 拼接直链或报错, 统计详情)。"""
+    """打包本地单/多子集图集并按序上传至外链中转站（默认成功 1 站即止），返回 (ok, 直链或报错, 统计详情)。"""
     zip_path, stats = stage_external_dataset_zip(
         raw_params,
         dataset_slug=dataset_slug,
@@ -1120,7 +1133,11 @@ def upload_external_dataset(
             f"| 压缩包 {stats['zip_mb']} MB -> {zip_path}\n"
         )
     try:
-        ok, url_or_err, mirrors = upload_zip_to_external_mirrors(zip_path, on_log=on_log)
+        ok, url_or_err, mirrors = upload_zip_to_external_mirrors(
+            zip_path,
+            on_log=on_log,
+            max_mirrors=max_mirrors,
+        )
         stats["mirrors"] = mirrors
         return ok, url_or_err, stats
     finally:

@@ -1,11 +1,14 @@
 """Configuration store, hardware probing, path helpers, and Token-Packing math calculations."""
 
 import json
+import math
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from .presets import recommend_min_steps
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -27,7 +30,7 @@ COMPUTE_TARGET_PROFILES = {
 }
 
 
-def load_app_version(fallback: str = "1.8.4") -> str:
+def load_app_version(fallback: str = "1.8.5") -> str:
     """读取项目根目录 VERSION 单一版本信源，缺失时安全回退。"""
     ver_file = PROJECT_ROOT / "VERSION"
     try:
@@ -204,9 +207,13 @@ def compute_exposure_summary(
     active_gpus: int = 1,
     max_tokens_override: int = 0,
     img_count_override: int = 0,
+    algo: str = "lora",
+    min_steps_floor: int = None,
 ) -> tuple:
     """
     计算当前单图集/多子集的真实总曝光次数，以及基于 Token 打包、并行 GPU 数与梯度累积等效 Batch 的推荐步数。
+    当有效图片 > 0 时，自动启用防欠拟合最低优化器更新步数保底（单图集 180 / LoKr 200 / 多子集 240），
+    避免 10~25 张小图集在 Dual-T4 DDP (4 图/步) 下跌落至百步以内导致严重欠拟合。
     返回 (is_multi, img_count, factor, ep, total_exposures, rec, eff_batch, imgs_per_pack, grad_acc, mu, divisor)
     """
     max_tokens = int(max_tokens_override) if int(max_tokens_override) > 0 else resolve_max_tokens_budget(vram_preset, detected_vram_gb)
@@ -218,24 +225,33 @@ def compute_exposure_summary(
     divisor = max(1, eff_batch)
     ep = int(epochs)
     mu = float(timestep_mu)
+    floor_steps = (
+        recommend_min_steps(algo=algo, multi_subset=multi_subset)
+        if min_steps_floor is None
+        else max(1, int(min_steps_floor))
+    )
 
     if multi_subset:
         total_imgs = 0
         epoch_exp = 0
         for sub in subsets:
+            if not sub.get("enabled", True):
+                continue
             c = count_images_in_dir(sub.get("path", ""))
             r = max(1, int(sub.get("repeats", 1)))
             total_imgs += c
             epoch_exp += c * r
         total_exposures = epoch_exp * ep
-        rec = max(1, total_exposures // divisor)
+        raw_rec = math.ceil(total_exposures / divisor) if total_exposures > 0 else 1
+        rec = max(floor_steps, raw_rec) if total_exposures > 0 else 1
         return True, total_imgs, epoch_exp, ep, total_exposures, rec, eff_batch, imgs_per_pack, acc, mu, divisor
 
     dpath = Path(data_dir)
     img_count = int(img_count_override) if int(img_count_override) > 0 else (count_images_in_dir(str(dpath)) if dpath.exists() else 0)
     rep = int(repeats)
     total_exposures = img_count * rep * ep
-    rec = max(1, total_exposures // divisor)
+    raw_rec = math.ceil(total_exposures / divisor) if total_exposures > 0 else 1
+    rec = max(floor_steps, raw_rec) if total_exposures > 0 else 1
     return False, img_count, rep, ep, total_exposures, rec, eff_batch, imgs_per_pack, acc, mu, divisor
 
 

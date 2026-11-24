@@ -23,7 +23,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.8.4"
+    return "1.8.5"
 
 
 def _normalize_hf_dataset_repo(raw: str) -> str:
@@ -262,7 +262,7 @@ parser.add_argument("--tune", type=str, default=os.environ.get("TUNE", "off"),
                     help="Triton kernel autotuner mode: off (default) or table")
 parser.add_argument("--overlong", type=str, default=os.environ.get("OVERLONG", "drop_tokens"),
                     choices=["drop_tokens", "drop"],
-                    help="Overlong sample handling when tokens exceed MAX_TOKENS (default: drop_tokens)")
+                    help="Overlong handling when image+text > MAX_TOKENS (default: drop_tokens keeps all text tokens and drops excess image patches)")
 parser.add_argument("--vram_preset", type=str, default=os.environ.get("VRAM_PRESET", "auto"),
                     choices=["auto", "6g", "8g", "12g", "16g"],
                     help="VRAM optimization preset: auto, 6g, 8g, 12g, 16g (default: auto)")
@@ -1043,6 +1043,56 @@ if os.path.exists(native_driver_file):
     except Exception as nd_err:
         print("Note: Could not patch native.py:", nd_err)
 
+entry_py_file = os.path.join(trainer_dir, "src", "kohakumoss", "training", "entry.py")
+if os.path.exists(entry_py_file):
+    try:
+        with open(entry_py_file, "r", encoding="utf-8") as f:
+            en_content = f.read()
+        if "MOSS_PIPELINE_PATCH_EMA_EXPORT" not in en_content:
+            target_export_block = (
+                '            try:\n'
+                '                for path in export(k, built, root, meta):\n'
+                '                    log.info(f"exported {path}")\n'
+                '            except OSError as err:\n'
+                '                log.error(f"export of step {step} into {root} failed: {err}")'
+            )
+            ema_export_block = (
+                '            try:\n'
+                '                for path in export(k, built, root, meta):\n'
+                '                    log.info(f"exported {path}")\n'
+                '                # [MOSS_PIPELINE_PATCH_EMA_EXPORT]\n'
+                '                _ema_obj = getattr(parts, "ema", None)\n'
+                '                _ema_tags = tuple(getattr(_ema_obj, "tags", ()) or ())\n'
+                '                if _ema_tags and k.get("ALGO") != "full":\n'
+                '                    from kohakumoss.training.exports import write_exports as _write_exports\n'
+                '                    _named_p = list(built.trainable.named_trainable())\n'
+                '                    for _etag in _ema_tags:\n'
+                '                        _avg = _ema_obj.averaged(_etag)\n'
+                '                        if _avg and len(_avg) == len(_named_p) and all(_n in _avg for _n, _ in _named_p):\n'
+                '                            with torch.no_grad():\n'
+                '                                _bak = [_p.detach().clone() for _, _p in _named_p]\n'
+                '                                try:\n'
+                '                                    for _n, _p in _named_p:\n'
+                '                                        _p.copy_(_avg[_n].to(device=_p.device, dtype=_p.dtype))\n'
+                '                                    _efiles = export_files(k, fused_qkv(k))\n'
+                '                                    _emeta = {**meta, "kohakumoss_ema": str(_etag)}\n'
+                '                                    for _epath in _write_exports(_efiles, built.trainable, built.backbone, root, f"{run_name(k)}-{_etag}", _emeta):\n'
+                '                                        log.info(f"exported EMA ({_etag}) {_epath}")\n'
+                '                                finally:\n'
+                '                                    for (_, _p), _orig in zip(_named_p, _bak):\n'
+                '                                        _p.copy_(_orig)\n'
+                '            except OSError as err:\n'
+                '                log.error(f"export of step {step} into {root} failed: {err}")'
+            )
+            if target_export_block in en_content:
+                patched_en = en_content.replace(target_export_block, ema_export_block, 1)
+                compile(patched_en, entry_py_file, "exec")
+                with open(entry_py_file, "w", encoding="utf-8") as f:
+                    f.write(patched_en)
+                print("Injected real EMA adapter export hook into training/entry.py.")
+    except Exception as en_err:
+        print("Note: Could not patch entry.py for EMA export:", en_err)
+
 os.chdir(trainer_dir)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-build-isolation", "--no-deps", "-e", "."], check=True)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "kohaku-engine", "kohakuvault", "lycoris-lora", "anyschedule"], check=True)
@@ -1229,6 +1279,22 @@ def _inspect_safetensors(sf_path: str) -> dict:
                         info["lokr_decompose_both"] = bool(akw["decompose_both"])
             except Exception:
                 pass
+        if "ss_network_args" in meta:
+            try:
+                net_args = json.loads(meta["ss_network_args"])
+                if isinstance(net_args, dict):
+                    if net_args.get("algo") and info["algo"] == "lora":
+                        info["algo"] = str(net_args["algo"]).lower()
+                    if info["lokr_factor"] is None and "factor" in net_args:
+                        info["lokr_factor"] = int(net_args["factor"])
+                    if info["lokr_full_matrix"] is None and "full_matrix" in net_args:
+                        info["lokr_full_matrix"] = bool(net_args["full_matrix"])
+                    if info["lokr_decompose_both"] is None and "decompose_both" in net_args:
+                        info["lokr_decompose_both"] = bool(net_args["decompose_both"])
+                    if "weight_decompose" in net_args:
+                        info["dora"] = bool(net_args["weight_decompose"])
+            except Exception:
+                pass
 
         if any(k.endswith(".dora_scale") for k in tensor_keys):
             info["dora"] = True
@@ -1237,6 +1303,18 @@ def _inspect_safetensors(sf_path: str) -> dict:
                 info["algo"] = "loha"
             elif any(".lokr_w" in k for k in tensor_keys):
                 info["algo"] = "lokr"
+
+        if info["algo"] == "lokr":
+            if info["lokr_full_matrix"] is None:
+                if any(k.endswith(".lokr_w2") for k in tensor_keys) and not any(k.endswith(".lokr_w2_b") for k in tensor_keys):
+                    info["lokr_full_matrix"] = True
+            if info["lokr_factor"] is None:
+                for k in tensor_keys:
+                    if k.endswith(".lokr_w1"):
+                        w1_shp = hdr[k].get("shape", [])
+                        if len(w1_shp) >= 2:
+                            info["lokr_factor"] = int(max(w1_shp[0], w1_shp[1]))
+                            break
 
         if info["rank"] is None:
             for k in tensor_keys:
@@ -1602,13 +1680,15 @@ if os.path.isdir(run_ckpts_root):
             continue
         s_num = _extract_ckpt_step(step_dir)
         exp_dir = os.path.join(step_dir, "export")
-        comfy_f, lyco_f = None, None
+        comfy_f, lyco_f, ema_exports = None, None, []
         if os.path.isdir(exp_dir):
             for sf in sorted(glob.glob(os.path.join(exp_dir, "*.safetensors"))):
                 if os.path.getsize(sf) <= 0:
                     continue
                 low_n = os.path.basename(sf).lower()
-                if "-comfy" in low_n or low_n.endswith("_comfy.safetensors"):
+                if "-ema" in low_n:
+                    ema_exports.append(sf)
+                elif "-comfy" in low_n or low_n.endswith("_comfy.safetensors"):
                     comfy_f = sf
                 elif "-lycoris" in low_n or low_n.endswith("_lycoris.safetensors"):
                     lyco_f = sf
@@ -1618,7 +1698,7 @@ if os.path.isdir(run_ckpts_root):
         ema_f = ema_f if (os.path.isfile(ema_f) and os.path.getsize(ema_f) > 0) else None
         ref_f = comfy_f or lyco_f or train_f or ema_f
         if ref_f:
-            step_records.append((s_num, os.path.getmtime(ref_f), step_dir, comfy_f, lyco_f, train_f, ema_f))
+            step_records.append((s_num, os.path.getmtime(ref_f), step_dir, comfy_f, lyco_f, train_f, ema_f, ema_exports))
             os.makedirs(ckpt_archive_dir, exist_ok=True)
             if comfy_f:
                 shutil.copy2(comfy_f, os.path.join(ckpt_archive_dir, f"{args.lora_name}_step{s_num:06d}-comfy.safetensors"))
@@ -1627,7 +1707,7 @@ if os.path.isdir(run_ckpts_root):
 
 final_exp_dir = os.path.join(run_lora_dir, "export")
 if os.path.isdir(final_exp_dir):
-    f_comfy, f_lyco, f_step = None, None, 0
+    f_comfy, f_lyco, f_ema_exports, f_step = None, None, [], 0
     for sf in sorted(glob.glob(os.path.join(final_exp_dir, "*.safetensors"))):
         if os.path.getsize(sf) <= 0:
             continue
@@ -1635,13 +1715,15 @@ if os.path.isdir(final_exp_dir):
         if info.get("step"):
             f_step = max(f_step, int(info["step"]))
         low_n = os.path.basename(sf).lower()
-        if "-comfy" in low_n or low_n.endswith("_comfy.safetensors"):
+        if "-ema" in low_n:
+            f_ema_exports.append(sf)
+        elif "-comfy" in low_n or low_n.endswith("_comfy.safetensors"):
             f_comfy = sf
         elif "-lycoris" in low_n or low_n.endswith("_lycoris.safetensors"):
             f_lyco = sf
-    ref_top = f_comfy or f_lyco
+    ref_top = f_comfy or f_lyco or (f_ema_exports[0] if f_ema_exports else None)
     if ref_top:
-        step_records.append((f_step, os.path.getmtime(ref_top), "", f_comfy, f_lyco, None, None))
+        step_records.append((f_step, os.path.getmtime(ref_top), "", f_comfy, f_lyco, None, None, f_ema_exports))
 
 step_records.sort(key=lambda x: (x[0], x[1]))
 
@@ -1651,7 +1733,8 @@ best_targets = {
     f"{args.lora_name}-trainable.safetensors": None,
     "ema.safetensors": None,
 }
-for _sn, _mt, _sd, cf, lf, tf, ef in step_records:
+latest_ema_adapters = []
+for _sn, _mt, _sd, cf, lf, tf, ef, ema_exps in step_records:
     if cf:
         best_targets[f"{args.lora_name}-comfy.safetensors"] = cf
     if lf:
@@ -1660,6 +1743,10 @@ for _sn, _mt, _sd, cf, lf, tf, ef in step_records:
         best_targets[f"{args.lora_name}-trainable.safetensors"] = tf
     if ef:
         best_targets["ema.safetensors"] = ef
+    if ema_exps:
+        latest_ema_adapters = list(ema_exps)
+for ema_sf in latest_ema_adapters:
+    best_targets[os.path.basename(ema_sf)] = ema_sf
 
 copied_weights = 0
 for dest_name, src_sf in best_targets.items():

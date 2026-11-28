@@ -68,7 +68,7 @@ def build_train_tab(parent, app) -> ScrollableFrame:
 
     tk.Label(
         preset_card,
-        text="💡 一键载入黄金调参场景模板 (8 套预设即点即用 · 悬浮参数名可看中文说明)",
+        text="💡 一键载入黄金调参场景模板 (9 套预设即点即用 · 悬浮参数名可看中文说明)",
         bg=c["bg_dark"],
         fg=c["accent_blue"],
         font=(c["font_family"], 9, "bold"),
@@ -99,8 +99,8 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     )
     seg_target.pack(side=tk.LEFT, fill=tk.X, expand=True)
     target_tip = (
-        "切换下方 8 套预设及公式算步的目标硬件环境：\n"
-        "• 本机显卡：按本机探测 VRAM 与单卡打包能力核算；\n"
+        "切换下方 9 套预设及公式算步的目标硬件环境：\n"
+        "• 本机显卡：按本机探测 VRAM 与单卡打包能力核算（6G/8G 默认自动禁预览防爆显存）；\n"
         "• Kaggle 双卡 T4：按 DDP 并发（MAX_TOKENS=9216×2卡, 1024px=4图/步）自动校准 GradAcc/LR/Steps；\n"
         "• Kaggle 单卡 T4：按单卡 16GB（MAX_TOKENS=8192）核算步数。"
     )
@@ -293,19 +293,19 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     )
 
     cb_vram = _add_labeled_combo(
-        hp_grid, 1, 0, "显存档位 (VRAM):", app.var_vram_preset, ["auto", "6g", "8g", "12g", "16g"],
-        tip="默认 auto 会自动匹配当前显卡（如 8GB 显卡自动映射至 8g / MAX_TOKENS=4352）；如仍爆显存可手动切 6g。",
+        hp_grid, 1, 0, "显存档位 (VRAM):", app.var_vram_preset, ["auto", "6g", "8g", "12g", "16g", "24g"],
+        tip="默认 auto：<=7G 选 6g，<=10G 选 8g（4352 tok），<=14G 选 12g，<=20G 选 16g，>20G 选 24g（12288 tok）；6g/8g 默认禁预览防 OOM。",
     )
-    cb_vram.bind("<<ComboboxSelected>>", lambda _e: app.recalculate_math())
+    cb_vram.bind("<<ComboboxSelected>>", lambda _e: (app.on_dynamic_controls_changed(), app.recalculate_math()))
     cb_res = _add_labeled_combo(
         hp_grid, 1, 2, "训练分辨率 (Res):", app.var_resolution, ["512", "768", "896", "1024"],
-        tip="8GB 显卡跑 1024px 文本上限仅约 256 tok；若长自然语言较多或想提速，建议切 896（甜点档）！",
+        tip="8GB 显卡首次默认推荐 896（长文更宽裕）；显存充足可选 1024（MAX_TOKENS=4352 下 1024px 文本上限约 256 tok）。",
     )
     cb_res.bind("<<ComboboxSelected>>", lambda _e: app.recalculate_math())
 
     _add_labeled_combo(
-        hp_grid, 2, 0, "TextEnc 运行设备:", app.var_text_device, ["cpu", "cuda"],
-        tip="8GB~12GB 显卡务必选 cpu 离线提取文本，用完释放内存；>=16GB 大显存才考虑 cuda。",
+        hp_grid, 2, 0, "TextEnc 运行设备:", app.var_text_device, ["cpu", "cuda", "cuda-ring", "auto"],
+        tip="<=10GB 显卡强烈建议 cpu（auto 下自动降级防 OOM）；12G~16G 可选 cuda-ring（GPU 环形卸载提取）；>=24G 可直选 cuda。",
     )
     _add_labeled_combo(
         hp_grid, 2, 2, "VAE 编码设备:", app.var_vae_device, ["cuda", "cpu"],
@@ -313,8 +313,8 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     )
 
     cb_algo = _add_labeled_combo(
-        hp_grid, 3, 0, "微调算法 (Algo):", app.var_algo, ["lora", "loha", "lokr"],
-        tip="通用选 lora；高密度多风格可试 loha；追求满秩细腻笔触且控制体积约 36MB 推荐 lokr（配 Full Matrix + Factor=16）。",
+        hp_grid, 3, 0, "微调算法 (Algo):", app.var_algo, ["lora", "loha", "lokr", "oft", "tlora"],
+        tip="通用选 lora；高密度多风格可试 loha；满秩细腻画风/像素推荐 lokr（R10000 F8 Full）；几何保真可选 oft / 奇异值裁剪可选 tlora。",
     )
     cb_algo.bind("<<ComboboxSelected>>", lambda _e: (app.on_dynamic_controls_changed(), app.recalculate_math()))
     _add_labeled_entry(
@@ -350,9 +350,9 @@ def build_train_tab(parent, app) -> ScrollableFrame:
 
     _add_labeled_combo(
         hp_grid, 6, 0, "学习率 (LR):", app.var_lr,
-        ["8e-5", "1e-4", "1.2e-4", "1.3e-4", "1.5e-4", "2e-4", "2.5e-4", "6e-5"],
+        ["8e-5", "1e-4", "1.2e-4", "1.3e-4", "1.5e-4", "2e-4", "2.5e-4", "3e-4", "4e-4", "6e-5"],
         state="normal",
-        tip="人物/防过拟合常用 8e-5（双卡 T4 1e-4）；标准画风/概念 1e-4（双卡 T4 1.2e-4 / Muon 1.3e-4）；满秩 LoKr 推荐 2e-4（双卡 T4 2.5e-4）。",
+        tip="人物常用 8e-5（双卡 T4 1e-4）；标准画风/概念 1e-4（双卡 T4 1.2e-4）；满秩 LoKr (Factor=8) 推荐 3e-4（双卡 T4 4e-4）。",
     )
     ent_rep = _add_labeled_entry(
         hp_grid, 6, 2, "每图重复 (Repeats):", app.var_repeats,
@@ -379,9 +379,9 @@ def build_train_tab(parent, app) -> ScrollableFrame:
 
     app.cb_mu = _add_labeled_combo(
         hp_grid, 8, 2, "时间步重心 (Mu):", app.var_timestep_mu,
-        ["-1.09", "-0.85", "-0.60", "-0.30", "0.0", "0.35", "0.50"],
+        ["-1.09", "-0.85", "-0.60", "-0.45", "-0.35", "-0.30", "0.0", "0.35", "0.50"],
         state="normal",
-        tip="官方 moss 模式下：-0.85 标准画风；-0.60 多画风；-0.30 满秩 LoKr 精细笔触/像素硬边；0.0 对称概念；0.35~0.50 面部五官与服饰细节（logit_normal 符号相反）。",
+        tip="官方 moss 模式下：-0.45 标准/LoKr/Muon 画风；-0.35 像素/硬边；0.0 对称概念；0.35~0.50 面部五官与服饰细节（logit_normal 符号相反）。",
     )
     app.cb_mu.bind("<<ComboboxSelected>>", lambda _e: app.recalculate_math())
     app.cb_mu.bind("<KeyRelease>", lambda _e: app.recalculate_math())
@@ -460,7 +460,7 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     # ==================== 可折叠高阶算法/防过拟合/优化器抽屉 ====================
     app.btn_adv_toggle = FlatButton(
         hp_card,
-        text="▸ 展开高阶算法 / 防过拟合 / 优化器调优区 (18项专业参数)",
+        text="▸ 展开高阶算法 / 防过拟合 / 引擎调优区 (v1.9 专业参数)",
         bg=c["input_bg"],
         fg=c["accent_purple"],
         font=(c["font_family"], 8, "bold"),
@@ -523,9 +523,9 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     opt_row1 = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
     opt_row1.pack(fill=tk.X, pady=(0, 5))
     tk.Label(opt_row1, text="优化器:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
-    cb_opt = ttk.Combobox(opt_row1, textvariable=app.var_optimizer, values=["adamw", "adamw8bit_kernel", "muon"], state="readonly", width=16)
+    cb_opt = ttk.Combobox(opt_row1, textvariable=app.var_optimizer, values=["adamw", "adamw16", "adamw8bit_kernel", "muon"], state="readonly", width=16)
     cb_opt.pack(side=tk.LEFT, padx=(3, 8))
-    HoverTooltip(cb_opt, "adamw 最省显存兼容性最好；muon/8bit_kernel 需由后端切至 GPU 流式显存档位，6G 卡慎用。")
+    HoverTooltip(cb_opt, "adamw 最省显存；adamw16 为纯正交/全精度兼容回退；muon/8bit_kernel 需切至 GPU 流式显存档位。")
     tk.Label(opt_row1, text="LR调度:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
     ttk.Combobox(opt_row1, textvariable=app.var_lr_scheduler, values=["cosine", "constant"], state="readonly", width=9).pack(side=tk.LEFT, padx=(3, 8))
     tk.Label(opt_row1, text="Warmup(-1自动):", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
@@ -545,9 +545,9 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     tk.Label(opt_row2, text="WD规则:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
     ttk.Combobox(opt_row2, textvariable=app.var_wd_rules, values=["moss", "none", "all"], state="readonly", width=7).pack(side=tk.LEFT, padx=(3, 8))
     tk.Label(opt_row2, text="EMA平滑:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
-    cb_ema = ttk.Combobox(opt_row2, textvariable=app.var_ema, values=["0.0", "0.95", "0.99", "0.995"], width=7)
+    cb_ema = ttk.Combobox(opt_row2, textvariable=app.var_ema, values=["0.0", "0.95", "0.99", "0.995", "power"], width=8)
     cb_ema.pack(side=tk.LEFT, padx=(3, 8))
-    HoverTooltip(cb_ema, "500+ 步长程训练可开 0.99 平滑权重抖动；短步数 (<300) 请保持 0.0 关闭。")
+    HoverTooltip(cb_ema, "推荐 0.0 关闭或选 power (EDM2 双尺度 sigma_rel=[0.05,0.10] 自适应平滑，短/长程皆可)；也支持 0.97~0.995。")
     tk.Label(opt_row2, text="时间步采样:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
     cb_ts = ttk.Combobox(opt_row2, textvariable=app.var_timestep, values=["moss", "uniform", "logit_normal"], state="readonly", width=12)
     cb_ts.pack(side=tk.LEFT, padx=(3, 0))
@@ -556,7 +556,7 @@ def build_train_tab(parent, app) -> ScrollableFrame:
 
     # 增强与种子行
     aug_row = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
-    aug_row.pack(fill=tk.X)
+    aug_row.pack(fill=tk.X, pady=(0, 5))
     tgl_flip = ToggleButton(
         aug_row, variable=app.var_flip,
         text_on="随机水平翻转 (Flip): 开", text_off="随机水平翻转 (Flip): 关",
@@ -572,6 +572,72 @@ def build_train_tab(parent, app) -> ScrollableFrame:
     ).pack(side=tk.LEFT, padx=(3, 10))
     tk.Label(aug_row, text="Tune表:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
     ttk.Combobox(aug_row, textvariable=app.var_tune, values=["off", "table"], state="readonly", width=7).pack(side=tk.LEFT, padx=(3, 0))
+
+    # v1.9.0 JSONL 多粒度标注 & 引擎加速行
+    caption_accel_row = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
+    caption_accel_row.pack(fill=tk.X, pady=(0, 5))
+    tk.Label(caption_accel_row, text="标注流:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    cb_cap = ttk.Combobox(caption_accel_row, textvariable=app.var_caption_template, values=["auto", "nl", "mix"], state="readonly", width=6)
+    cb_cap.pack(side=tk.LEFT, padx=(2, 6))
+    HoverTooltip(cb_cap, "auto：目录存在 train.jsonl 时自动切入 mix 双路混合模板，否则使用 nl。")
+    tk.Label(caption_accel_row, text="p_nl:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    tk.Entry(
+        caption_accel_row, textvariable=app.var_caption_p_nl, bg=c["input_bg"], fg=c["text_main"],
+        insertbackground=c["text_main"], relief=tk.FLAT, font=("Consolas", 8), width=5,
+    ).pack(side=tk.LEFT, padx=(2, 6))
+    tk.Label(caption_accel_row, text="Var:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    tk.Entry(
+        caption_accel_row, textvariable=app.var_caption_variants, bg=c["input_bg"], fg=c["text_main"],
+        insertbackground=c["text_main"], relief=tk.FLAT, font=("Consolas", 8), width=3,
+    ).pack(side=tk.LEFT, padx=(2, 8))
+    ToggleButton(
+        caption_accel_row, variable=app.var_int8_compute,
+        text_on="INT8算力: 开", text_off="INT8算力: 关",
+        on_bg=c["accent_blue"], pady=2, padx=6,
+    ).pack(side=tk.LEFT, padx=(0, 6))
+    tk.Label(caption_accel_row, text="Compile:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(caption_accel_row, textvariable=app.var_compile_mode, values=["off", "block"], state="readonly", width=6).pack(side=tk.LEFT, padx=(2, 6))
+    tk.Label(caption_accel_row, text="释缓:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    ttk.Combobox(caption_accel_row, textvariable=app.var_step_release, values=["none", "empty_cache", "10"], state="normal", width=10).pack(side=tk.LEFT, padx=(2, 0))
+
+    # v1.9.0 训练中出图预览 (8G/6G 强制禁用) & Teacher 防撞脸蒸馏
+    preview_teacher_row = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
+    preview_teacher_row.pack(fill=tk.X, pady=(0, 4))
+    tk.Label(preview_teacher_row, text="每N步预览:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    app.cb_sample_every = ttk.Combobox(
+        preview_teacher_row, textvariable=app.var_sample_every, values=["0", "50", "100", "200"], state="normal", width=5
+    )
+    app.cb_sample_every.pack(side=tk.LEFT, padx=(2, 6))
+    HoverTooltip(app.cb_sample_every, "官方参数步内生图对比（steps=30, cfg=3.5, slg=22）；6G/8G 本地显卡强制自动锁定为 0（关闭）防止 OOM。")
+    tk.Label(preview_teacher_row, text="Prompt:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    app.ent_sample_prompt = tk.Entry(
+        preview_teacher_row, textvariable=app.var_sample_prompt, bg=c["input_bg"], fg=c["text_main"],
+        insertbackground=c["text_main"], relief=tk.FLAT, font=("Consolas", 8), width=18,
+    )
+    app.ent_sample_prompt.pack(side=tk.LEFT, padx=(2, 6))
+    app.lbl_preview_guard = tk.Label(
+        preview_teacher_row, text="", bg=c["card_bg"], fg=c["accent_yellow"], font=(c["font_family"], 8)
+    )
+    app.lbl_preview_guard.pack(side=tk.LEFT)
+
+    teacher_row = tk.Frame(app.adv_drawer_frame, bg=c["card_bg"])
+    teacher_row.pack(fill=tk.X)
+    tk.Label(teacher_row, text="Teacher蒸馏:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    app.cb_teacher_mode = ttk.Combobox(
+        teacher_row, textvariable=app.var_teacher_mode, values=["none", "weights"], state="readonly", width=8
+    )
+    app.cb_teacher_mode.pack(side=tk.LEFT, padx=(2, 6))
+    HoverTooltip(app.cb_teacher_mode, "利用原底模约束漂移防止画风污染/全员撞脸；因上游常驻 5B 模型，<=12GB 显存禁用，16GB 自动锁 int8。")
+    tk.Label(teacher_row, text="权重:", bg=c["card_bg"], fg=c["text_sub"], font=(c["font_family"], 8)).pack(side=tk.LEFT)
+    app.ent_distill_weight = tk.Entry(
+        teacher_row, textvariable=app.var_distill_weight, bg=c["input_bg"], fg=c["text_main"],
+        insertbackground=c["text_main"], relief=tk.FLAT, font=("Consolas", 8), width=5,
+    )
+    app.ent_distill_weight.pack(side=tk.LEFT, padx=(2, 8))
+    app.lbl_teacher_guard = tk.Label(
+        teacher_row, text="", bg=c["card_bg"], fg=c["accent_yellow"], font=(c["font_family"], 8)
+    )
+    app.lbl_teacher_guard.pack(side=tk.LEFT)
 
     app.on_dynamic_controls_changed()
     return scroll

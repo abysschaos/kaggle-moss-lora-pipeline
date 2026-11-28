@@ -32,12 +32,12 @@
 
 在消费级显卡（如 8GB VRAM 的 RTX 4060 / 4070 Laptop）或免费云端容器（Tesla T4 16GB）上微调 50 亿参数的 MOSS-Image 单流 DiT 与 9B Qwen3.5 文本编码器，容易遭遇联合加载显存溢出（>22 GB）、PyTorch 动态库脱节、Windows Triton 中文路径解码失败以及半精度残差尖峰溢出。本项目在不修改原生权重格式的前提下，将环境治理、三阶解耦调度、多子集配比与视觉化监控打包为开箱即用的双轨工程系统。
 
-- **全谱系底模与显存弹性档位**：本地与云端双轨同步支持 `MOSS-Image-Base`、`MOSS-Image-heal` 与 `MOSS-Image-SFT` 三大变体自动探测，提供 `auto / 6g / 8g / 12g / 16g` 五档精准校准显存配置（`MAX_TOKENS = 4352 / 6144 / 8192`）与 `1024 / 896 / 768 / 512` 动态分桶分辨率；支持 `--base_precision`（含 RTX 40 系+ `fp8_compute` + `FP8_DGRAD="16bit"` 守卫）与非 Heal 底模 `FP16_FIX="online"` 防溢出保护。
-- **三阶时序解耦与零重复消费下载**：支持全盘宽域扫描并零拷贝复用现有 ComfyUI 模型库，按需路由 Qwen3.5-9B 至主机内存执行 CPU 离线文本特征提取（当主机内存 ≥22GB 或 GPU ≥15GB 时智能优先选用全精度 BF16 文本编码器），随后由 GPU 提取 FLUX.2 VAE 潜向量并释放，最终在仅载入 5B DiT 与轻量适配器的状态下完成高精度微调。
-- **原生零黑框 Windows 桌面控制台与 5-Tab 分区看板 (`v1.8.5`)**：内建开源可审计 C# 启动器 [MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs)，1 秒无第三方依赖编译为原生 `MOSS_LoRA_Trainer.exe`；采用 `core/` + `ui/` 解耦架构与深色 `5-Tab` 选项卡工作区，支持在 Tab 1 顶部一键切换 **【目标算力】**（`💻 本机显卡 / ☁️ Kaggle 双卡 T4 / ⚡ Kaggle 单卡 T4`），内置对齐上游 `quality_lokr16` / `algo_dora` / `muon` 源码规范的 **8 套黄金预设模板**（含触发词与项目名防覆盖保护），并按双卡 `MAX_TOKENS=9216×2卡` 并发吞吐智能校准 `GradAcc`、$\sqrt{B}$ 学习率、防欠拟合最低步数下限（`180 / 200 / 240` 步）与存盘间隔；右侧常驻纯原生 `tk.Canvas` 实时 Loss / EMA 折线图与 4 枚 KPI 卡片，内置 **【🩺 一键体检图集】** 与离线手册直读器。
-- **零代码 Kaggle 云端四模图集直拉与双通道抗断链推进 (`v1.8.5`)**：直接在本地 GUI 的【☁️ 云端遥控】选项卡完成 `kaggle.json` 凭据隔离保存，支持四大图集投递通道——**🔗 5 站临时外链自动中转直拉 (`url`)**（按当前 `lora_name` 自动同步命名为 `_direct.zip` 并按序尝试 `temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org`，**成功上传 1 站即止**、失败自动顺延下一站，同时兼容手动 `|` 多镜像，云端容器自动处理 POST/Cookie/签名穿透，**完全不创建/挂载 Kaggle Dataset**）、**🤗 HF 私有仓库 (`hf`)**（支持勾选自动新建 `Private` 数据集并直传本地图片或直接拉取已有仓库，享 100GB 免费私有空间）、**☁️ Cloudflare R2 私有对象存储 (`r2`)**（零依赖 AWS SigV4 预签名直传私有桶并自动签发 7 天有效 `GET` 直链，享 10GB 免费与 $0 出站流量，Secret 密钥仅存 `~/.kaggle/r2_credentials.json`），以及 **📦 Kaggle 私有 Dataset (`local`)**；遇到 Kaggle 后台批处理队列拥堵或并发占槽 `QUEUED` 卡死时，可一键使用 **【⚡ 免排队：推送为交互式 Notebook (`--no-run`)】** 自动隔离 `-nb` 独立 Slug（防同名 `script` 撞型）、通过 `_kg_hide-input` + 原生 `%%writefile` 明文隐藏单元写出训练脚本并用 `Popen` 实时输出日志，打开预览页后先点右上角黑色 `Edit` 再点 `Run All` 即可切入交互式 GPU 池立即运行；推包阶段内建 **`WinError 10054` 代理断链 3 次自动退避重试 + 原生 `curl` `SaveKernel` 容灾回退**（凭据经 `stdin` 安全传递），并搭配 **超时自动存盘守护（默认 `540` 分钟，填 `0` 准确保持不限）**、**30 秒自动轮询 + `QUEUED` 占槽阻断探针 + 真实 `failureMessage` 原因透传**、**右侧拉取云端日志**、**🛑 停监控与网页 Stop 引导**、**🗑️ 强删云端任务**、一键回传同步 ComfyUI/Loss 曲线（支持 `.kaggle-partial` 断流自愈与冗余缓存自动清理），以及**零 API 手动上传导出包**。
-- **全场景断点续炼与中途暂停存盘**：支持 `fresh / resume / init_from` 三大训练模式、双轨同步解析 `safetensors` 头部自动对齐已有架构（含 LoKr 因子与 `TRAIN_NORMS`）、训练中途随时点击【暂停并存盘】安全退出并保留权重，以及每 10 秒后台增量同步导出产物到专属目录与 ComfyUI `models/loras/`。
-- **高阶适配器防过拟合、多优化器与自适应调度体系**：双轨开放 LoKr 全参数（`--lokr_factor / --lokr_full_matrix / --lokr_decompose_both`）、`--train_norms`、三层 `DROPOUT`（含 DoRA `input_dropout` 强置 0 防护）、`AdamW / AdamW8bit Kernel / Muon` 优化器与 GPU 安全显存档位自动重映射、`Cosine / Constant` 调度、可配 `Warmup` 与 `EMA` 平滑、多种时间步分布（`moss / uniform / logit_normal`）、`--text_drop / --flip / --seed / --save_format`，以及默认折叠的 GUI 进阶抽屉兼顾小白零门槛与高阶精细微调。
+- **全谱系底模与显存弹性档位**：本地与云端双轨同步支持 `MOSS-Image-Base`、`MOSS-Image-heal` 与 `MOSS-Image-SFT` 三大变体自动探测，提供 `auto / 6g / 8g / 12g / 16g / 24g` 六档精准校准显存配置（`MAX_TOKENS = 4352 / 6144 / 8192 / 12288`，区分 `6g <=7G` 与 `8g <=10G` 并首次无配置时为 `<=10GB` 默认 `896px` 甜点分辨率）；支持 `--base_precision`、`--int8_compute`、`--compile_mode`（`off / block`）、`--step_release`、非 Heal 底模 `FP16_FIX="online"` 与 Dual-T4 DDP `DATA_BALANCE=True` 负载均衡。
+- **三阶时序解耦与零重复消费下载**：支持全盘宽域扫描并零拷贝复用现有 ComfyUI 模型库，按需路由 Qwen3.5-9B 至主机内存执行 CPU 离线文本特征提取（或 `cuda-ring` GPU 环形卸载提取；当主机内存 ≥22GB 或 GPU ≥15GB 时智能优先选用全精度 BF16 文本编码器），随后由 GPU 提取 FLUX.2 VAE 潜向量并释放，最终在仅载入 5B DiT 与轻量适配器的状态下完成高精度微调。
+- **原生零黑框 Windows 桌面控制台与 6-Tab 分区看板 (`v1.9.0`)**：内建开源可审计 C# 启动器 [MossTrainerLauncher.cs](launcher/MossTrainerLauncher.cs)，1 秒无第三方依赖编译为原生 `MOSS_LoRA_Trainer.exe`；采用 `core/` + `ui/` 解耦架构与深色 `6-Tab` 选项卡工作区，支持在 Tab 1 顶部一键切换 **【目标算力】**（`💻 本机显卡 / ☁️ Kaggle 双卡 T4 / ⚡ Kaggle 单卡 T4`），内置 **9 套黄金预设模板**（新增 `pixel_style` 像素/硬边满秩方案，`lokr_style` 校准为 `Rank=10000 / Factor=8 / Alpha=1.0 / LR=3e-4(4e-4)`，画风类 `mu=-0.45`，含触发词边界保护与项目名防覆盖保护），并按双卡 `MAX_TOKENS=9216×2卡` 并发吞吐智能校准 `GradAcc`、$\sqrt{B}$ 学习率、防欠拟合最低步数下限（`180 / 200 / 240` 步）与存盘间隔；内置 **【🗂️ 任务档案管理中心】与全局快捷任务条**（支持每 LoRA 独立保存本地与云端全量参数、未保存改动拦截、派生续炼任务、差异对比与脱敏便携模板导入导出）；右侧常驻纯原生 `tk.Canvas` 实时 Loss / EMA 折线图与 4 枚 KPI 卡片，内置 **【🩺 一键体检图集】** 与离线手册直读器。
+- **零代码 Kaggle 云端四模图集直拉与双通道抗断链推进 (`v1.9.0`)**：直接在本地 GUI 的【☁️ 云端遥控】选项卡完成 `kaggle.json` 凭据隔离保存，支持四大图集投递通道——**🔗 5 站临时外链自动中转直拉 (`url`)**（按当前 `lora_name` 自动同步命名为 `_direct.zip` 并按序尝试 `temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org`，**成功上传 1 站即止**、失败自动顺延下一站，同时兼容手动 `|` 多镜像，云端容器自动处理 POST/Cookie/签名穿透，**完全不创建/挂载 Kaggle Dataset**）、**🤗 HF 私有仓库 (`hf`)**（支持勾选自动新建 `Private` 数据集并直传本地图片或直接拉取已有仓库，享 100GB 免费私有空间）、**☁️ Cloudflare R2 私有对象存储 (`r2`)**（零依赖 AWS SigV4 预签名直传私有桶并自动签发 7 天有效 `GET` 直链，享 10GB 免费与 $0 出站流量，Secret 密钥仅存 `~/.kaggle/r2_credentials.json`），以及 **📦 Kaggle 私有 Dataset (`local`)**；遇到 Kaggle 后台批处理队列拥堵或并发占槽 `QUEUED` 卡死时，可一键使用 **【⚡ 免排队：推送为交互式 Notebook (`--no-run`)】** 自动隔离 `-nb` 独立 Slug（防同名 `script` 撞型）、通过 `_kg_hide-input` + 原生 `%%writefile` 明文隐藏单元写出训练脚本并用 `Popen` 实时输出日志，打开预览页后先点右上角黑色 `Edit` 再点 `Run All` 即可切入交互式 GPU 池立即运行；推包阶段内建 **`WinError 10054` 代理断链 3 次自动退避重试 + 原生 `curl` `SaveKernel` 容灾回退**（凭据经 `stdin` 安全传递），并搭配 **超时自动存盘守护（默认 `540` 分钟，填 `0` 准确保持不限）**、**30 秒自动轮询 + `QUEUED` 占槽阻断探针 + 真实 `failureMessage` 原因透传**、**右侧拉取云端日志**、**🛑 停监控与网页 Stop 引导**、**🗑️ 强删云端任务**、一键回传同步 ComfyUI/Loss 曲线（支持 `.kaggle-partial` 断流自愈与冗余缓存自动清理），以及**零 API 手动上传导出包**。
+- **全场景断点续炼与中途暂停存盘**：支持 `fresh / resume / init_from` 三大训练模式、双轨同步解析 `safetensors` 头部自动对齐已有架构（含 LoKr 因子、`oft`/`tlora` 与 `TRAIN_NORMS`）、训练中途随时点击【暂停并存盘】安全退出并保留权重，以及每 10 秒后台增量同步导出产物与 `samples/` 预览图到专属目录与 ComfyUI `models/loras/`。
+- **高阶适配器防过拟合、多粒度 JSONL 与蒸馏平滑体系 (`v1.9.0`)**：双轨全面支持 **`lora / loha / lokr / oft / tlora`** 五大适配器与 **`adamw / adamw16 / adamw8bit_kernel / muon`** 四大优化器；支持 **EDM2 Power EMA (`--ema power`)**（双尺度 `sigma_rel=[0.05, 0.10]` 自适应平滑并独立归档 `-power*` 权重）、**`train.jsonl` + `mix` 混合模板 (`CAPTION_VARIANTS=4`)**、**训练期预览采样 (`SAMPLE_EVERY`，对 6G/8G 本地显卡强制自动锁定为 `0` 关闭以彻底防 OOM)**、**原底模 Teacher 蒸馏防撞脸 (`TEACHER="weights"` + 显存硬门禁：`<=12GB` 强制禁用、`16GB/T4` 自动锁 `int8`、`>=24GB` 允许 `auto`)**、三层 `DROPOUT`（含 DoRA `input_dropout` 强置 0 防护）、可配 `Warmup`、多种时间步分布（`moss / uniform / logit_normal`）与 `--text_drop / --flip / --seed / --save_format`。
 
 ---
 
@@ -79,7 +79,7 @@ flowchart LR
 ### 方式一：Windows 本地极速上手（3 步零黑框启动）
 
 #### 1. 获取项目代码与发行工具
-- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.8.5)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
+- **推荐下载压缩包**：前往 [GitHub Releases 最新稳定版 (v1.9.0)](https://github.com/abysschaos/kaggle-moss-lora-pipeline/releases/latest) 获取源代码包与预编译的 `MOSS_LoRA_Trainer.exe`（可对照同页 `SHA256SUMS.txt` 校验），或直接下载 [主分支 ZIP](https://github.com/abysschaos/kaggle-moss-lora-pipeline/archive/refs/heads/main.zip)。
 - **Git 命令行克隆**：
   ```bash
   git clone https://github.com/abysschaos/kaggle-moss-lora-pipeline.git
@@ -203,12 +203,15 @@ python train_local.py `
 | `COMFYUI_PATH` / `COMFYUI_MODELS` | 自动探测 | `train_local.py` | 指定本机 ComfyUI 根目录或 `models/` 路径，优先级高于全盘扫描 |
 | `HF_TOKEN` | 空 | 云端 `train_moss.py` | 加速拉取 HuggingFace 权重并降低限流概率 |
 | `MODEL_VARIANT` | `heal` | `train_moss.py` | 指定云端底层权重分支：`heal` / `base` / `sft` |
-| `VRAM_PRESET` | `auto` | `train_moss.py` | 云端显存档位：`auto` / `6g` / `8g` / `12g` / `16g` |
-| `ALGO` / `LOKR_FACTOR` / `USE_DORA` | `lora` / `8` / `false` | `train_moss.py` | 控制低秩算法、LoKr 矩阵因子及 DoRA 开关 |
+| `VRAM_PRESET` | `auto` | `train_moss.py` | 云端/本地显存档位：`auto` / `6g` / `8g` / `12g` / `16g` / `24g` |
+| `ALGO` / `LOKR_FACTOR` / `USE_DORA` | `lora` / `8` / `false` | `train_moss.py` | 控制低秩算法（`lora`/`loha`/`lokr`/`oft`/`tlora`）、LoKr 因子及 DoRA |
 | `TARGET_PRESET` / `LORAPLUS_RATIO` / `TRAIN_NORMS` | `attn-mlp` / `1.0` / `false` | `train_moss.py` | Transformer 注入层预设、LoRA+ 倍率与归一化层微调 |
-| `RANK_DROPOUT` / `MODULE_DROPOUT` / `EMA` | `0.0` / `0.0` / `0.0` | `train_moss.py` | 三层防过拟合 Dropout（DoRA 下锁定 `INPUT_DROPOUT=0`）与 EMA 平均 |
-| `OPTIMIZER` / `LR_SCHEDULER` / `WARMUP_STEPS` | `adamw` / `cosine` / `-1` | `train_moss.py` | 优化器（`adamw`/`adamw8bit_kernel`/`muon`，非 AdamW 自动映射 GPU 档案）与学习率曲线 |
-| `GRAD_ACC` / `TIMESTEP` / `TIMESTEP_MU` | `1` / `moss` / `-1.09` | `train_moss.py` | 梯度累积步数与采样分布（`moss` 下 `-1.09` 画风 / `0.35` 角色） |
+| `RANK_DROPOUT` / `MODULE_DROPOUT` / `EMA` | `0.0` / `0.0` / `0.0` | `train_moss.py` | 三层防过拟合 Dropout 与 EMA 平均（支持 `"power"` EDM2 双尺度自适应平滑） |
+| `OPTIMIZER` / `LR_SCHEDULER` / `WARMUP_STEPS` | `adamw` / `cosine` / `-1` | `train_moss.py` | 优化器（`adamw`/`adamw16`/`adamw8bit_kernel`/`muon`）与学习率曲线 |
+| `GRAD_ACC` / `TIMESTEP` / `TIMESTEP_MU` | `1` / `moss` / `-0.45` | `train_moss.py` | 梯度累积步数与采样分布（`moss` 下 `-0.45` 画风 / `0.35` 角色） |
+| `CAPTION_TEMPLATE` / `CAPTION_P_NL` / `CAPTION_VARIANTS` | `auto` / `0.75` / `4` | `train_moss.py` | 多粒度标注流（有 `train.jsonl` 自动走 `mix` + 4 变体） |
+| `INT8_COMPUTE` / `COMPILE_MODE` / `STEP_RELEASE` | `false` / `off` / `none` | `train_moss.py` | INT8 GEMM 加速、Torch Block 编译与步间 CUDA 缓存释放策略 |
+| `SAMPLE_EVERY` / `TEACHER_MODE` / `DISTILL_WEIGHT` | `0` / `none` / `0.05` | `train_moss.py` | 训练期预览间隔（6G/8G 自动强置 `0`）与原底模蒸馏防撞脸（`>=16G`） |
 | `BASE_PRECISION` / `TUNE` / `OVERLONG` | `auto` / `off` / `drop_tokens` | `train_moss.py` | 底模计算精度（含 `sm89+` 守卫）、Triton 调优与超长截断保护 |
 | `TEXT_DROP` / `FLIP` / `SEED` / `SAVE_FORMAT` | `0.05` / `false` / `0` / `both` | `train_moss.py` | 空提示词丢弃、水平镜像（不对称服饰慎开）、种子与权重导出格式 |
 | `GPUS` / `PARALLEL_MODE` / `MAX_TOKENS` | `auto` / `auto` / `0` | `train_moss.py` | 多卡控制（`T4 x2` 自动启用 DDP + `ckpt-resident` + `9216` Token 打包） |
@@ -239,7 +242,7 @@ python train_local.py `
 
 ```text
 kaggle_moss_lora_pipeline/
-├── VERSION                                    # 单一版本信源 (1.8.5)
+├── VERSION                                    # 单一版本信源 (1.9.0)
 ├── LICENSE                                    # Apache License 2.0 开源协议
 ├── CHANGELOG.md                               # Keep a Changelog 1.1.0 演进记录
 ├── README.md                                  # 项目主文档与全双轨操作指南
@@ -259,24 +262,27 @@ kaggle_moss_lora_pipeline/
 │   ├── __init__.py
 │   ├── config_store.py                        # 配置持久化、ComfyUI 宽域探测与曝光步数计算
 │   ├── kaggle_bridge.py                       # 零依赖 Kaggle/5站外链/HF私有仓/Cloudflare R2 桥接引擎
-│   ├── presets.py                             # 8 套声明式场景预设与默认高阶参数字典
-│   └── trainer_runner.py                      # 参数校验、54 参数 CLI 构建、优雅暂停与进程树强杀
-├── ui/                                        # 5-Tab 桌面表现层组件包
+│   ├── presets.py                             # 9 套声明式场景预设与默认高阶参数字典
+│   ├── task_profiles.py                       # 每 LoRA 独立任务档案（本地+云端全量管理、脱敏导出与续炼派生）
+│   └── trainer_runner.py                      # 参数校验、CLI 构建、优雅暂停与进程树强杀
+├── ui/                                        # 6-Tab 桌面表现层组件包
 │   ├── __init__.py
 │   ├── theme.py                               # Catppuccin Mocha 暗色主题与 TNotebook/Treeview 样式
 │   ├── widgets.py                             # 自适应折叠 ScrollableFrame、选择器与只读阅读弹窗
 │   ├── monitor_panel.py                       # 右侧常驻 KPI 卡片、Loss/EMA 画布与终端控制台
-│   ├── tab_train.py                           # Tab 1: 🚀 快速训练（8 预设 + 核心/高阶参数）
+│   ├── tab_train.py                           # Tab 1: 🚀 快速训练（9 预设 + 6G/8G 预览护盾 + 高阶/蒸馏/加速抽屉）
 │   ├── tab_dataset.py                         # Tab 2: 📂 数据与续炼（单/多子集配平 + 体检 + Resume）
 │   ├── tab_models.py                          # Tab 3: 📦 底模与框架（三核心底模探测 + 引擎同步）
 │   ├── tab_cloud.py                           # Tab 4: ☁️ 云端遥控（Kaggle API 四步无代码工作台与导出包）
-│   ├── tab_help.py                            # Tab 5: 📖 指南与工具（离线文档阅读器与一键体检）
+│   ├── tab_profiles.py                        # Tab 5: 🗂️ 任务档案（每 LoRA 独立本地+云端配置档案管理模板）
+│   ├── tab_help.py                            # Tab 6: 📖 指南与工具（离线文档阅读器与一键体检）
 │   └── app.py                                 # 主窗口编排控制器 (ModernLocalTrainerGUI)
 ├── train_local.py                             # Windows 消费级显卡本地训练执行引擎与图集体检器
 ├── train_moss.py                              # Kaggle / Colab 云端自动化训练执行引擎
 ├── tests/                                     # 自动化单元测试套件 (`unittest`)
 │   ├── test_external_url_flow.py              # 5站外链/R2 SigV4预签名/HF上传/403抑制/failureMessage单元测试
-│   └── test_presets_and_math.py               # 8套黄金预设/双卡步数保底/触发词保护/真实EMA导出单元测试
+│   ├── test_presets_and_math.py               # 9套黄金预设/Power EMA/JSONL mix/预览与Teacher护盾单元测试
+│   └── test_task_profiles.py                  # 每LoRA独立任务档案CRUD/脱敏/GUI切换脏检查单元测试
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
 │   │   ├── bug_report.yml                     # 结构化 Bug 反馈表单
@@ -330,17 +336,16 @@ kaggle_moss_lora_pipeline/
 
 ## 更新计划 (Roadmap)
 
-以下规划项已列入项目迭代路线图（当前稳定版本为 `v1.8.5`）：
+以下规划项已列入项目迭代路线图（当前稳定版本为 `v1.9.0`）：
 
-### 1. v1.5.x 训练体验增强候选
-- **训练期定时样图预览 (`SAMPLE_EVERY` / `SAMPLE_PROMPTS`)**：配套显存安全守卫，在训练中途定期生成验证图以便直观评估收敛质量。
-- **扩展冷门适配器算法**：按需引入 `tlora` 与 `oft` 等专用微调结构。
-- **可选 `tags` 词表打标模式**：在坚持自然语言（`nl`）优先的前提下，为习惯 Danbooru 标签库的用户补充可选 `tags` 模板及 `shuffle` / `keep_first` 控制。
-
-### 2. 云端平台远程控制与调优体系演进（v1.8.5+）
-- **✅ 已在 `v1.6.0 ~ v1.7.2` 交付 — Kaggle 无头一键控台、HF 直拉、双卡 T4 目标算力自适应校准与上传加固**：支持 `core/kaggle_bridge.py` + Tab 4 四步控台、30 秒轮询与 Curve 复盘、`--max_run_minutes` 自动存盘守护、Tab 1/Tab 4 目标算力双向联动、$\sqrt{B}$ 缩放与过曝安全网、纯 ASCII 短名 `sample_XXXX` 打包与 403 预检误报修复。
-- **✅ 已在 `v1.8.0 ~ v1.8.4` 交付 — 四模多源图集直拉引擎、免排队交互式 `--no-run` Notebook 直推、`10054` 断链重试 + `curl` 容灾直推、`QUEUED` 阻塞探针与工作区自愈**：全面打通 **5 站 Kaggle 安全临时外链容灾中转 (`temp.sh / filebin.net / transfer.whalebone.io / ul.sto.care / tmpfiles.org`)**（已移除触发风控的 `x0.at` 并在 `url / r2 / hf` 模式下将外链打包命名自动对齐当前 `lora_name`）、**Hugging Face 私有数据集一键建库上传与直拉**、**Cloudflare R2 零依赖 AWS SigV4 私有对象存储直传与 7 天预签名直拉**、**`.kaggle-partial` 断流自愈恢复 + 一键工作区清理 (`cleanup_workspace_staging`)**、**`derive_interactive_kernel_slug`（独立 `-nb` 后缀防撞型）+ 4 单元 `%%writefile` 明文隐藏交互式 Notebook + `Exit=0` 推包错误拦截 + `--no-run` 免排队直推**、**`WinError 10054` 代理断链自动重试 + 原生 `curl` `SaveKernel` API 容灾回退与 `max_run_minutes=0` 修复**，以及 **`diagnose_kaggle_queue_blockers` 同账号占槽与空白草稿本阻断巡检 + `failureMessage` 原因透传**。
-- **✅ 已在 `v1.8.5` 交付 — 八大黄金预设源码级重构、防欠拟合步数安全下限与真实 EMA 权重导出闭环**：全面对齐上游 `quality_lokr16.py`、`algo_dora.py` 与 `muon.py`，将 `lokr_style` 升级为满秩 `Full Matrix + Factor=16 + LR=2e-4/2.5e-4 + mu=-0.30`，将 `antifit_char` 重构为 `Rank=16/Alpha=8.0` 半秩物理阻尼并移除过度抑制的五重正则，引入双卡/大 Batch 最低步数下限（`180 / 200 / 240` 步）、自定义 `lora_name`/`trigger_word` 防覆盖保护、真实 EMA 平滑适配器导出钩子及 `OVERLONG="drop_tokens"` 准确语义校准。
+### 1. 已交付核心能力里程碑 (`v1.6.0 ~ v1.9.0`)
+- **✅ 已在 `v1.9.0` 交付 — 9 套预设校准、EDM2 Power EMA、`train.jsonl + mix`、6G/8G 自动禁预览护盾、Teacher 蒸馏、24G/cuda-ring 与任务档案中心**：
+  - 引入 6-Tab **任务档案管理中心 (`core/task_profiles.py` / `ui/tab_profiles.py`)**，支持每 LoRA 独立本地+云端参数归档、脱敏导入导出、Diff 对比与未保存修改拦截；
+  - 将预设升级至 **9 套**（新增 `pixel_style`，重构 `lokr_style` 为 `R10000 / Factor=8 / Alpha=1.0 / LR=3e-4(4e-4)`，画风 `mu=-0.45`，细分 `text_drop`）；
+  - 全链路打通 **EDM2 Power EMA (`--ema power`)**、**`train.jsonl` + `mix` (`CAPTION_VARIANTS=4`)**、**`24g` 显存档位 (`12288 tok`)**、**`cuda-ring` Text Encoder**、**`oft`/`tlora`/`adamw16`**、**Dual-T4 `DATA_BALANCE=True`**、**`INT8_COMPUTE`/`COMPILE`/`STEP_RELEASE`**、**训练期预览采样（6G/8G 本地自动强置 `SAMPLE_EVERY=0` 防 OOM）** 及 **`TEACHER="weights"`（`<=12G` 禁用 / `16G` 锁 `int8` / `>=24G` `auto`）**，并修复触发词 `startswith` 前缀误判与多子集/嵌套字典清洗缺陷。
+- **✅ 已在 `v1.8.5` 交付 — 八大黄金预设源码级重构、防欠拟合步数安全下限与真实 EMA 权重导出闭环**：全面对齐上游 `quality_lokr16.py`、`algo_dora.py` 与 `muon.py`，引入双卡/大 Batch 最低步数下限（`180 / 200 / 240` 步）、自定义 `lora_name`/`trigger_word` 防覆盖保护、真实 EMA 平滑适配器导出钩子及 `OVERLONG="drop_tokens"` 准确语义校准。
+- **✅ 已在 `v1.8.0 ~ v1.8.4` 交付 — 四模多源图集直拉引擎、免排队交互式 `--no-run` Notebook 直推、`10054` 断链重试 + `curl` 容灾直推、`QUEUED` 阻塞探针与工作区自愈**：全面打通 5 站临时外链容灾中转、Hugging Face 私有数据集上传与直拉、Cloudflare R2 SigV4 预签名直拉、交互式 Notebook `--no-run`、WinError 10054 重试 + `curl` 回退与 `failureMessage` 透传。
+- **✅ 已在 `v1.6.0 ~ v1.7.2` 交付 — Kaggle 无头一键控台、HF 直拉、双卡 T4 目标算力自适应校准与上传加固**：支持 `core/kaggle_bridge.py` + Tab 4 四步控台、30 秒轮询与 Curve 复盘、`--max_run_minutes` 自动存盘守护。
 - **后续候选 — 通用 SSH / SFTP 远端 GPU 控制台**：基于 `paramiko` 直连任意 Linux 云卡主机（AutoDL / RunPod / Vast.ai / 腾讯云 HAI），增量传图并实时流式回传 `metrics.jsonl`。
 
 ---

@@ -30,7 +30,7 @@ def build_help_tab(parent, app) -> ScrollableFrame:
 
     doc_items = [
         ("🟢 傻瓜式入门与参数实战说明书 (docs/beginner_guide.md)", c["accent_green"], "新手傻瓜式操作与参数手册", "docs/beginner_guide.md"),
-        ("📐 54 项参数全景字典对照表 (docs/parameter_configuration_reference.md)", c["accent_blue"], "全量参数权威配置字典", "docs/parameter_configuration_reference.md"),
+        ("📐 全量参数全景字典对照表 (docs/parameter_configuration_reference.md)", c["accent_blue"], "全量参数权威配置字典", "docs/parameter_configuration_reference.md"),
         ("🎯 超参数科学调优与防过拟合手册 (docs/hyperparameter_tuning_guide.md)", c["accent_purple"], "超参数调优、LoRA+ / DoRA / LoKr / Muon 实战", "docs/hyperparameter_tuning_guide.md"),
         ("🎨 ComfyUI 推理挂载与生图对齐指南 (docs/comfyui_inference_guide.md)", c["accent_yellow"], "ComfyUI 原生加载与推理排查", "docs/comfyui_inference_guide.md"),
         ("🚑 显存爆掉 / NaN / 报错排障矩阵 (docs/troubleshooting_matrix.md)", c["accent_peach"], "常见故障排查对照表", "docs/troubleshooting_matrix.md"),
@@ -55,7 +55,7 @@ def build_help_tab(parent, app) -> ScrollableFrame:
 
     tk.Label(
         tools_card,
-        text="🛠️ 本机环境快速自检与常用目录直达 (支持 Ctrl+1~5 快捷切页)",
+        text="🛠️ 本机环境快速自检与常用目录直达 (支持 Ctrl+1~6 快捷切页)",
         bg=c["bg_dark"],
         fg=c["accent_blue"],
         font=(c["font_family"], 9, "bold"),

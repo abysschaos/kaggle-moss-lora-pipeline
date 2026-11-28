@@ -8,13 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned (Roadmap)
-- **体验增强候选**：
-  - 训练期定时样图预览（`SAMPLE_EVERY` / `SAMPLE_PROMPTS` + 显存守卫）；
-  - 更多冷门/专项适配器算法接入（`tlora` / `oft`）；
-  - 可选 `tags` 词表打标模式（暴露 `shuffle` 与 `keep_first` 控制，兼容常规标签图集）。
-- **远端算力扩展候选 (v1.6.x+)**：
+- **远端算力扩展候选 (v1.9.x+)**：
   - **通用 SSH/SFTP 云服务器遥控器**：基于 `paramiko` 直连任意 Linux GPU 实例，支持增量 rsync 传图与实时流式拉取 `metrics.jsonl`；
   - **按量算力平台轻量 API 适配**：预留 AutoDL / RunPod / Vast.ai / 腾讯云 HAI 启停机与费用告警接口。
+
+## [1.9.0] - 2026-11-28
+
+### Added
+- **6-Tab 任务档案管理中心（[`core/task_profiles.py`](core/task_profiles.py) / [`ui/tab_profiles.py`](ui/tab_profiles.py) / [`ui/app.py`](ui/app.py) / [`tests/test_task_profiles.py`](tests/test_task_profiles.py)）**：
+  - 支持为每个 LoRA 任务保存全量本地 + 云端参数配置档案、置顶/分类/检索、派生 `resume`/`init_from` 续炼档案、跨档案 Diff 差异对比、未保存改动拦截与安全脱敏导入导出。
+- **`train.jsonl` + `mix` 多粒度混合标注全链路贯通（[`core/kaggle_bridge.py`](core/kaggle_bridge.py) / [`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py) / [`ui/tab_train.py`](ui/tab_train.py)）**：
+  - 本地 `prepare_dataset_structure` / `prepare_multi_subset_dataset`、云端 `_copy_image_txt_pairs` 与图集体检器原生识别并同步 `train.jsonl`（自动纯 ASCII 重映射图片文件名并注入触发词）；
+  - 当目录存在 `train.jsonl` 或显式选择 `--caption_template mix` 时，自动生成 `CAPTION = {"template": "mix", "p_nl": 0.75, ...}` 与 `CAPTION_VARIANTS = 4`（混合 `jsonl` 与纯 `folder(recursive=False)` 子集亦无缝兼容）。
+- **EDM2 Power EMA 双尺度自适应平滑（[`core/presets.py`](core/presets.py) / [`core/trainer_runner.py`](core/trainer_runner.py) / [`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py)）**：
+  - 新增 `--ema power` 选项，写入 `EMA = {"kind": "power", "sigma_rel": [0.05, 0.10]}`，`recommend_save_every_and_ema()` 完整保留 `"power"` 设置，产物归档器同步捕获并隔离 `-power*` 平滑权重。
+- **6G/8G/24G 精准显存分档、`cuda-ring` 与引擎性能旋钮（[`core/config_store.py`](core/config_store.py) / [`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py) / [`ui/tab_train.py`](ui/tab_train.py)）**：
+  - 区分 `<=7GB -> 6g`、`<=10GB -> 8g`、`<=14GB -> 12g`、`<=20GB -> 16g`、`>20GB -> 24g`（新增 `vram_24g.py` + `balanced` + `MAX_TOKENS=12288`），首次未配置 `<=10GB` 本机用户默认使用甜点分辨率 `896`；
+  - 新增 `text_device="cuda-ring"`（`{"device": "cuda", "plan": {"memory": "ring"}}`，云端 T4 自动优先使用），并开放 `--int8_compute`、`--compile_mode (off/block)`、`--step_release (none/empty_cache/N)`，以及 Kaggle Dual-T4 DDP 默认开启 `DATA_BALANCE = True`。
+- **新算法 `oft` / `tlora` 与新优化器 `adamw16`（[`core/trainer_runner.py`](core/trainer_runner.py) / [`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py)）**：
+  - 全链路支持 `algo in ("lora", "loha", "lokr", "oft", "tlora")` 与 `optimizer in ("adamw", "adamw16", "adamw8bit_kernel", "muon")`，`_resolve_optimizer_memory_profile` 兼容 `balanced` 档案不降级。
+- **训练期样图预览与 `TEACHER="weights"` 显存护盾（[`core/config_store.py`](core/config_store.py) / [`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py) / [`ui/app.py`](ui/app.py)）**：
+  - 开放 `--sample_every` / `--sample_prompt`（`STEPS=30, CFG=3.5, SHIFT=5.0, SKIP_LAYERS=(22,)`）并自动归档 `samples/` 预览图；**强制执行 6G/8G 本地显卡自动锁定 `SAMPLE_EVERY=0` 护盾以彻底杜绝采样爆显存 OOM**；
+  - 开放 `--teacher_mode weights` + `--distill_weight` 原底模防撞脸蒸馏，强制校验硬件门槛（`<=12GB` 与 `PARALLEL="pipeline"` 自动禁用，`16GB`/T4 自动锁定 `TEACHER_PRECISION="int8"`，`>=24GB` 允许 `"auto"`）。
+
+### Changed
+- **9 套黄金超参数预设矩阵社区实践再校准（[`core/presets.py`](core/presets.py) / [`ui/tab_train.py`](ui/tab_train.py)）**：
+  - 新增第 9 套预设 **`pixel_style`（🕹️ 像素/硬边）**：`LoKr R10000 / Factor=8 / Full Matrix / Alpha=1.0 / attn-mlp / repeats=8 / epochs=5 / LR=3e-4 (双卡T4 4e-4) / mu=-0.35 / text_drop=0.10`；
+  - 重构 **`lokr_style`（💎 LoKr 满秩画风）** 为高秩满秩矩阵（`Rank=10000 / Alpha=1.0 / Factor=8 / Full Matrix / LR=3e-4 / 双卡T4 4e-4 / mu=-0.45`），全面校准画风类预设（`style / multi_style / muon_style` `mu=-0.45`）及精细化 `text_drop`（画风类 `0.10`、单人角色/防过拟合 `0.06`、多人物 `0.05`、概念 `0.08`），9 套预设全部保持默认 `EMA=0.0`。
+
+### Fixed
+- **修复触发词前置 `startswith` 误匹配缺陷（[`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py)）**：引入 `_caption_has_trigger_prefix` 精确词边界正则，防止 `mychar` 误命中 `mychar_alt` 导致漏注入触发词。
+- **修复 `TEXT_ENCODER_KWARGS` 清洗正则断裂嵌套字典（[`train_local.py`](train_local.py) / [`train_moss.py`](train_moss.py)）**：将 `\{[^\}]+\}` 改为整行正则 `(?m)^\s*TEXT_ENCODER_KWARGS\s*=.*$`，彻底解决 `cuda-ring` 嵌套 `plan` 字典被截断留残余 `}` 报错的问题，并规范未启用蒸馏时输出 `TEACHER = ""` 与 `DISTILL_WEIGHT = 0.0` 以满足上游 `distill.py` 校验契约。
 
 ## [1.8.5] - 2026-11-25
 
@@ -321,7 +345,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 提供 [gui_local.py](gui_local.py) 图形控制台、[train_local.py](train_local.py) 本地执行引擎、[train_moss.py](train_moss.py) 云端执行脚本及开箱即用 Kaggle Notebook 模板。
 - 提供完整的中文部署手册、参数速查、超参数调优与排错矩阵文档体系。
 
-[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.5...HEAD
+[Unreleased]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.5...v1.9.0
 [1.8.5]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.4...v1.8.5
 [1.8.4]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.3...v1.8.4
 [1.8.3]: https://github.com/abysschaos/kaggle-moss-lora-pipeline/compare/v1.8.2...v1.8.3

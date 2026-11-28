@@ -12,7 +12,7 @@ from .presets import recommend_min_steps
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
-VRAM_MAX_TOKENS = {"6g": 4352, "8g": 4352, "12g": 6144, "16g": 8192}
+VRAM_MAX_TOKENS = {"6g": 4352, "8g": 4352, "12g": 6144, "16g": 8192, "24g": 12288}
 COMPUTE_TARGET_PROFILES = {
     "local": {"label": "💻 本机显卡", "active_gpus": 1, "max_tokens": 0, "kaggle_accelerator": None},
     "kaggle_t4x2": {
@@ -30,7 +30,7 @@ COMPUTE_TARGET_PROFILES = {
 }
 
 
-def load_app_version(fallback: str = "1.8.5") -> str:
+def load_app_version(fallback: str = "1.9.0") -> str:
     """读取项目根目录 VERSION 单一版本信源，缺失时安全回退。"""
     ver_file = PROJECT_ROOT / "VERSION"
     try:
@@ -156,18 +156,53 @@ def count_images_in_dir(dir_path_str: str) -> int:
 
 
 def resolve_effective_vram_label(vram_preset: str, detected_vram_gb: float = 8.0) -> tuple:
-    """将显存档位 (auto/6g/8g/12g/16g) 解析为真实生效档位与单步 MAX_TOKENS 上限。"""
+    """将显存档位 (auto/6g/8g/12g/16g/24g) 解析为真实生效档位与单步 MAX_TOKENS 上限。"""
     preset = (vram_preset or "auto").strip().lower()
     if preset == "auto":
-        if detected_vram_gb <= 10.0:
+        if detected_vram_gb <= 7.0:
+            eff_preset = "6g"
+        elif detected_vram_gb <= 10.0:
             eff_preset = "8g"
         elif detected_vram_gb <= 14.0:
             eff_preset = "12g"
-        else:
+        elif detected_vram_gb <= 20.0:
             eff_preset = "16g"
+        else:
+            eff_preset = "24g"
     else:
-        eff_preset = preset
+        eff_preset = preset if preset in VRAM_MAX_TOKENS else "8g"
     return eff_preset, VRAM_MAX_TOKENS.get(eff_preset, 4352)
+
+
+def is_low_vram_preview_blocked(vram_preset: str, detected_vram_gb: float = 8.0, target_compute: str = "local") -> bool:
+    """8GB / 6GB 本机低显存档位强制关闭训练中出图预览（防止采样推理瞬间 OOM）。"""
+    if (target_compute or "local").strip().lower() != "local":
+        return False
+    eff_preset, _ = resolve_effective_vram_label(vram_preset, detected_vram_gb)
+    return eff_preset in ("6g", "8g")
+
+
+def can_enable_teacher_distill(
+    vram_preset: str,
+    detected_vram_gb: float = 8.0,
+    target_compute: str = "local",
+    parallel_mode: str = "none",
+) -> tuple:
+    """校验当前硬件档位是否允许开启 TEACHER='weights' 蒸馏，返回 (allowed, recommended_teacher_precision, reason)。"""
+    tc = (target_compute or "local").strip().lower()
+    if tc in ("kaggle_t4x1", "kaggle_t4x2"):
+        return True, "int8", "云端 T4 (16GB) 自动锁定 TEACHER_PRECISION='int8' 防止常驻 5B Teacher 爆显存。"
+
+    eff_preset, _ = resolve_effective_vram_label(vram_preset, detected_vram_gb)
+    if eff_preset in ("6g", "8g", "12g"):
+        return (
+            False,
+            "int8",
+            f"当前显存档位 {eff_preset.upper()} (<=12GB)：上游 Teacher 蒸馏为 speed 常驻 5B 底座模式，开启必 OOM，已自动禁用。",
+        )
+    if eff_preset == "16g":
+        return True, "int8", "16GB 显存将自动强制 TEACHER_PRECISION='int8' 以控制常驻显存。"
+    return True, "auto", ">=24GB 显存支持 Teacher 权重空间防撞脸蒸馏（auto 精度）。"
 
 
 def resolve_max_tokens_budget(vram_preset: str, detected_vram_gb: float = 8.0) -> int:

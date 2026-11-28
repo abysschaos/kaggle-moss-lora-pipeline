@@ -22,28 +22,41 @@ from tkinter import filedialog, messagebox, ttk
 
 from core import (
     ADVANCED_DEFAULTS,
+    MACHINE_ENV_KEYS,
     NO_WINDOW,
+    PRESETS,
+    PROFILE_CATEGORIES,
     PROJECT_ROOT,
+    build_config_from_preset,
     build_train_command,
     cleanup_workspace_staging,
     compute_exposure_summary,
+    compute_profile_diff,
     count_images_in_dir,
+    create_continue_task_profile,
     delete_kaggle_kernel,
+    delete_task_profile,
     derive_interactive_kernel_slug,
     diagnose_kaggle_queue_blockers,
     discover_default_comfy_models,
+    duplicate_task_profile,
     export_manual_upload_bundle,
+    export_task_profile_to_file,
     extract_kaggle_outputs_from_dir,
     fetch_kaggle_kernel_logs,
     fetch_kaggle_kernel_status,
     find_kaggle_cli,
     force_kill_process_tree,
+    format_profile_summary,
     get_preset_by_id,
     import_kaggle_json,
+    import_task_profile_from_file,
     install_kaggle_cli,
     is_trainer_ready,
+    list_task_profiles,
     load_app_version,
     load_local_config,
+    load_task_profile,
     normalize_hf_dataset_repo,
     open_in_explorer,
     probe_gpu_quick,
@@ -52,6 +65,7 @@ from core import (
     read_kaggle_credentials,
     read_r2_credentials,
     recommend_save_every_and_ema,
+    rename_task_profile,
     request_graceful_pause,
     rescue_latest_weights,
     resolve_compute_target_budget,
@@ -60,13 +74,17 @@ from core import (
     resolve_preset_for_target,
     sanitize_external_dataset_url,
     sanitize_kaggle_slug,
+    sanitize_profile_config,
     save_kaggle_credentials,
     save_local_config,
     save_r2_credentials,
+    save_task_profile,
     stage_dataset_bundle,
     stage_interactive_notebook_bundle,
     stage_kernel_bundle,
     test_kaggle_connection,
+    toggle_pin_task_profile,
+    touch_profile_loaded,
     upload_dataset_to_cloudflare_r2,
     upload_dataset_to_hf_repo,
     upload_external_dataset,
@@ -78,9 +96,10 @@ from .tab_cloud import build_cloud_tab
 from .tab_dataset import build_dataset_tab
 from .tab_help import build_help_tab
 from .tab_models import build_models_tab
+from .tab_profiles import build_profiles_tab
 from .tab_train import build_train_tab
 from .theme import PALETTE, apply_dark_theme, apply_windows_dark_titlebar
-from .widgets import FlatButton, ToggleButton, show_text_viewer_dialog
+from .widgets import FlatButton, HoverTooltip, SegmentedSelector, ToggleButton, show_text_viewer_dialog
 
 APP_VERSION = load_app_version()
 
@@ -142,14 +161,24 @@ class ModernLocalTrainerGUI:
         self._kaggle_cli_info = None
         self._ui_queue = queue.SimpleQueue()
         self._ui_queue_job = None
+        self._dirty_check_job = None
+        self._suppress_var_traces = False
         self.preset_buttons = {}
         self._preset_base_styles = {}
         self._active_preset_id = None
         self.cloud_action_buttons = []
         self.detected_vram_gb = 8.0
+        self.profiles_dir = PROJECT_ROOT / "task_profiles"
+        self._active_profile_record = None
+        self._active_profile_snapshot = None
+        self._profile_records_cache = []
+        self._profile_quick_choices = {}
+        self.tab_index_map = {}
+        self.tab_scroll_map = {}
 
         self.config_file = PROJECT_ROOT / "local_config.json"
         saved_cfg = load_local_config(self.config_file)
+        self.active_profile_id = str(saved_cfg.get("active_profile_id", "") or "").strip()
 
         # ==================== 全局状态与训练超参变量 ====================
         default_dataset_dir = str((PROJECT_ROOT / "dataset").resolve())
@@ -186,9 +215,10 @@ class ModernLocalTrainerGUI:
         self.var_precision = tk.StringVar(value=saved_cfg.get("precision", "bf16"))
         self.var_base_precision = tk.StringVar(value=saved_cfg.get("base_precision", "auto"))
         raw_vram_cfg = str(saved_cfg.get("vram_preset", "auto") or "auto").strip().lower()
-        if raw_vram_cfg not in ("auto", "6g", "8g", "12g", "16g"):
+        if raw_vram_cfg not in ("auto", "6g", "8g", "12g", "16g", "24g"):
             raw_vram_cfg = "auto"
         self.var_vram_preset = tk.StringVar(value=raw_vram_cfg)
+        self._has_saved_resolution = "resolution" in saved_cfg
         self.var_resolution = tk.StringVar(value=str(saved_cfg.get("resolution", "1024")))
         self.var_text_device = tk.StringVar(value=saved_cfg.get("text_device", "cpu"))
         self.var_vae_device = tk.StringVar(value=saved_cfg.get("vae_device", "cuda"))
@@ -230,6 +260,24 @@ class ModernLocalTrainerGUI:
         self.var_flip = tk.BooleanVar(value=bool(saved_cfg.get("flip", ADVANCED_DEFAULTS["flip"])))
         self.var_seed = tk.StringVar(value=str(saved_cfg.get("seed", ADVANCED_DEFAULTS["seed"])))
         self.var_save_format = tk.StringVar(value=str(saved_cfg.get("save_format", ADVANCED_DEFAULTS["save_format"])))
+        self.var_caption_template = tk.StringVar(
+            value=str(saved_cfg.get("caption_template", ADVANCED_DEFAULTS["caption_template"]))
+        )
+        self.var_caption_p_nl = tk.StringVar(value=str(saved_cfg.get("caption_p_nl", ADVANCED_DEFAULTS["caption_p_nl"])))
+        self.var_caption_variants = tk.StringVar(
+            value=str(saved_cfg.get("caption_variants", ADVANCED_DEFAULTS["caption_variants"]))
+        )
+        self.var_int8_compute = tk.BooleanVar(
+            value=bool(saved_cfg.get("int8_compute", ADVANCED_DEFAULTS["int8_compute"]))
+        )
+        self.var_compile_mode = tk.StringVar(value=str(saved_cfg.get("compile_mode", ADVANCED_DEFAULTS["compile_mode"])))
+        self.var_step_release = tk.StringVar(value=str(saved_cfg.get("step_release", ADVANCED_DEFAULTS["step_release"])))
+        self.var_sample_every = tk.StringVar(value=str(saved_cfg.get("sample_every", ADVANCED_DEFAULTS["sample_every"])))
+        self.var_sample_prompt = tk.StringVar(value=str(saved_cfg.get("sample_prompt", ADVANCED_DEFAULTS["sample_prompt"])))
+        self.var_teacher_mode = tk.StringVar(value=str(saved_cfg.get("teacher_mode", ADVANCED_DEFAULTS["teacher_mode"])))
+        self.var_distill_weight = tk.StringVar(
+            value=str(saved_cfg.get("distill_weight", ADVANCED_DEFAULTS["distill_weight"]))
+        )
 
         self.var_train_mode = tk.StringVar(value=saved_cfg.get("train_mode", "fresh"))
         self.var_resume_path = tk.StringVar(value=saved_cfg.get("resume_path", ""))
@@ -303,14 +351,20 @@ class ModernLocalTrainerGUI:
         self.var_cloud_sync_summary = tk.StringVar(value="就绪：将同步 Tab 1/2 当前超参数与图集")
         self.var_cloud_job_status = tk.StringVar(value="⚪ 尚未查询云端作业状态")
 
-        # 变量联动监听
-        self.var_lora_name.trace_add(
-            "write",
-            lambda *_: (self.update_output_preview(), self.refresh_resume_status(), self.refresh_cloud_sync_summary()),
-        )
-        self.var_output_dir.trace_add("write", lambda *_: self.update_output_preview())
-        self.var_resume_path.trace_add("write", lambda *_: self.refresh_resume_status())
-        self.var_steps.trace_add("write", lambda *_: (self.recalculate_math(), self.refresh_cloud_sync_summary()))
+        # 任务档案管理状态标签变量
+        self.var_active_profile_badge = tk.StringVar(value="📌 当前任务：未绑定（草稿）")
+        self.var_quick_profile_select = tk.StringVar(value="（未绑定任务档案）")
+        self.var_profile_search = tk.StringVar(value="")
+        self.var_profile_compute_filter = tk.StringVar(value="all")
+        self.var_profile_cat_filter = tk.StringVar(value="全部类型")
+        self.var_profile_count_stat = tk.StringVar(value="共 0 份档案")
+        self.var_profile_detail_title = tk.StringVar(value="📄 档案详情透视")
+
+        # 变量联动监听（受 _suppress_var_traces 保护，避免切换档案时中途触发局部联动覆写）
+        self.var_lora_name.trace_add("write", lambda *_: self._on_lora_name_changed())
+        self.var_output_dir.trace_add("write", lambda *_: None if self._suppress_var_traces else self.update_output_preview())
+        self.var_resume_path.trace_add("write", lambda *_: None if self._suppress_var_traces else self.refresh_resume_status())
+        self.var_steps.trace_add("write", lambda *_: self._on_steps_var_changed())
 
         self.build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -322,11 +376,30 @@ class ModernLocalTrainerGUI:
         self.update_output_preview()
         self.refresh_resume_status()
         self.on_target_compute_changed(silent=True, from_cloud_tab=True)
+        self.on_dynamic_controls_changed()
         self.recalculate_math()
         self.refresh_cloud_sync_summary()
+        self._restore_active_profile_state()
+        self.refresh_profile_list(select_id=self.active_profile_id or None)
+        self._bind_dirty_check_traces()
+        self._update_active_profile_bar()
         self._ui_queue_job = self.root.after(20, self._drain_ui_queue)
         self.root.after(20, self._start_background_probes)
         self.root.after(180, lambda: self.monitor.load_history_metrics(silent=True))
+
+    def _on_lora_name_changed(self):
+        if self._suppress_var_traces:
+            return
+        self.update_output_preview()
+        self.refresh_resume_status()
+        self.refresh_cloud_sync_summary()
+
+    def _on_steps_var_changed(self):
+        if self._suppress_var_traces:
+            return
+        self.on_dynamic_controls_changed()
+        self.recalculate_math()
+        self.refresh_cloud_sync_summary()
 
     def _enqueue_ui(self, fn):
         """将后台线程产生的界面更新任务安全投递至主线程队列，彻底避免 Python 3.13+ 跨线程 after 报错。"""
@@ -362,6 +435,9 @@ class ModernLocalTrainerGUI:
             def _apply_gpu():
                 self.detected_vram_gb = vram_gb
                 self.var_gpu_status.set(f"设备状态: {gpu_info}")
+                if not getattr(self, "_has_saved_resolution", False) and float(vram_gb or 8.0) <= 10.0:
+                    self.var_resolution.set("896")
+                self.on_dynamic_controls_changed()
                 self.recalculate_math()
 
             self._enqueue_ui(_apply_gpu)
@@ -402,30 +478,88 @@ class ModernLocalTrainerGUI:
         right_container = tk.Frame(self.main_paned, bg=self.card_bg)
         self.main_paned.add(right_container, minsize=480, stretch="always")
 
-        # 3. 左侧 5 大功能选项卡 (ttk.Notebook)
+        # 3. 顶部紧凑任务档案快捷切换条（全 Tab 常驻）
+        profile_bar = tk.Frame(
+            left_container,
+            bg=self.card_bg,
+            highlightbackground=PALETTE["border"],
+            highlightthickness=1,
+            padx=8,
+            pady=4,
+        )
+        profile_bar.pack(fill=tk.X, pady=(0, 4))
+
+        lbl_prof_badge = tk.Label(
+            profile_bar,
+            textvariable=self.var_active_profile_badge,
+            bg=self.card_bg,
+            fg=self.accent_purple,
+            font=(self.font_family, 8, "bold"),
+            anchor="w",
+        )
+        lbl_prof_badge.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        HoverTooltip(
+            lbl_prof_badge,
+            "显示当前绑定的任务档案；若出现 *未保存，可点右侧【💾 保存】写入当前档案，或点【➕ 另存】新建一份独立 LoRA 任务配置。",
+        )
+
+        for text, bg, fg, cmd in (
+            ("🗂️ 管理", PALETTE["input_bg"], self.accent_purple, lambda: self.select_tab("profiles")),
+            ("➕ 另存", PALETTE["input_bg"], self.accent_green, lambda: self.open_create_profile_dialog("current")),
+            ("💾 保存", self.accent_blue, "#11111b", self.save_active_profile),
+        ):
+            FlatButton(
+                profile_bar,
+                text=text,
+                bg=bg,
+                fg=fg,
+                font=(self.font_family, 8, "bold"),
+                padx=7,
+                pady=2,
+                command=cmd,
+            ).pack(side=tk.RIGHT, padx=(4, 0))
+
+        self.cb_quick_profile = ttk.Combobox(
+            profile_bar,
+            textvariable=self.var_quick_profile_select,
+            values=["（未绑定任务档案）"],
+            state="readonly",
+            width=22,
+        )
+        self.cb_quick_profile.pack(side=tk.RIGHT, padx=(0, 4))
+        self.cb_quick_profile.bind("<<ComboboxSelected>>", self._on_quick_profile_selected)
+        HoverTooltip(self.cb_quick_profile, "快速切换已保存的任务档案（切换前自动检查未保存修改）。")
+
+        # 4. 左侧 6 大功能选项卡 (ttk.Notebook)
         self.notebook = ttk.Notebook(left_container, style="Dark.TNotebook")
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
         tab_specs = [
-            (" 🚀 快速训练 ", build_train_tab),
-            (" 📂 数据与续炼 ", build_dataset_tab),
-            (" 📦 底模与框架 ", build_models_tab),
-            (" ☁️ 云端遥控 ", build_cloud_tab),
-            (" 📖 指南与工具 ", build_help_tab),
+            ("train", " 🚀 快速训练 ", build_train_tab),
+            ("dataset", " 📂 数据与续炼 ", build_dataset_tab),
+            ("models", " 📦 底模与框架 ", build_models_tab),
+            ("cloud", " ☁️ 云端遥控 ", build_cloud_tab),
+            ("profiles", " 🗂️ 任务档案 ", build_profiles_tab),
+            ("help", " 📖 指南与工具 ", build_help_tab),
         ]
         self.tab_frames = []
         self.tab_scrolls = []
-        for title, builder in tab_specs:
+        self.tab_index_map = {}
+        self.tab_scroll_map = {}
+        for idx, (key, title, builder) in enumerate(tab_specs):
             frame = ttk.Frame(self.notebook, style="TabContent.TFrame")
             self.notebook.add(frame, text=title)
+            scroll = builder(frame, self)
             self.tab_frames.append(frame)
-            self.tab_scrolls.append(builder(frame, self))
+            self.tab_scrolls.append(scroll)
+            self.tab_index_map[key] = idx
+            self.tab_scroll_map[key] = scroll
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         for tab_idx in range(len(self.tab_frames)):
             self.root.bind(f"<Control-Key-{tab_idx + 1}>", lambda _e, i=tab_idx: self.select_tab(i))
 
-        # 4. 右侧常驻监控看板 (并保留向后兼容引用属性)
+        # 5. 右侧常驻监控看板 (并保留向后兼容引用属性)
         self.monitor = MonitorPanel(right_container, self.root, self)
         self.right_paned = self.monitor.right_paned
         self.loss_canvas = self.monitor.loss_canvas
@@ -456,16 +590,22 @@ class ModernLocalTrainerGUI:
             pass
         try:
             idx = self.notebook.index(self.notebook.select())
-            if idx == 3:
+            if idx == self.tab_index_map.get("cloud", 3):
                 self.refresh_cloud_sync_summary()
+            elif idx == self.tab_index_map.get("profiles", 4):
+                self.refresh_profile_list()
             if 0 <= idx < len(self.tab_scrolls):
                 scroll = self.tab_scrolls[idx]
                 self.root.after_idle(scroll.refresh_scroll_region)
         except Exception:
             pass
 
-    def select_tab(self, index: int):
-        """切换至指定索引的功能选项卡（0~4）。"""
+    def select_tab(self, index_or_key):
+        """切换至指定索引或具名键的功能选项卡（例如 0~5 或 'profiles'）。"""
+        if isinstance(index_or_key, str):
+            index = self.tab_index_map.get(index_or_key, -1)
+        else:
+            index = int(index_or_key)
         if 0 <= index < len(self.tab_frames):
             self.notebook.select(self.tab_frames[index])
 
@@ -522,6 +662,16 @@ class ModernLocalTrainerGUI:
             "flip": bool(self.var_flip.get()),
             "seed": self.var_seed.get().strip(),
             "save_format": self.var_save_format.get(),
+            "caption_template": self.var_caption_template.get(),
+            "caption_p_nl": self.var_caption_p_nl.get().strip(),
+            "caption_variants": self.var_caption_variants.get().strip(),
+            "int8_compute": bool(self.var_int8_compute.get()),
+            "compile_mode": self.var_compile_mode.get(),
+            "step_release": self.var_step_release.get().strip(),
+            "sample_every": self.var_sample_every.get().strip(),
+            "sample_prompt": self.var_sample_prompt.get().strip(),
+            "teacher_mode": self.var_teacher_mode.get(),
+            "distill_weight": self.var_distill_weight.get().strip(),
             "train_mode": self.var_train_mode.get(),
             "resume_path": self.var_resume_path.get().strip(),
             "kaggle_username": self.var_kaggle_username.get().strip(),
@@ -545,7 +695,9 @@ class ModernLocalTrainerGUI:
         }
 
     def save_local_config(self):
-        save_local_config(self.config_file, self._collect_raw_params())
+        payload = self._collect_raw_params()
+        payload["active_profile_id"] = getattr(self, "active_profile_id", "")
+        save_local_config(self.config_file, payload)
 
     def on_closing(self):
         """关闭主窗口前保存本机配置，并在训练未停机时弹窗防误触确认强杀。"""
@@ -556,6 +708,12 @@ class ModernLocalTrainerGUI:
             except Exception:
                 pass
             self._cloud_poll_job = None
+        if getattr(self, "_dirty_check_job", None) is not None:
+            try:
+                self.root.after_cancel(self._dirty_check_job)
+            except Exception:
+                pass
+            self._dirty_check_job = None
         if self.is_training and self.process is not None and self.process.poll() is None:
             confirm = messagebox.askyesno(
                 "训练任务正在后台运行",
@@ -584,9 +742,9 @@ class ModernLocalTrainerGUI:
             self.monitor.stop_metrics_polling()
         self.root.destroy()
 
-    # ==================== 动态交互、折叠抽屉与 8 套预设应用 ====================
+    # ==================== 动态交互、折叠抽屉与 9 套预设应用 ====================
     def on_dynamic_controls_changed(self):
-        """根据 Algo=LoKr、DoRA 开启、Timestep=uniform 动态显示或锁定对应控件。"""
+        """根据 Algo=LoKr、DoRA 开启、Timestep=uniform 及显存档位动态显示或锁定对应控件。"""
         try:
             algo = (self.var_algo.get() or "lora").strip().lower()
             dora = bool(self.var_dora.get())
@@ -614,8 +772,47 @@ class ModernLocalTrainerGUI:
                 else:
                     self.cb_mu.config(state="normal")
 
-            if hasattr(self, "tab_scrolls") and self.tab_scrolls:
-                self.root.after_idle(self.tab_scrolls[0].refresh_scroll_region)
+            from core.config_store import can_enable_teacher_distill, is_low_vram_preview_blocked
+
+            vram_p = self.var_vram_preset.get() if hasattr(self, "var_vram_preset") else "auto"
+            det_gb = float(getattr(self, "detected_vram_gb", 8.0) or 8.0)
+            tc_val = self.var_target_compute.get() if hasattr(self, "var_target_compute") else "local"
+
+            preview_blocked = is_low_vram_preview_blocked(vram_p, det_gb, tc_val)
+            if preview_blocked and hasattr(self, "var_sample_every"):
+                if str(self.var_sample_every.get() or "0").strip() != "0":
+                    self.var_sample_every.set("0")
+            if hasattr(self, "cb_sample_every") and hasattr(self, "ent_sample_prompt") and hasattr(self, "lbl_preview_guard"):
+                if preview_blocked:
+                    self.cb_sample_every.config(state="disabled")
+                    self.ent_sample_prompt.config(state="disabled")
+                    self.lbl_preview_guard.config(text="🛡️ 6G/8G默认关预览(防OOM)")
+                else:
+                    self.cb_sample_every.config(state="normal")
+                    self.ent_sample_prompt.config(state="normal")
+                    self.lbl_preview_guard.config(text="")
+
+            teacher_ok, t_prec, _t_reason = can_enable_teacher_distill(vram_p, det_gb, tc_val)
+            if not teacher_ok and hasattr(self, "var_teacher_mode"):
+                if str(self.var_teacher_mode.get() or "none").strip().lower() != "none":
+                    self.var_teacher_mode.set("none")
+            if hasattr(self, "cb_teacher_mode") and hasattr(self, "ent_distill_weight") and hasattr(self, "lbl_teacher_guard"):
+                if not teacher_ok:
+                    self.cb_teacher_mode.config(state="disabled")
+                    self.ent_distill_weight.config(state="disabled")
+                    self.lbl_teacher_guard.config(text="⚠️ <=12G防OOM禁用")
+                else:
+                    self.cb_teacher_mode.config(state="readonly")
+                    self.ent_distill_weight.config(state="normal")
+                    self.lbl_teacher_guard.config(
+                        text="💡 16G锁int8" if t_prec == "int8" else "✅ >=24G可用auto"
+                    )
+
+            train_scroll = getattr(self, "tab_scroll_map", {}).get("train")
+            if train_scroll is None and hasattr(self, "tab_scrolls") and self.tab_scrolls:
+                train_scroll = self.tab_scrolls[0]
+            if train_scroll is not None:
+                self.root.after_idle(train_scroll.refresh_scroll_region)
         except Exception:
             pass
 
@@ -625,15 +822,18 @@ class ModernLocalTrainerGUI:
             return
         if self._adv_expanded:
             self.adv_drawer_frame.pack_forget()
-            self.btn_adv_toggle.config(text="▸ 展开高阶算法 / 防过拟合 / 优化器调优区 (18项专业参数)")
+            self.btn_adv_toggle.config(text="▸ 展开高阶算法 / 防过拟合 / 引擎调优区 (v1.9 专业参数)")
             self._adv_expanded = False
         else:
             self.adv_drawer_frame.pack(fill=tk.X, pady=(6, 2))
-            self.btn_adv_toggle.config(text="▾ 收起高阶算法 / 防过拟合 / 优化器调优区")
+            self.btn_adv_toggle.config(text="▾ 收起高阶算法 / 防过拟合 / 引擎调优区")
             self._adv_expanded = True
             self.on_dynamic_controls_changed()
-        if self.tab_scrolls:
-            self.root.after_idle(self.tab_scrolls[0].refresh_scroll_region)
+        train_scroll = getattr(self, "tab_scroll_map", {}).get("train")
+        if train_scroll is None and hasattr(self, "tab_scrolls") and self.tab_scrolls:
+            train_scroll = self.tab_scrolls[0]
+        if train_scroll is not None:
+            self.root.after_idle(train_scroll.refresh_scroll_region)
 
     def _reset_advanced_defaults(self):
         """加载常规基础预设前重置高阶参数默认态，防止上一模板残留特殊优化器或 Dropout。"""
@@ -655,6 +855,17 @@ class ModernLocalTrainerGUI:
         self.var_flip.set(ADVANCED_DEFAULTS["flip"])
         self.var_seed.set(ADVANCED_DEFAULTS["seed"])
         self.var_save_format.set(ADVANCED_DEFAULTS["save_format"])
+        if hasattr(self, "var_caption_template"):
+            self.var_caption_template.set(ADVANCED_DEFAULTS["caption_template"])
+            self.var_caption_p_nl.set(ADVANCED_DEFAULTS["caption_p_nl"])
+            self.var_caption_variants.set(ADVANCED_DEFAULTS["caption_variants"])
+            self.var_int8_compute.set(ADVANCED_DEFAULTS["int8_compute"])
+            self.var_compile_mode.set(ADVANCED_DEFAULTS["compile_mode"])
+            self.var_step_release.set(ADVANCED_DEFAULTS["step_release"])
+            self.var_sample_every.set(ADVANCED_DEFAULTS["sample_every"])
+            self.var_sample_prompt.set(ADVANCED_DEFAULTS["sample_prompt"])
+            self.var_teacher_mode.set(ADVANCED_DEFAULTS["teacher_mode"])
+            self.var_distill_weight.set(ADVANCED_DEFAULTS["distill_weight"])
 
     def highlight_active_preset(self, preset_id: str):
         """高亮当前激活的黄金预设按钮，并恢复其余预设的基准暗色外观。"""
@@ -732,6 +943,8 @@ class ModernLocalTrainerGUI:
         self.recalculate_math()
         self.update_quick_status_summary()
         self.highlight_active_preset(preset_id)
+        if hasattr(self, "_schedule_dirty_check"):
+            self._schedule_dirty_check()
         dialog_msg = preset["dialog_message"]
         if cloud_notes:
             dialog_msg += "\n\n【☁️ 云端算力自动适配】\n" + "\n".join(f"• {n}" for n in cloud_notes)
@@ -1105,8 +1318,11 @@ class ModernLocalTrainerGUI:
         else:
             self.multi_data_frame.pack_forget()
             self.single_data_frame.pack(fill=tk.X, pady=(2, 0), before=self.output_dirs_anchor)
-        if hasattr(self, "tab_scrolls") and len(self.tab_scrolls) > 1:
-            self.root.after_idle(self.tab_scrolls[1].refresh_scroll_region)
+        ds_scroll = getattr(self, "tab_scroll_map", {}).get("dataset")
+        if ds_scroll is None and hasattr(self, "tab_scrolls") and len(self.tab_scrolls) > 1:
+            ds_scroll = self.tab_scrolls[1]
+        if ds_scroll is not None:
+            self.root.after_idle(ds_scroll.refresh_scroll_region)
 
     def toggle_multi_subset_mode(self):
         self._apply_subset_panel_visibility()
@@ -1134,6 +1350,8 @@ class ModernLocalTrainerGUI:
                 ),
             )
         self.update_quick_status_summary()
+        if hasattr(self, "_schedule_dirty_check") and not getattr(self, "_suppress_var_traces", False):
+            self._schedule_dirty_check()
 
     def _open_subset_editor_dialog(self, index=None):
         """打开暗色子集编辑弹窗（支持新增与编辑）。"""
@@ -1347,8 +1565,8 @@ class ModernLocalTrainerGUI:
             self.var_train_mode.set("resume")
             self.refresh_resume_status()
 
-    def refresh_resume_status(self):
-        """检测断点目录或 .safetensors 权重规格，并在 resume/init_from 下自动对齐算法/Rank/LoKr。"""
+    def refresh_resume_status(self, auto_align_arch: bool = True):
+        """检测断点目录或 .safetensors 权重规格，并在 resume/init_from 下按需自动对齐算法/Rank/LoKr。"""
         mode = (self.var_train_mode.get() or "fresh").strip()
         manual_path = self.var_resume_path.get().strip()
         lora_name = self.var_lora_name.get().strip() or "my_moss_lora"
@@ -1406,26 +1624,28 @@ class ModernLocalTrainerGUI:
 
             if inspect_target and inspect_target.is_file():
                 info = train_local.inspect_safetensors_lora(inspect_target)
-                if info.get("rank"):
-                    self.var_rank.set(str(info["rank"]))
-                if info.get("alpha") is not None:
-                    self.var_alpha.set(str(info["alpha"]))
-                if info.get("algo"):
-                    self.var_algo.set(info["algo"])
-                self.var_dora.set(bool(info.get("dora", False)))
-                if info.get("preset"):
-                    self.var_target_preset.set(info["preset"])
-                if info.get("train_norms") is not None:
-                    self.var_train_norms.set(bool(info["train_norms"]))
-                if info.get("lokr_factor") is not None:
-                    self.var_lokr_factor.set(str(info["lokr_factor"]))
-                if info.get("lokr_full_matrix") is not None:
-                    self.var_lokr_full_matrix.set(bool(info["lokr_full_matrix"]))
-                if info.get("lokr_decompose_both") is not None:
-                    self.var_lokr_decompose_both.set(bool(info["lokr_decompose_both"]))
-                self.on_dynamic_controls_changed()
+                if auto_align_arch:
+                    if info.get("rank"):
+                        self.var_rank.set(str(info["rank"]))
+                    if info.get("alpha") is not None:
+                        self.var_alpha.set(str(info["alpha"]))
+                    if info.get("algo"):
+                        self.var_algo.set(info["algo"])
+                    self.var_dora.set(bool(info.get("dora", False)))
+                    if info.get("preset"):
+                        self.var_target_preset.set(info["preset"])
+                    if info.get("train_norms") is not None:
+                        self.var_train_norms.set(bool(info["train_norms"]))
+                    if info.get("lokr_factor") is not None:
+                        self.var_lokr_factor.set(str(info["lokr_factor"]))
+                    if info.get("lokr_full_matrix") is not None:
+                        self.var_lokr_full_matrix.set(bool(info["lokr_full_matrix"]))
+                    if info.get("lokr_decompose_both") is not None:
+                        self.var_lokr_decompose_both.set(bool(info["lokr_decompose_both"]))
+                    self.on_dynamic_controls_changed()
+                align_tag = "✅ 已自动对齐规格" if auto_align_arch else "🔎 检测到权重规格"
                 self.var_resume_status.set(
-                    f"{status_prefix}\n✅ 已自动对齐规格: Algo={info.get('algo')} | "
+                    f"{status_prefix}\n{align_tag}: Algo={info.get('algo')} | "
                     f"Rank={info.get('rank')} | Alpha={info.get('alpha')} | "
                     f"DoRA={info.get('dora')} | Preset={info.get('preset') or '默认'}"
                 )
@@ -1544,11 +1764,15 @@ class ModernLocalTrainerGUI:
                     f"Steps={self.var_steps.get()}, SaveEvery={self.var_save_every.get()}, EMA={self.var_ema.get()}\n"
                 )
 
+        self.on_dynamic_controls_changed()
         self.recalculate_math()
         self.refresh_cloud_sync_summary()
-        if hasattr(self, "tab_scrolls") and self.tab_scrolls:
+        train_scroll = getattr(self, "tab_scroll_map", {}).get("train")
+        if train_scroll is None and hasattr(self, "tab_scrolls") and self.tab_scrolls:
+            train_scroll = self.tab_scrolls[0]
+        if train_scroll is not None:
             try:
-                self.root.after_idle(self.tab_scrolls[0].refresh_scroll_region)
+                self.root.after_idle(train_scroll.refresh_scroll_region)
             except Exception:
                 pass
 
@@ -1922,9 +2146,12 @@ class ModernLocalTrainerGUI:
 
         self._sync_cloud_source_buttons()
         self.refresh_cloud_sync_summary()
-        if hasattr(self, "tab_scrolls") and len(self.tab_scrolls) > 3:
+        cloud_scroll = getattr(self, "tab_scroll_map", {}).get("cloud")
+        if cloud_scroll is None and hasattr(self, "tab_scrolls") and len(self.tab_scrolls) > 3:
+            cloud_scroll = self.tab_scrolls[3]
+        if cloud_scroll is not None:
             try:
-                self.root.after_idle(self.tab_scrolls[3].refresh_scroll_region)
+                self.root.after_idle(cloud_scroll.refresh_scroll_region)
             except Exception:
                 pass
 
@@ -3200,6 +3427,994 @@ class ModernLocalTrainerGUI:
         else:
             self.monitor.log(f"\n❌ 训练进程异常退出 (Exit Code={returncode})，请检查控制台末尾报错。\n")
             messagebox.showerror("训练异常结束", f"训练进程退出码：{returncode}\n请查看右侧终端日志排查问题，或到【📖 指南与工具】查看排障矩阵。")
+
+    # ==================== 任务档案管理（每 LoRA 独立本地 + 云端配置） ====================
+    def _bind_dirty_check_traces(self):
+        """为所有配置变量挂载轻量防抖脏检查监听。"""
+        tracked_vars = [
+            self.var_data_dir, self.var_multi_subset, self.var_comfy_dir, self.var_output_dir,
+            self.var_lora_name, self.var_trigger, self.var_transformer_path, self.var_text_encoder_path,
+            self.var_vae_path, self.var_copy_comfy, self.var_precision, self.var_base_precision,
+            self.var_vram_preset, self.var_resolution, self.var_text_device, self.var_vae_device,
+            self.var_algo, self.var_dora, self.var_target_preset, self.var_loraplus_ratio,
+            self.var_rank, self.var_alpha, self.var_lr, self.var_repeats, self.var_epochs,
+            self.var_steps, self.var_save_every, self.var_grad_acc, self.var_timestep_mu,
+            self.var_tune, self.var_lokr_factor, self.var_lokr_full_matrix, self.var_lokr_decompose_both,
+            self.var_train_norms, self.var_rank_dropout, self.var_module_dropout, self.var_input_dropout,
+            self.var_optimizer, self.var_lr_scheduler, self.var_warmup_steps, self.var_weight_decay,
+            self.var_wd_rules, self.var_ema, self.var_timestep, self.var_text_drop, self.var_flip,
+            self.var_seed, self.var_save_format,
+            self.var_caption_template, self.var_caption_p_nl, self.var_caption_variants,
+            self.var_int8_compute, self.var_compile_mode, self.var_step_release,
+            self.var_sample_every, self.var_sample_prompt,
+            self.var_teacher_mode, self.var_distill_weight,
+            self.var_train_mode, self.var_resume_path,
+            self.var_kaggle_username, self.var_kaggle_dataset_slug, self.var_kaggle_kernel_slug,
+            self.var_kaggle_accelerator, self.var_kaggle_variant, self.var_kaggle_base_quant,
+            self.var_kaggle_dataset_source, self.var_external_dataset_url, self.var_hf_dataset_repo,
+            self.var_hf_dataset_subdir, self.var_hf_upload_local, self.var_r2_account_id,
+            self.var_r2_bucket, self.var_r2_prefix, self.var_r2_access_key_id,
+            self.var_kaggle_max_run_min, self.var_target_compute, self.var_manual_img_count,
+        ]
+        for var in tracked_vars:
+            var.trace_add("write", lambda *_: self._schedule_dirty_check())
+
+    def _schedule_dirty_check(self):
+        if getattr(self, "_suppress_var_traces", False) or getattr(self, "_closing", False):
+            return
+        dirty_job = getattr(self, "_dirty_check_job", None)
+        if dirty_job is not None:
+            try:
+                self.root.after_cancel(dirty_job)
+            except Exception:
+                pass
+        if hasattr(self, "root"):
+            try:
+                self._dirty_check_job = self.root.after(150, self._update_active_profile_bar)
+            except Exception:
+                pass
+
+    def has_unsaved_profile_changes(self) -> bool:
+        """判断当前控制台参数相对于已绑定的任务档案是否存在未保存修改。"""
+        if not self.active_profile_id or self._active_profile_snapshot is None:
+            return False
+        return bool(compute_profile_diff(self._active_profile_snapshot, self._collect_raw_params()))
+
+    def _confirm_unsaved_profile_before_switch(self) -> bool:
+        """切换任务档案前拦截未保存改动；返回 True 表示允许继续切换，False 表示取消切换。"""
+        if not self.has_unsaved_profile_changes():
+            return True
+        name = (self._active_profile_record or {}).get("name") or self.active_profile_id
+        ans = messagebox.askyesnocancel(
+            "当前任务档案有未保存修改",
+            f"当前任务档案「{name}」的参数已被修改但尚未保存。\n\n"
+            "• 点击【是】：先保存修改到当前档案，再切换\n"
+            "• 点击【否】：放弃当前修改，直接切换\n"
+            "• 点击【取消】：留在本任务继续编辑",
+            icon="warning",
+        )
+        if ans is None:
+            return False
+        if ans is True:
+            return bool(self.save_active_profile(silent=True))
+        return True
+
+    def _update_active_profile_bar(self):
+        """刷新左侧顶部快捷任务条的当前任务名称、未保存标记及快捷下拉选项。"""
+        self._dirty_check_job = None
+        if self.active_profile_id and self._active_profile_record:
+            name = self._active_profile_record.get("name", self.active_profile_id)
+            dirty = self.has_unsaved_profile_changes()
+            dirty_suffix = "  *未保存" if dirty else ""
+            self.var_active_profile_badge.set(f"📌 当前任务：{name}{dirty_suffix}")
+            target_display = self._format_quick_choice_label(self._active_profile_record)
+            if self.var_quick_profile_select.get() != target_display:
+                self.var_quick_profile_select.set(target_display)
+        else:
+            self.var_active_profile_badge.set("📌 当前任务：未绑定（草稿，点右方【➕ 另存】保存）")
+            if self.var_quick_profile_select.get() != "（未绑定任务档案）":
+                self.var_quick_profile_select.set("（未绑定任务档案）")
+
+    @staticmethod
+    def _format_quick_choice_label(record: dict) -> str:
+        prefix = "⭐ " if record.get("pinned") else ""
+        tc = (record.get("config") or {}).get("target_compute", "local")
+        badge = {"local": "💻", "kaggle_t4x2": "☁️", "kaggle_t4x1": "⚡"}.get(tc, "🧩")
+        return f"{prefix}{badge} {record.get('name', record.get('id', 'task'))} [{record.get('id', '')}]"
+
+    def _sync_quick_profile_combobox(self, all_records: list):
+        choices = ["（未绑定任务档案）"]
+        mapping = {}
+        for rec in all_records:
+            label = self._format_quick_choice_label(rec)
+            choices.append(label)
+            mapping[label] = rec["id"]
+        self._profile_quick_choices = mapping
+        if hasattr(self, "cb_quick_profile"):
+            self.cb_quick_profile.configure(values=choices)
+        if self.active_profile_id and self._active_profile_record:
+            cur_lbl = self._format_quick_choice_label(self._active_profile_record)
+            if cur_lbl in mapping:
+                self.var_quick_profile_select.set(cur_lbl)
+                return
+        self.var_quick_profile_select.set("（未绑定任务档案）")
+
+    def _restore_active_profile_state(self):
+        """启动时恢复上次绑定的档案元信息与基准快照（档案缺失时自动退回未绑定状态）。"""
+        if not self.active_profile_id:
+            self._active_profile_record = None
+            self._active_profile_snapshot = None
+            return
+        try:
+            rec = load_task_profile(self.active_profile_id, self.profiles_dir)
+            self._active_profile_record = rec
+            self._active_profile_snapshot = sanitize_profile_config(rec.get("config", {}))
+        except Exception:
+            self.active_profile_id = ""
+            self._active_profile_record = None
+            self._active_profile_snapshot = None
+
+    def _resolve_profile_category_filter_key(self) -> str:
+        label = (self.var_profile_cat_filter.get() or "全部类型").strip()
+        for key, txt in PROFILE_CATEGORIES:
+            if txt == label or key == label:
+                return key
+        return "all"
+
+    def refresh_profile_list(self, select_id: str = None):
+        """刷新任务档案列表、快捷下拉框以及选中档案的详情透视区。"""
+        warnings = []
+        all_records = list_task_profiles(self.profiles_dir, warnings=warnings)
+        if warnings:
+            self.monitor.log(f"⚠️ [任务档案] 跳过 {len(warnings)} 个损坏 JSON 文件：{'; '.join(warnings)}\n")
+
+        self._sync_quick_profile_combobox(all_records)
+        filtered = list_task_profiles(
+            self.profiles_dir,
+            query=self.var_profile_search.get().strip(),
+            compute_filter=self.var_profile_compute_filter.get().strip() or "all",
+            category_filter=self._resolve_profile_category_filter_key(),
+        )
+        self._profile_records_cache = filtered
+        self.var_profile_count_stat.set(f"显示 {len(filtered)} / 共 {len(all_records)} 份档案")
+
+        if not hasattr(self, "profile_tree"):
+            return
+
+        cur_sel = select_id or (self.profile_tree.selection()[0] if self.profile_tree.selection() else None)
+        for iid in self.profile_tree.get_children():
+            self.profile_tree.delete(iid)
+
+        for rec in filtered:
+            sm = format_profile_summary(rec)
+            name_disp = rec["name"]
+            if rec["id"] == self.active_profile_id:
+                name_disp = f"▶ {name_disp}"
+            self.profile_tree.insert(
+                "",
+                tk.END,
+                iid=rec["id"],
+                values=(
+                    sm["pinned_icon"],
+                    name_disp,
+                    sm["compute_label"],
+                    sm["algo_spec"],
+                    sm["steps_lr"],
+                    sm["cloud_src"],
+                    sm["updated_short"],
+                ),
+            )
+
+        target_iid = None
+        if cur_sel and self.profile_tree.exists(cur_sel):
+            target_iid = cur_sel
+        elif self.active_profile_id and self.profile_tree.exists(self.active_profile_id):
+            target_iid = self.active_profile_id
+        elif filtered:
+            target_iid = filtered[0]["id"]
+
+        if target_iid:
+            self.profile_tree.selection_set(target_iid)
+            self.profile_tree.focus(target_iid)
+            self.on_profile_tree_select()
+        else:
+            self._render_profile_detail(None)
+
+    def reset_profile_filters(self):
+        self.var_profile_search.set("")
+        self.var_profile_compute_filter.set("all")
+        self.var_profile_cat_filter.set("全部类型")
+        self.refresh_profile_list()
+
+    def _get_selected_profile_id(self) -> str:
+        if not hasattr(self, "profile_tree"):
+            return ""
+        sel = self.profile_tree.selection()
+        return str(sel[0]) if sel else ""
+
+    def _find_cached_profile(self, profile_id: str):
+        for rec in self._profile_records_cache:
+            if rec.get("id") == profile_id:
+                return rec
+        return None
+
+    def _render_profile_detail(self, record):
+        if not hasattr(self, "profile_detail_text"):
+            return
+        self.profile_detail_text.config(state=tk.NORMAL)
+        self.profile_detail_text.delete("1.0", tk.END)
+        if not record:
+            self.var_profile_detail_title.set("📄 档案详情透视")
+            self.profile_detail_text.insert(
+                "1.0",
+                "当前暂无选中档案。点击上方【➕ 新建任务档案】可将当前配置保存为独立任务，或基于 8 套黄金预设快速创建新模板。",
+            )
+        else:
+            sm = format_profile_summary(record)
+            active_tag = " [当前激活]" if record.get("id") == self.active_profile_id else ""
+            self.var_profile_detail_title.set(f"📄 档案详情：{record.get('name', '')}{active_tag}")
+            self.profile_detail_text.insert("1.0", sm["detail_text"])
+        self.profile_detail_text.config(state=tk.DISABLED)
+
+    def on_profile_tree_select(self):
+        pid = self._get_selected_profile_id()
+        rec = self._find_cached_profile(pid)
+        if rec is None and pid:
+            try:
+                rec = load_task_profile(pid, self.profiles_dir)
+            except Exception:
+                rec = None
+        self._render_profile_detail(rec)
+
+    def apply_config_dict(
+        self,
+        cfg: dict,
+        *,
+        preserve_missing_env_paths: bool = True,
+        preset_id: str = None,
+        clear_ephemeral_r2_url: bool = True,
+    ):
+        """将任务配置字典原子化回填到全部本地/云端控件，并在结束时统一刷新联动面板。"""
+        clean_cfg = sanitize_profile_config(cfg)
+        if preserve_missing_env_paths:
+            cur_raw = self._collect_raw_params()
+            if not clean_cfg.get("comfy_models_dir") or not os.path.exists(clean_cfg["comfy_models_dir"]):
+                if cur_raw.get("comfy_models_dir") and os.path.exists(cur_raw["comfy_models_dir"]):
+                    clean_cfg["comfy_models_dir"] = cur_raw["comfy_models_dir"]
+            for model_key in ("transformer_path", "text_encoder_path", "vae_path"):
+                val = clean_cfg.get(model_key, "")
+                if (not val or not Path(val).is_file()) and cur_raw.get(model_key) and Path(cur_raw[model_key]).is_file():
+                    clean_cfg[model_key] = cur_raw[model_key]
+            if not clean_cfg.get("output_dir"):
+                clean_cfg["output_dir"] = cur_raw.get("output_dir") or str((PROJECT_ROOT / "output").resolve())
+            for acct_key in ("kaggle_username", "r2_account_id", "r2_bucket", "r2_access_key_id"):
+                if not clean_cfg.get(acct_key) and cur_raw.get(acct_key):
+                    clean_cfg[acct_key] = cur_raw[acct_key]
+
+        default_dataset_dir = str((PROJECT_ROOT / "dataset").resolve())
+        self._suppress_var_traces = True
+        try:
+            self.var_data_dir.set(clean_cfg.get("data_dir") or default_dataset_dir)
+            self.var_multi_subset.set(bool(clean_cfg.get("multi_subset", False)))
+            raw_subs = clean_cfg.get("subsets", [])
+            if isinstance(raw_subs, list) and len(raw_subs) > 0:
+                self.subsets = [dict(x) for x in raw_subs if isinstance(x, dict)]
+            else:
+                self.subsets = [
+                    {
+                        "name": "main_dataset",
+                        "path": self.var_data_dir.get(),
+                        "repeats": int(float(clean_cfg.get("repeats", "6") or 6)),
+                        "trigger": clean_cfg.get("trigger_word", ""),
+                        "enabled": True,
+                    }
+                ]
+
+            self.var_comfy_dir.set(clean_cfg.get("comfy_models_dir", ""))
+            self.var_output_dir.set(clean_cfg.get("output_dir") or str((PROJECT_ROOT / "output").resolve()))
+            self.var_lora_name.set(clean_cfg.get("lora_name", "my_moss_lora"))
+            self.var_trigger.set(clean_cfg.get("trigger_word", ""))
+            self.var_transformer_path.set(clean_cfg.get("transformer_path", ""))
+            self.var_text_encoder_path.set(clean_cfg.get("text_encoder_path", ""))
+            self.var_vae_path.set(clean_cfg.get("vae_path", ""))
+            self.var_copy_comfy.set(bool(clean_cfg.get("copy_to_comfy_loras", False)))
+
+            self.var_precision.set(clean_cfg.get("precision", "bf16"))
+            self.var_base_precision.set(clean_cfg.get("base_precision", "auto"))
+            self.var_vram_preset.set(clean_cfg.get("vram_preset", "auto"))
+            self.var_resolution.set(str(clean_cfg.get("resolution", "1024")))
+            self.var_text_device.set(clean_cfg.get("text_device", "cpu"))
+            self.var_vae_device.set(clean_cfg.get("vae_device", "cuda"))
+            self.var_algo.set(clean_cfg.get("algo", "lora"))
+            self.var_dora.set(bool(clean_cfg.get("dora", False)))
+            self.var_target_preset.set(clean_cfg.get("target_preset", "attn-mlp"))
+            self.var_loraplus_ratio.set(str(clean_cfg.get("loraplus_ratio", "1.0")))
+            self.var_rank.set(str(clean_cfg.get("rank", "32")))
+            self.var_alpha.set(str(clean_cfg.get("alpha", "32.0")))
+            self.var_lr.set(str(clean_cfg.get("lr", "1e-4")))
+            self.var_repeats.set(str(clean_cfg.get("repeats", "6")))
+            self.var_epochs.set(str(clean_cfg.get("epochs", "4")))
+            self.var_steps.set(str(clean_cfg.get("steps", "600")))
+            self.var_save_every.set(str(clean_cfg.get("save_every", "100")))
+            self.var_grad_acc.set(str(clean_cfg.get("grad_acc", "1")))
+            self.var_timestep_mu.set(str(clean_cfg.get("timestep_mu", "-0.85")))
+            self.var_tune.set(clean_cfg.get("tune", "off"))
+
+            self.var_lokr_factor.set(str(clean_cfg.get("lokr_factor", ADVANCED_DEFAULTS["lokr_factor"])))
+            self.var_lokr_full_matrix.set(bool(clean_cfg.get("lokr_full_matrix", ADVANCED_DEFAULTS["lokr_full_matrix"])))
+            self.var_lokr_decompose_both.set(bool(clean_cfg.get("lokr_decompose_both", ADVANCED_DEFAULTS["lokr_decompose_both"])))
+            self.var_train_norms.set(bool(clean_cfg.get("train_norms", ADVANCED_DEFAULTS["train_norms"])))
+            self.var_rank_dropout.set(str(clean_cfg.get("rank_dropout", ADVANCED_DEFAULTS["rank_dropout"])))
+            self.var_module_dropout.set(str(clean_cfg.get("module_dropout", ADVANCED_DEFAULTS["module_dropout"])))
+            self.var_input_dropout.set(str(clean_cfg.get("input_dropout", ADVANCED_DEFAULTS["input_dropout"])))
+            self.var_optimizer.set(str(clean_cfg.get("optimizer", ADVANCED_DEFAULTS["optimizer"])))
+            self.var_lr_scheduler.set(str(clean_cfg.get("lr_scheduler", ADVANCED_DEFAULTS["lr_scheduler"])))
+            self.var_warmup_steps.set(str(clean_cfg.get("warmup_steps", ADVANCED_DEFAULTS["warmup_steps"])))
+            self.var_weight_decay.set(str(clean_cfg.get("weight_decay", ADVANCED_DEFAULTS["weight_decay"])))
+            self.var_wd_rules.set(str(clean_cfg.get("wd_rules", ADVANCED_DEFAULTS["wd_rules"])))
+            self.var_ema.set(str(clean_cfg.get("ema", ADVANCED_DEFAULTS["ema"])))
+            self.var_timestep.set(str(clean_cfg.get("timestep", ADVANCED_DEFAULTS["timestep"])))
+            self.var_text_drop.set(str(clean_cfg.get("text_drop", ADVANCED_DEFAULTS["text_drop"])))
+            self.var_flip.set(bool(clean_cfg.get("flip", ADVANCED_DEFAULTS["flip"])))
+            self.var_seed.set(str(clean_cfg.get("seed", ADVANCED_DEFAULTS["seed"])))
+            self.var_save_format.set(str(clean_cfg.get("save_format", ADVANCED_DEFAULTS["save_format"])))
+            self.var_caption_template.set(str(clean_cfg.get("caption_template", ADVANCED_DEFAULTS["caption_template"])))
+            self.var_caption_p_nl.set(str(clean_cfg.get("caption_p_nl", ADVANCED_DEFAULTS["caption_p_nl"])))
+            self.var_caption_variants.set(str(clean_cfg.get("caption_variants", ADVANCED_DEFAULTS["caption_variants"])))
+            self.var_int8_compute.set(bool(clean_cfg.get("int8_compute", ADVANCED_DEFAULTS["int8_compute"])))
+            self.var_compile_mode.set(str(clean_cfg.get("compile_mode", ADVANCED_DEFAULTS["compile_mode"])))
+            self.var_step_release.set(str(clean_cfg.get("step_release", ADVANCED_DEFAULTS["step_release"])))
+            self.var_sample_every.set(str(clean_cfg.get("sample_every", ADVANCED_DEFAULTS["sample_every"])))
+            self.var_sample_prompt.set(str(clean_cfg.get("sample_prompt", ADVANCED_DEFAULTS["sample_prompt"])))
+            self.var_teacher_mode.set(str(clean_cfg.get("teacher_mode", ADVANCED_DEFAULTS["teacher_mode"])))
+            self.var_distill_weight.set(str(clean_cfg.get("distill_weight", ADVANCED_DEFAULTS["distill_weight"])))
+
+            self.var_train_mode.set(clean_cfg.get("train_mode", "fresh"))
+            self.var_resume_path.set(clean_cfg.get("resume_path", ""))
+
+            self.var_kaggle_username.set(clean_cfg.get("kaggle_username", ""))
+            self.var_kaggle_dataset_slug.set(clean_cfg.get("kaggle_dataset_slug", ""))
+            self.var_kaggle_kernel_slug.set(clean_cfg.get("kaggle_kernel_slug", ""))
+            self.var_kaggle_accelerator.set(clean_cfg.get("kaggle_accelerator", "NvidiaTeslaT4"))
+            self.var_kaggle_variant.set(clean_cfg.get("kaggle_variant", "heal"))
+            self.var_kaggle_base_quant.set(clean_cfg.get("kaggle_base_quant", "auto"))
+            self.var_kaggle_dataset_source.set(clean_cfg.get("kaggle_dataset_source", "local"))
+            self.var_external_dataset_url.set(clean_cfg.get("external_dataset_url", ""))
+            self.var_hf_dataset_repo.set(clean_cfg.get("hf_dataset_repo", ""))
+            self.var_hf_dataset_subdir.set(clean_cfg.get("hf_dataset_subdir", ""))
+            self.var_hf_upload_local.set(bool(clean_cfg.get("hf_upload_local", True)))
+            self.var_r2_account_id.set(clean_cfg.get("r2_account_id", ""))
+            self.var_r2_bucket.set(clean_cfg.get("r2_bucket", ""))
+            self.var_r2_prefix.set(clean_cfg.get("r2_prefix", "moss-datasets"))
+            self.var_r2_access_key_id.set(clean_cfg.get("r2_access_key_id", ""))
+            if clear_ephemeral_r2_url:
+                self.var_r2_dataset_url.set("")
+            self.var_kaggle_max_run_min.set(clean_cfg.get("kaggle_max_run_min", "540") or "540")
+            self.var_target_compute.set(clean_cfg.get("target_compute", "local"))
+            self.var_manual_img_count.set(clean_cfg.get("manual_img_count", ""))
+        finally:
+            self._suppress_var_traces = False
+
+        self._apply_subset_panel_visibility()
+        self.refresh_subset_tree()
+        self.on_dynamic_controls_changed()
+        self.on_cloud_dataset_source_changed()
+        self.on_target_compute_changed(silent=True, from_cloud_tab=True)
+        self.update_dataset_stats()
+        self.update_output_preview()
+        self.refresh_resume_status(auto_align_arch=False)
+        self.on_dynamic_controls_changed()
+        self.recalculate_math()
+        self.refresh_cloud_sync_summary()
+        self.update_quick_status_summary()
+        self.highlight_active_preset(preset_id or None)
+
+    def load_profile_by_id(self, profile_id: str, *, switch_to_tab=None, skip_dirty_check: bool = False) -> bool:
+        """载入指定任务档案到主控制台（包含运行态拦截与未保存修改提示）。"""
+        if self.is_training or self._cloud_busy:
+            messagebox.showwarning("任务正在运行", "当前本地训练或云端操作正在进行中，请结束后再切换任务档案。")
+            self._update_active_profile_bar()
+            return False
+
+        if not skip_dirty_check and not self._confirm_unsaved_profile_before_switch():
+            self._update_active_profile_bar()
+            return False
+
+        try:
+            rec = load_task_profile(profile_id, self.profiles_dir)
+            rec = touch_profile_loaded(rec["id"], self.profiles_dir)
+        except Exception as err:
+            messagebox.showerror("载入档案失败", f"无法读取任务档案 [{profile_id}]：\n{err}")
+            self.refresh_profile_list()
+            return False
+
+        self.apply_config_dict(
+            rec["config"],
+            preserve_missing_env_paths=True,
+            preset_id=rec.get("preset_id") or None,
+            clear_ephemeral_r2_url=True,
+        )
+        self.active_profile_id = rec["id"]
+        self._active_profile_record = rec
+        self._active_profile_snapshot = sanitize_profile_config(self._collect_raw_params())
+        self.save_local_config()
+        self.refresh_profile_list(select_id=rec["id"])
+        self._update_active_profile_bar()
+        self.monitor.log(f"[任务档案] 已载入「{rec['name']}」(ID={rec['id']}, 算力={rec['config'].get('target_compute')})\n")
+        if switch_to_tab is not None:
+            self.select_tab(switch_to_tab)
+        return True
+
+    def load_selected_profile(self, switch_to_tab=None):
+        pid = self._get_selected_profile_id()
+        if not pid:
+            messagebox.showinfo("提示", "请先在列表中选中要载入的任务档案。")
+            return
+        self.load_profile_by_id(pid, switch_to_tab=switch_to_tab)
+
+    def _on_quick_profile_selected(self, _event=None):
+        sel_label = self.var_quick_profile_select.get()
+        pid = self._profile_quick_choices.get(sel_label)
+        if not pid:
+            if not self.active_profile_id:
+                return
+            if not self._confirm_unsaved_profile_before_switch():
+                self._update_active_profile_bar()
+                return
+            self.active_profile_id = ""
+            self._active_profile_record = None
+            self._active_profile_snapshot = None
+            self.save_local_config()
+            self.refresh_profile_list()
+            self._update_active_profile_bar()
+            return
+        if pid == self.active_profile_id:
+            return
+        self.load_profile_by_id(pid)
+
+    def save_active_profile(self, silent: bool = False) -> bool:
+        """将当前控制台参数保存回当前激活档案；若尚未绑定档案，引导打开另存弹窗。"""
+        if not self.active_profile_id or not self._active_profile_record:
+            if silent:
+                return False
+            self.open_create_profile_dialog("current")
+            return False
+
+        cur = self._active_profile_record
+        preset_id = getattr(self, "_active_preset_id", None) or cur.get("preset_id", "")
+        try:
+            updated = save_task_profile(
+                name=cur["name"],
+                config=self._collect_raw_params(),
+                profiles_dir=self.profiles_dir,
+                profile_id=cur["id"],
+                category=cur.get("category", "custom"),
+                tags=cur.get("tags", []),
+                notes=cur.get("notes", ""),
+                preset_id=preset_id or "",
+                pinned=bool(cur.get("pinned", False)),
+                overwrite=True,
+            )
+            self._active_profile_record = updated
+            self._active_profile_snapshot = sanitize_profile_config(self._collect_raw_params())
+            self.save_local_config()
+            self.refresh_profile_list(select_id=updated["id"])
+            self._update_active_profile_bar()
+            self.monitor.log(f"[任务档案] 已保存当前参数到「{updated['name']}」\n")
+            if not silent:
+                messagebox.showinfo("保存成功", f"已将当前本地与云端参数保存至任务档案「{updated['name']}」。")
+            return True
+        except Exception as err:
+            messagebox.showerror("保存失败", str(err))
+            return False
+
+    def save_current_to_selected_profile(self):
+        pid = self._get_selected_profile_id()
+        if not pid:
+            messagebox.showinfo("提示", "请先在列表中选中一个目标档案。")
+            return
+        rec = self._find_cached_profile(pid) or load_task_profile(pid, self.profiles_dir)
+        if pid != self.active_profile_id:
+            if not messagebox.askyesno(
+                "确认覆盖保存",
+                f"确定将当前控制台的全部参数覆盖保存到档案「{rec['name']}」吗？",
+            ):
+                return
+        preset_id = getattr(self, "_active_preset_id", None) or rec.get("preset_id", "")
+        updated = save_task_profile(
+            name=rec["name"],
+            config=self._collect_raw_params(),
+            profiles_dir=self.profiles_dir,
+            profile_id=rec["id"],
+            category=rec.get("category", "custom"),
+            tags=rec.get("tags", []),
+            notes=rec.get("notes", ""),
+            preset_id=preset_id or "",
+            pinned=bool(rec.get("pinned", False)),
+            overwrite=True,
+        )
+        self.active_profile_id = updated["id"]
+        self._active_profile_record = updated
+        self._active_profile_snapshot = sanitize_profile_config(self._collect_raw_params())
+        self.save_local_config()
+        self.refresh_profile_list(select_id=updated["id"])
+        self._update_active_profile_bar()
+        self.monitor.log(f"[任务档案] 已覆盖保存至「{updated['name']}」\n")
+        messagebox.showinfo("保存成功", f"已将当前参数保存至档案「{updated['name']}」并设为当前激活任务。")
+
+    def _create_themed_dialog(self, title: str, geometry: str) -> tk.Toplevel:
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.configure(bg=self.card_bg)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.geometry(geometry)
+        icon_path = PROJECT_ROOT / "assets" / "moss_trainer.ico"
+        if icon_path.exists():
+            try:
+                dlg.iconbitmap(str(icon_path))
+            except Exception:
+                pass
+        apply_windows_dark_titlebar(dlg)
+        return dlg
+
+    def open_create_profile_dialog(self, default_source: str = "current"):
+        """弹出新建任务档案弹窗（支持从当前参数保存 / 基于黄金预设+算力创建 / 复制已有档案）。"""
+        dlg = self._create_themed_dialog("➕ 新建 / 另存任务档案", "560x455")
+        body = tk.Frame(dlg, bg=self.card_bg, padx=14, pady=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(1, weight=1)
+
+        cur_lora = self.var_lora_name.get().strip() or "my_moss_lora"
+        v_name = tk.StringVar(value=f"{cur_lora}_{self.var_target_compute.get().strip() or 'local'}")
+        cat_choices = [(k, lbl) for k, lbl in PROFILE_CATEGORIES if k != "all"]
+        v_cat = tk.StringVar(value=cat_choices[-1][1])
+        v_tags = tk.StringVar(value="")
+        v_notes = tk.StringVar(value="")
+        v_source = tk.StringVar(value=default_source if default_source in ("current", "preset", "copy") else "current")
+        preset_choices = [f"{p['id']} | {p['label']}" for p in PRESETS]
+        v_preset = tk.StringVar(value=preset_choices[0])
+        v_preset_compute = tk.StringVar(value=self.var_target_compute.get().strip() or "local")
+        all_existing = list_task_profiles(self.profiles_dir)
+        copy_choices = [f"{r['id']} | {r['name']}" for r in all_existing] or ["（暂无现有档案）"]
+        v_copy_src = tk.StringVar(value=copy_choices[0])
+        v_sync_lora = tk.BooleanVar(value=True)
+        v_load_now = tk.BooleanVar(value=True)
+
+        tk.Label(body, text="档案名称:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).grid(row=0, column=0, sticky="w", pady=4)
+        tk.Entry(body, textvariable=v_name, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        tk.Label(body, text="任务分类:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Combobox(body, textvariable=v_cat, values=[lbl for _k, lbl in cat_choices], state="readonly").grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        tk.Label(body, text="标签 (逗号隔开):", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=2, column=0, sticky="w", pady=4)
+        tk.Entry(body, textvariable=v_tags, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        tk.Label(body, text="初始化来源:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).grid(row=3, column=0, sticky="w", pady=6)
+        src_frame = tk.Frame(body, bg=self.card_bg)
+        src_frame.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=6)
+
+        preset_row = tk.Frame(body, bg=self.card_bg)
+        preset_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=4)
+        preset_row.columnconfigure(1, weight=1)
+        tk.Label(preset_row, text="黄金预设:", bg=self.card_bg, fg=self.accent_blue, font=(self.font_family, 8, "bold")).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Combobox(preset_row, textvariable=v_preset, values=preset_choices, state="readonly").grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
+        tk.Label(preset_row, text="目标算力:", bg=self.card_bg, fg=self.accent_blue, font=(self.font_family, 8, "bold")).grid(row=1, column=0, sticky="w", pady=4)
+        SegmentedSelector(
+            preset_row,
+            variable=v_preset_compute,
+            options=[
+                ("local", "💻 本机", self.accent_blue),
+                ("kaggle_t4x2", "☁️ 双卡T4", self.accent_green),
+                ("kaggle_t4x1", "⚡ 单卡T4", self.accent_yellow),
+            ],
+        ).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        copy_row = tk.Frame(body, bg=self.card_bg)
+        copy_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=4)
+        copy_row.columnconfigure(1, weight=1)
+        tk.Label(copy_row, text="复制源档案:", bg=self.card_bg, fg=self.accent_purple, font=(self.font_family, 8, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Combobox(copy_row, textvariable=v_copy_src, values=copy_choices, state="readonly").grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+        def _toggle_src_rows():
+            mode = v_source.get()
+            if mode == "preset":
+                preset_row.grid()
+                copy_row.grid_remove()
+            elif mode == "copy":
+                preset_row.grid_remove()
+                copy_row.grid()
+            else:
+                preset_row.grid_remove()
+                copy_row.grid_remove()
+
+        SegmentedSelector(
+            src_frame,
+            variable=v_source,
+            options=[
+                ("current", "保存当前控制台参数", self.accent_green),
+                ("preset", "基于 8 套黄金预设", self.accent_blue),
+                ("copy", "复制已有档案", self.accent_purple),
+            ],
+            command=_toggle_src_rows,
+        ).pack(fill=tk.X)
+        _toggle_src_rows()
+
+        tk.Label(body, text="任务备注:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=6, column=0, sticky="w", pady=4)
+        tk.Entry(body, textvariable=v_notes, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT).grid(row=6, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ToggleButton(
+            body,
+            variable=v_sync_lora,
+            text_on="同步将 LoRA 名称与云端 Slug 对齐此任务名（防产出撞名）",
+            text_off="保持现有 LoRA 名称与云端 Slug 不变",
+            on_bg=self.accent_blue,
+            pady=3,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 4))
+
+        ToggleButton(
+            body,
+            variable=v_load_now,
+            text_on="创建后立即切换并绑定为当前激活任务",
+            text_off="仅保存到档案库（保持当前控制台不变）",
+            on_bg=self.accent_green,
+            pady=3,
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        def _submit():
+            name = v_name.get().strip()
+            if not name:
+                messagebox.showerror("名称不能为空", "请填写任务档案名称。", parent=dlg)
+                return
+            cat_key = next((k for k, lbl in cat_choices if lbl == v_cat.get()), "custom")
+            src_mode = v_source.get()
+            chosen_preset_id = getattr(self, "_active_preset_id", None) or ""
+
+            if src_mode == "preset":
+                chosen_preset_id = v_preset.get().split("|", 1)[0].strip()
+                cfg = build_config_from_preset(
+                    chosen_preset_id,
+                    v_preset_compute.get(),
+                    self._collect_raw_params(),
+                    lora_name=sanitize_profile_id(name, "my_moss_lora") if v_sync_lora.get() else "",
+                )
+            elif src_mode == "copy":
+                if not all_existing:
+                    messagebox.showerror("暂无档案", "当前档案库为空，请选择“保存当前控制台参数”或“基于 8 套黄金预设”。", parent=dlg)
+                    return
+                src_id = v_copy_src.get().split("|", 1)[0].strip()
+                src_rec = load_task_profile(src_id, self.profiles_dir)
+                cfg = dict(src_rec["config"])
+                chosen_preset_id = src_rec.get("preset_id", "")
+            else:
+                cfg = self._collect_raw_params()
+
+            if v_sync_lora.get() and src_mode != "preset":
+                safe_lora = sanitize_profile_id(name, fallback=cfg.get("lora_name", "my_moss_lora"))
+                cfg["lora_name"] = safe_lora
+                cfg["kaggle_dataset_slug"] = sanitize_kaggle_slug(f"{safe_lora}-data", prefix="moss-data")
+                cfg["kaggle_kernel_slug"] = sanitize_kaggle_slug(f"{safe_lora}-train", prefix="moss-train")
+
+            rec = save_task_profile(
+                name=name,
+                config=cfg,
+                profiles_dir=self.profiles_dir,
+                category=cat_key,
+                tags=v_tags.get(),
+                notes=v_notes.get(),
+                preset_id=chosen_preset_id or "",
+                pinned=False,
+            )
+            dlg.destroy()
+            if v_load_now.get():
+                self.load_profile_by_id(rec["id"], skip_dirty_check=True)
+            else:
+                self.refresh_profile_list(select_id=rec["id"])
+                self._update_active_profile_bar()
+            self.monitor.log(f"[任务档案] 已创建新档案「{rec['name']}」(ID={rec['id']})\n")
+
+        btn_bar = tk.Frame(body, bg=self.card_bg)
+        btn_bar.grid(row=9, column=0, columnspan=2, sticky="e", pady=(6, 0))
+        FlatButton(btn_bar, text="取消", bg=self.input_bg, fg=self.text_sub, padx=14, pady=5, command=dlg.destroy).pack(side=tk.LEFT, padx=(0, 8))
+        FlatButton(btn_bar, text="创建档案", bg=self.accent_green, fg="#11111b", font=(self.font_family, 9, "bold"), padx=16, pady=5, command=_submit).pack(side=tk.LEFT)
+
+    def open_edit_profile_meta_dialog(self):
+        pid = self._get_selected_profile_id()
+        if not pid:
+            messagebox.showinfo("提示", "请先在列表中选中要重命名或修改备注的档案。")
+            return
+        rec = load_task_profile(pid, self.profiles_dir)
+
+        dlg = self._create_themed_dialog(f"✏️ 编辑任务档案：{rec['name']}", "500x310")
+        body = tk.Frame(dlg, bg=self.card_bg, padx=14, pady=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(1, weight=1)
+
+        cat_choices = [(k, lbl) for k, lbl in PROFILE_CATEGORIES if k != "all"]
+        cur_cat_lbl = next((lbl for k, lbl in cat_choices if k == rec.get("category")), cat_choices[-1][1])
+        v_name = tk.StringVar(value=rec["name"])
+        v_cat = tk.StringVar(value=cur_cat_lbl)
+        v_tags = tk.StringVar(value=", ".join(rec.get("tags", [])))
+        v_notes = tk.StringVar(value=rec.get("notes", ""))
+        v_sync = tk.BooleanVar(value=False)
+
+        tk.Label(body, text="档案名称:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).grid(row=0, column=0, sticky="w", pady=4)
+        tk.Entry(body, textvariable=v_name, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=4)
+        tk.Label(body, text="分类:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Combobox(body, textvariable=v_cat, values=[lbl for _k, lbl in cat_choices], state="readonly").grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=4)
+        tk.Label(body, text="标签:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=2, column=0, sticky="w", pady=4)
+        tk.Entry(body, textvariable=v_tags, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=4)
+        tk.Label(body, text="备注:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=3, column=0, sticky="w", pady=4)
+        tk.Entry(body, textvariable=v_notes, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ToggleButton(
+            body,
+            variable=v_sync,
+            text_on="同时将档案内的 LoRA 名与云端 Slug 改为新名称",
+            text_off="仅修改档案名称与备注（不动 LoRA 名与 Slug）",
+            on_bg=self.accent_blue,
+            pady=3,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=8)
+
+        def _save():
+            new_name = v_name.get().strip()
+            if not new_name:
+                messagebox.showerror("名称不能为空", "请输入有效任务名称。", parent=dlg)
+                return
+            cat_key = next((k for k, lbl in cat_choices if lbl == v_cat.get()), "custom")
+            was_active = (pid == self.active_profile_id)
+            updated = rename_task_profile(
+                pid,
+                new_name,
+                self.profiles_dir,
+                update_lora_name=bool(v_sync.get()),
+                update_cloud_slugs=bool(v_sync.get()),
+                category=cat_key,
+                tags=v_tags.get(),
+                notes=v_notes.get(),
+            )
+            dlg.destroy()
+            if was_active:
+                self.active_profile_id = updated["id"]
+                self._active_profile_record = updated
+                if v_sync.get():
+                    self.apply_config_dict(updated["config"], preserve_missing_env_paths=True, preset_id=updated.get("preset_id") or None)
+                    self._active_profile_snapshot = sanitize_profile_config(self._collect_raw_params())
+                self.save_local_config()
+            self.refresh_profile_list(select_id=updated["id"])
+            self._update_active_profile_bar()
+
+        btn_bar = tk.Frame(body, bg=self.card_bg)
+        btn_bar.grid(row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        FlatButton(btn_bar, text="取消", bg=self.input_bg, fg=self.text_sub, padx=14, pady=4, command=dlg.destroy).pack(side=tk.LEFT, padx=(0, 8))
+        FlatButton(btn_bar, text="保存修改", bg=self.accent_blue, fg="#11111b", font=(self.font_family, 9, "bold"), padx=14, pady=4, command=_save).pack(side=tk.LEFT)
+
+    def duplicate_selected_profile(self):
+        pid = self._get_selected_profile_id()
+        if not pid:
+            messagebox.showinfo("提示", "请先选中要复制的任务档案。")
+            return
+        try:
+            dup = duplicate_task_profile(pid, profiles_dir=self.profiles_dir, sync_lora_and_slugs=True)
+            self.refresh_profile_list(select_id=dup["id"])
+            self.monitor.log(f"[任务档案] 已复制为新档案「{dup['name']}」(ID={dup['id']})\n")
+        except Exception as err:
+            messagebox.showerror("复制失败", str(err))
+
+    def open_continue_profile_dialog(self):
+        """基于选中档案派生独立的断点续炼 / 权重继承二训任务（继承架构与云端配置，自动分配新 Slug）。"""
+        pid = self._get_selected_profile_id() or self.active_profile_id
+        if not pid:
+            messagebox.showinfo("提示", "请先在列表中选中一个源任务档案作为续炼基底。")
+            return
+        src = load_task_profile(pid, self.profiles_dir)
+
+        dlg = self._create_themed_dialog(f"🔁 派生续炼/二训任务（源：{src['name']}）", "560x360")
+        body = tk.Frame(dlg, bg=self.card_bg, padx=14, pady=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(1, weight=1)
+
+        v_new_name = tk.StringVar(value=f"{src['name']}_v2")
+        v_mode = tk.StringVar(value="init_from")
+        v_path = tk.StringVar(value=src["config"].get("resume_path", ""))
+        v_steps = tk.StringVar(value=str(src["config"].get("steps", "300")))
+        v_lr = tk.StringVar(value=str(src["config"].get("lr", "8e-5")))
+        v_notes = tk.StringVar(value=f"继承「{src['name']}」二训")
+
+        tk.Label(body, text="新任务名称:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9, "bold")).grid(row=0, column=0, sticky="w", pady=4)
+        tk.Entry(body, textvariable=v_new_name, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT).grid(row=0, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=4)
+
+        tk.Label(body, text="续炼方式:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=1, column=0, sticky="w", pady=5)
+        SegmentedSelector(
+            body,
+            variable=v_mode,
+            options=[
+                ("init_from", "🧬 继承权重再微调 (Init-From)", self.accent_purple),
+                ("resume", "⏩ 断点续炼 (Resume)", self.accent_green),
+            ],
+        ).grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=5)
+
+        tk.Label(body, text="权重或断点路径:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=2, column=0, sticky="w", pady=4)
+        tk.Entry(body, textvariable=v_path, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT, font=("Consolas", 8)).grid(row=2, column=1, sticky="ew", padx=(8, 4), pady=4)
+
+        def _pick_path():
+            if v_mode.get() == "resume":
+                p = filedialog.askdirectory(title="选择包含 state.json 与 trainable.safetensors 的断点目录", parent=dlg)
+            else:
+                p = filedialog.askopenfilename(title="选择已有 .safetensors 权重", filetypes=[("Safetensors", "*.safetensors"), ("All", "*.*")], parent=dlg)
+            if p:
+                v_path.set(p)
+
+        FlatButton(body, text="浏览...", bg=self.accent_blue, fg="#11111b", font=(self.font_family, 8, "bold"), padx=10, pady=2, command=_pick_path).grid(row=2, column=2, pady=4)
+
+        tk.Label(body, text="目标步数 / 学习率:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=3, column=0, sticky="w", pady=4)
+        hp_row = tk.Frame(body, bg=self.card_bg)
+        hp_row.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=4)
+        tk.Entry(hp_row, textvariable=v_steps, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT, width=10).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(hp_row, text="LR:", bg=self.card_bg, fg=self.text_sub, font=(self.font_family, 8)).pack(side=tk.LEFT)
+        tk.Entry(hp_row, textvariable=v_lr, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT, width=12).pack(side=tk.LEFT, padx=(4, 0))
+
+        tk.Label(body, text="备注:", bg=self.card_bg, fg=self.text_main, font=(self.font_family, 9)).grid(row=4, column=0, sticky="w", pady=4)
+        tk.Entry(body, textvariable=v_notes, bg=self.input_bg, fg=self.text_main, insertbackground=self.text_main, relief=tk.FLAT).grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=4)
+
+        tk.Label(
+            body,
+            text="说明：将自动锁定源档案的 Algo/Rank/Alpha/DoRA/LoKr 与云端设置，并生成新 LoRA 名与独立 Kaggle Slug。",
+            bg=self.card_bg,
+            fg=self.accent_yellow,
+            font=(self.font_family, 8),
+            wraplength=520,
+            justify=tk.LEFT,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 6))
+
+        def _create():
+            nm = v_new_name.get().strip()
+            if not nm:
+                messagebox.showerror("名称不能为空", "请填写派生续炼任务名称。", parent=dlg)
+                return
+            rec = create_continue_task_profile(
+                pid,
+                new_name=nm,
+                train_mode=v_mode.get(),
+                resume_path=v_path.get(),
+                steps=v_steps.get(),
+                lr=v_lr.get(),
+                notes=v_notes.get(),
+                profiles_dir=self.profiles_dir,
+            )
+            dlg.destroy()
+            self.load_profile_by_id(rec["id"])
+
+        btn_bar = tk.Frame(body, bg=self.card_bg)
+        btn_bar.grid(row=6, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        FlatButton(btn_bar, text="取消", bg=self.input_bg, fg=self.text_sub, padx=14, pady=4, command=dlg.destroy).pack(side=tk.LEFT, padx=(0, 8))
+        FlatButton(btn_bar, text="创建并载入", bg=self.accent_purple, fg="#11111b", font=(self.font_family, 9, "bold"), padx=14, pady=4, command=_create).pack(side=tk.LEFT)
+
+    def toggle_pin_selected_profile(self):
+        pid = self._get_selected_profile_id()
+        if not pid:
+            messagebox.showinfo("提示", "请先选中要置顶/取消置顶的档案。")
+            return
+        try:
+            updated = toggle_pin_task_profile(pid, self.profiles_dir)
+            if pid == self.active_profile_id:
+                self._active_profile_record = updated
+            self.refresh_profile_list(select_id=updated["id"])
+            self._update_active_profile_bar()
+        except Exception as err:
+            messagebox.showerror("操作失败", str(err))
+
+    def show_selected_profile_diff(self):
+        pid = self._get_selected_profile_id()
+        if not pid:
+            messagebox.showinfo("提示", "请先选中要对比的任务档案。")
+            return
+        rec = load_task_profile(pid, self.profiles_dir)
+        diffs = compute_profile_diff(rec["config"], self._collect_raw_params())
+        if not diffs:
+            messagebox.showinfo("完全一致", f"档案「{rec['name']}」与当前控制台参数完全一致，无差异项。")
+            return
+        lines = [f"档案「{rec['name']}」与当前控制台共有 {len(diffs)} 项差异（左侧=档案保存值，右侧=当前控制台）：\n"]
+        for key, old_v, new_v in diffs:
+            lines.append(f"• {key}:\n    档案: {old_v!r}\n    当前: {new_v!r}")
+        show_text_viewer_dialog(
+            self.root,
+            f"🔍 参数差异对比：{rec['name']}",
+            f"共发现 {len(diffs)} 项不同配置",
+            self.accent_peach,
+            "\n".join(lines),
+            size=(760, 520),
+        )
+
+    def show_selected_profile_json(self):
+        pid = self._get_selected_profile_id()
+        if not pid:
+            messagebox.showinfo("提示", "请先选中要查看 JSON 的任务档案。")
+            return
+        rec = load_task_profile(pid, self.profiles_dir)
+        show_text_viewer_dialog(
+            self.root,
+            f"🧾 任务档案 JSON：{rec['name']}",
+            f"文件路径：{self.profiles_dir / (rec['id'] + '.json')}",
+            self.accent_yellow,
+            json.dumps(rec, indent=2, ensure_ascii=False),
+            size=(760, 540),
+        )
+
+    def delete_selected_profile(self):
+        pid = self._get_selected_profile_id()
+        if not pid:
+            messagebox.showinfo("提示", "请先选中要删除的任务档案。")
+            return
+        rec = self._find_cached_profile(pid) or load_task_profile(pid, self.profiles_dir)
+        if not messagebox.askyesno(
+            "确认删除任务档案",
+            f"确定删除任务档案「{rec['name']}」({pid}.json) 吗？\n\n"
+            "安全提示：仅删除该配置档案 JSON 文件，您的本地图集和 output/ 训练成果权重将完整保留。",
+            icon="warning",
+        ):
+            return
+        delete_task_profile(pid, self.profiles_dir)
+        if pid == self.active_profile_id:
+            self.active_profile_id = ""
+            self._active_profile_record = None
+            self._active_profile_snapshot = None
+            self.save_local_config()
+        self.refresh_profile_list()
+        self._update_active_profile_bar()
+        self.monitor.log(f"[任务档案] 已删除配置档案「{rec['name']}」(图集与权重未受影响)\n")
+
+    def import_profile_dialog(self):
+        src = filedialog.askopenfilename(
+            title="导入任务档案或 local_config.json",
+            filetypes=[("JSON 配置文件", "*.json"), ("所有文件", "*.*")],
+        )
+        if not src:
+            return
+        try:
+            rec = import_task_profile_from_file(Path(src), self.profiles_dir)
+            self.refresh_profile_list(select_id=rec["id"])
+            self.monitor.log(f"[任务档案] 已导入档案「{rec['name']}」(ID={rec['id']})\n")
+            if messagebox.askyesno("导入成功", f"已导入任务档案「{rec['name']}」并过滤敏感字段。\n是否立即载入到控制台？"):
+                self.load_profile_by_id(rec["id"])
+        except Exception as err:
+            messagebox.showerror("导入失败", f"无法解析配置文件：\n{err}")
+
+    def export_selected_profile_dialog(self):
+        pid = self._get_selected_profile_id()
+        if not pid:
+            messagebox.showinfo("提示", "请先选中要导出的任务档案。")
+            return
+        rec = load_task_profile(pid, self.profiles_dir)
+        portable_choice = messagebox.askyesnocancel(
+            "选择导出模式",
+            f"准备导出任务档案「{rec['name']}」：\n\n"
+            "• 点击【是】：导出【便携分享模板】（自动剥离本机路径、Kaggle/R2 账号与临时外链，保留全部训练与云端架构参数）\n"
+            "• 点击【否】：导出【完整本机备份】（保留本机路径与非密钥云端配置，仍绝不含 API Key/Token）\n"
+            "• 点击【取消】：中止导出",
+        )
+        if portable_choice is None:
+            return
+        suffix = "_portable" if portable_choice else "_backup"
+        dest = filedialog.asksaveasfilename(
+            title="保存导出的任务档案 JSON",
+            defaultextension=".json",
+            initialfile=f"{rec['id']}{suffix}.json",
+            filetypes=[("JSON 文件", "*.json")],
+        )
+        if not dest:
+            return
+        try:
+            out_fp = export_task_profile_to_file(rec, Path(dest), portable=bool(portable_choice))
+            messagebox.showinfo("导出成功", f"任务档案已成功导出至：\n{out_fp}")
+        except Exception as err:
+            messagebox.showerror("导出失败", str(err))
+
+    def open_profiles_folder(self):
+        try:
+            open_in_explorer(str(self.profiles_dir))
+        except Exception as err:
+            messagebox.showerror("打开失败", str(err))
 
 
 def run_gui():

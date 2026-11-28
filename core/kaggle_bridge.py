@@ -401,7 +401,7 @@ def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict = None) ->
         "warmup_steps": int(cleaned_params["warmup_steps"]),
         "weight_decay": float(cleaned_params["weight_decay"]),
         "wd_rules": str(cleaned_params.get("wd_rules", "moss")),
-        "ema": float(cleaned_params["ema"]),
+        "ema": "power" if str(cleaned_params.get("ema", "0.0")).strip().lower() == "power" else float(cleaned_params["ema"]),
         "grad_acc": int(cleaned_params["grad_acc"]),
         "timestep": str(cleaned_params.get("timestep", "moss")),
         "timestep_mu": float(cleaned_params["timestep_mu"]),
@@ -413,6 +413,16 @@ def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict = None) ->
         "save_every": int(cleaned_params["save_every"]),
         "tune": str(cleaned_params.get("tune", "off")),
         "overlong": "drop_tokens",
+        "caption_template": str(cleaned_params.get("caption_template", "auto")),
+        "caption_p_nl": float(cleaned_params.get("caption_p_nl", 0.75)),
+        "caption_variants": int(cleaned_params.get("caption_variants", 4)),
+        "int8_compute": bool(cleaned_params.get("int8_compute", False)),
+        "compile_mode": str(cleaned_params.get("compile_mode", "off")),
+        "step_release": str(cleaned_params.get("step_release", "none")),
+        "sample_every": int(cleaned_params.get("sample_every", 0)),
+        "sample_prompt": str(cleaned_params.get("sample_prompt", "")),
+        "teacher_mode": str(cleaned_params.get("teacher_mode", "none")),
+        "distill_weight": float(cleaned_params.get("distill_weight", 0.05)),
         "variant": variant,
         "base_quant": base_quant,
         "vram_preset": "auto",
@@ -450,9 +460,10 @@ def build_cloud_config_payload(cleaned_params: dict, cloud_opts: dict = None) ->
 
 
 def _copy_image_txt_pairs(src_dir: Path, dst_dir: Path) -> tuple:
-    """将单目录中的有效图片及同名 .txt 标注以纯 ASCII 安全短名复制到暂存目录，返回 (图片数, 标注数, 总字节数)。"""
+    """将单目录中的有效图片、同名 .txt 标注与 train.jsonl 以纯 ASCII 安全短名复制到暂存目录，返回 (图片数, 标注数, 总字节数)。"""
     dst_dir.mkdir(parents=True, exist_ok=True)
     img_cnt, txt_cnt, total_bytes = 0, 0, 0
+    name_map = {}
     for item in sorted(src_dir.iterdir(), key=lambda p: p.name.lower()):
         if item.name.startswith(".") or item.name.startswith("._"):
             continue
@@ -466,8 +477,10 @@ def _copy_image_txt_pairs(src_dir: Path, dst_dir: Path) -> tuple:
 
         img_cnt += 1
         stem = f"sample_{img_cnt:04d}"
-        dst_img = dst_dir / f"{stem}{item.suffix.lower()}"
+        dst_name = f"{stem}{item.suffix.lower()}"
+        dst_img = dst_dir / dst_name
         shutil.copy2(item, dst_img)
+        name_map[item.name] = dst_name
         total_bytes += dst_img.stat().st_size
         src_txt = item.with_suffix(".txt")
         if src_txt.is_file():
@@ -475,6 +488,38 @@ def _copy_image_txt_pairs(src_dir: Path, dst_dir: Path) -> tuple:
             shutil.copy2(src_txt, dst_txt)
             txt_cnt += 1
             total_bytes += dst_txt.stat().st_size
+
+    src_jsonl = src_dir / "train.jsonl"
+    if src_jsonl.is_file() and name_map:
+        rewritten_lines = []
+        for raw_line in src_jsonl.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            key_hit = None
+            for k in ("image", "file", "path", "file_name"):
+                if k in rec and str(rec[k] or "").strip():
+                    key_hit = k
+                    break
+            if not key_hit:
+                continue
+            orig_base = Path(str(rec[key_hit]).replace("\\", "/")).name
+            if orig_base not in name_map:
+                continue
+            rec[key_hit] = name_map[orig_base]
+            rewritten_lines.append(json.dumps(rec, ensure_ascii=False))
+        if rewritten_lines:
+            dst_jsonl = dst_dir / "train.jsonl"
+            dst_jsonl.write_text("\n".join(rewritten_lines) + "\n", encoding="utf-8")
+            total_bytes += dst_jsonl.stat().st_size
+            if txt_cnt == 0:
+                txt_cnt = len(rewritten_lines)
     return img_cnt, txt_cnt, total_bytes
 
 

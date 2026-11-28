@@ -23,7 +23,7 @@ def _load_app_version() -> str:
             return ver
     except Exception:
         pass
-    return "1.8.5"
+    return "1.9.0"
 
 
 def _normalize_hf_dataset_repo(raw: str) -> str:
@@ -191,8 +191,8 @@ parser.add_argument("--rank", type=int, default=int(os.environ.get("RANK", "32")
 parser.add_argument("--alpha", type=float, default=float(os.environ.get("ALPHA", "32.0")),
                     help="LoRA Alpha scaling factor (default: 32.0)")
 parser.add_argument("--algo", type=str, default=os.environ.get("ALGO", "lora"),
-                    choices=["lora", "loha", "lokr"],
-                    help="Adapter algorithm: lora (default), loha (Hadamard), lokr (Kronecker)")
+                    choices=["lora", "loha", "lokr", "oft", "tlora"],
+                    help="Adapter algorithm: lora (default), loha, lokr, oft, or tlora")
 parser.add_argument("--lokr_factor", type=int, default=int(os.environ.get("LOKR_FACTOR", "8")),
                     help="LoKr Kronecker factor (-1=auto, 4=high capacity, 8=default, 16=ultra-compact)")
 parser.add_argument("--lokr_full_matrix", action="store_true",
@@ -223,8 +223,8 @@ parser.add_argument("--subsets_json", type=str, default=os.environ.get("SUBSETS_
 parser.add_argument("--lr", type=str, default=os.environ.get("LR", "1e-4"),
                     help="Learning rate (default: 1e-4)")
 parser.add_argument("--optimizer", type=str, default=os.environ.get("OPTIMIZER", "adamw"),
-                    choices=["adamw", "adamw8bit_kernel", "muon"],
-                    help="Optimizer: adamw (default), adamw8bit_kernel, or muon")
+                    choices=["adamw", "adamw16", "adamw8bit_kernel", "muon"],
+                    help="Optimizer: adamw (default), adamw16, adamw8bit_kernel, or muon")
 parser.add_argument("--lr_scheduler", type=str, default=os.environ.get("LR_SCHEDULER", "cosine"),
                     choices=["cosine", "constant"],
                     help="LR scheduler mode (default: cosine)")
@@ -235,8 +235,8 @@ parser.add_argument("--weight_decay", type=float, default=float(os.environ.get("
 parser.add_argument("--wd_rules", type=str, default=os.environ.get("WD_RULES", "moss"),
                     choices=["moss", "none", "all"],
                     help="Weight decay parameter selection rule (default: moss)")
-parser.add_argument("--ema", type=float, default=float(os.environ.get("EMA", "0.0")),
-                    help="EMA decay rate (0.0=off, 0.99~0.995 recommended for long runs)")
+parser.add_argument("--ema", type=str, default=os.environ.get("EMA", "0.0"),
+                    help="EMA decay rate ('0.0'=off, '0.99'/'0.995', or 'power' for EDM2 Power EMA)")
 parser.add_argument("--grad_acc", type=int, default=int(os.environ.get("GRAD_ACC", "1")),
                     help="Gradient accumulation steps (default: 1; 2~4 stabilizes complex outfits on <=12GB)")
 parser.add_argument("--timestep", type=str, default=os.environ.get("TIMESTEP", "moss"),
@@ -264,8 +264,8 @@ parser.add_argument("--overlong", type=str, default=os.environ.get("OVERLONG", "
                     choices=["drop_tokens", "drop"],
                     help="Overlong handling when image+text > MAX_TOKENS (default: drop_tokens keeps all text tokens and drops excess image patches)")
 parser.add_argument("--vram_preset", type=str, default=os.environ.get("VRAM_PRESET", "auto"),
-                    choices=["auto", "6g", "8g", "12g", "16g"],
-                    help="VRAM optimization preset: auto, 6g, 8g, 12g, 16g (default: auto)")
+                    choices=["auto", "6g", "8g", "12g", "16g", "24g"],
+                    help="VRAM optimization preset: auto, 6g, 8g, 12g, 16g, 24g (default: auto)")
 parser.add_argument("--resolution", type=int, default=int(os.environ.get("RESOLUTION", "1024")),
                     help="Target training image resolution area, e.g. 1024, 896, 768, 512 (default: 1024)")
 parser.add_argument("--variant", type=str, default=os.environ.get("MODEL_VARIANT", os.environ.get("VARIANT", "heal")),
@@ -278,11 +278,35 @@ parser.add_argument("--precision", type=str, default=os.environ.get("PRECISION",
                     choices=["auto", "fp16", "bf16"],
                     help="Compute precision: auto (bf16 if GPU supports, else fp16), fp16, bf16")
 parser.add_argument("--text_device", type=str, default=os.environ.get("TEXT_DEVICE", "auto"),
-                    choices=["auto", "cuda", "cpu"],
-                    help="Device for offline text embedding extraction: auto, cuda, cpu")
+                    choices=["auto", "cuda", "cuda-ring", "cpu"],
+                    help="Device for offline text embedding extraction: auto, cuda, cuda-ring, cpu")
 parser.add_argument("--vae_device", type=str, default=os.environ.get("VAE_DEVICE", "cuda"),
                     choices=["cuda", "cpu"],
                     help="Device for offline VAE latents extraction (default: cuda)")
+parser.add_argument("--caption_template", type=str, default=os.environ.get("CAPTION_TEMPLATE", "auto"),
+                    choices=["auto", "nl", "mix"],
+                    help="Caption template: auto (mix if train.jsonl exists else nl), nl, or mix")
+parser.add_argument("--caption_p_nl", type=float, default=float(os.environ.get("CAPTION_P_NL", "0.75")),
+                    help="Natural language ratio in mix caption template (default: 0.75)")
+parser.add_argument("--caption_variants", type=int, default=int(os.environ.get("CAPTION_VARIANTS", "4")),
+                    help="Caption variants cached per image in mix workflow (default: 4)")
+parser.add_argument("--int8_compute", action="store_true",
+                    default=_env_bool("INT8_COMPUTE"),
+                    help="Enable INT8 compute kernel on Turing+ GPUs when using INT8 backbone")
+parser.add_argument("--compile_mode", type=str, default=os.environ.get("COMPILE_MODE", "off"),
+                    choices=["off", "block"],
+                    help="Torch compile mode: off (default) or block")
+parser.add_argument("--step_release", type=str, default=os.environ.get("STEP_RELEASE", "none"),
+                    help="CUDA cache release cadence: none, empty_cache, or positive step interval")
+parser.add_argument("--sample_every", type=int, default=int(os.environ.get("SAMPLE_EVERY", "0")),
+                    help="Generate training-time preview samples every N steps (0=off; auto-disabled on 6g/8g VRAM)")
+parser.add_argument("--sample_prompt", type=str, default=os.environ.get("SAMPLE_PROMPT", ""),
+                    help="Custom preview prompt used when --sample_every > 0")
+parser.add_argument("--teacher_mode", type=str, default=os.environ.get("TEACHER_MODE", "none"),
+                    choices=["none", "weights"],
+                    help="Teacher anti-concept-drift distillation mode: none or weights (>=16GB VRAM)")
+parser.add_argument("--distill_weight", type=float, default=float(os.environ.get("DISTILL_WEIGHT", "0.05")),
+                    help="Weight factor for teacher distillation loss (default: 0.05)")
 parser.add_argument("--gpus", type=str, default=os.environ.get("GPUS", "auto"),
                     choices=["auto", "1", "2"],
                     help="Active GPU count: auto (2 on Linux with >=2 GPUs), 1, or 2 (default: auto)")
@@ -473,12 +497,16 @@ except Exception as e:
 # 1.5 动态解析显存档位、计算精度、量化格式与文本提取设备
 selected_preset = args.vram_preset.lower()
 if selected_preset == "auto":
-    if vram_gb <= 10.0:
+    if vram_gb <= 7.0:
         effective_preset = "6g"
+    elif vram_gb <= 10.0:
+        effective_preset = "8g"
     elif vram_gb <= 14.0:
         effective_preset = "12g"
-    else:
+    elif vram_gb <= 20.0:
         effective_preset = "16g"
+    else:
+        effective_preset = "24g"
     vram_note = f"(Auto-detected {vram_gb:.1f} GB VRAM -> selected '{effective_preset}')"
 else:
     effective_preset = selected_preset
@@ -499,11 +527,16 @@ elif effective_preset == "12g":
     max_tokens_val = 6144
     base_profile_name = "ckpt-ring4-actoff-optstream-gradoff"
     print(f" [VRAM Preset] Applied 12G Profile (~8.5GB VRAM, MAX_TOKENS=6144): {vram_note}")
-else:
+elif effective_preset == "16g":
     recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_16g.py")'
     max_tokens_val = 8192
     base_profile_name = "low"
     print(f" [VRAM Preset] Applied 16G Profile (MAX_TOKENS=8192, MEMORY_PROFILE=low): {vram_note}")
+else:
+    recipe_import = 'use_config("../moss/_base/base_lora.py")\nuse_config("../moss/vram/vram_24g.py")'
+    max_tokens_val = 12288
+    base_profile_name = "balanced"
+    print(f" [VRAM Preset] Applied 24G Profile (MAX_TOKENS=12288, MEMORY_PROFILE=balanced): {vram_note}")
 
 if args.precision == "auto":
     effective_precision = "bf16" if bf16_supported else "fp16"
@@ -532,7 +565,8 @@ if effective_parallel == "ddp":
         'DEVICES = (0, 1)\n'
         'DIST_BACKEND = "auto"\n'
         'DDP_REDUCE_DTYPE = "fp32"\n'
-        'DDP_BUCKET_MB = 25'
+        'DDP_BUCKET_MB = 25\n'
+        'DATA_BALANCE = True'
     )
 elif effective_parallel == "pipeline":
     use_int8_backbone = False
@@ -542,12 +576,13 @@ elif effective_parallel == "pipeline":
     parallel_cfg_str = 'DEVICES = (0, 1)'
     print(" [Dual-GPU Pipeline] Enabled 1F1B stage split across GPU(0, 1) with full-precision resident weights.")
 
-if args.optimizer != "adamw" and base_profile_name != "ckpt-resident":
+if args.optimizer != "adamw" and base_profile_name not in ("ckpt-resident", "balanced"):
     _opt_remap = {
         "6g": "ckpt-ring2-actoff",
         "8g": "ckpt-ring2-actoff",
         "12g": "ckpt-ring4-actoff",
         "16g": "ckpt-ring8-actoff",
+        "24g": "balanced",
     }
     resolved_profile_name = _opt_remap.get(effective_preset, "ckpt-ring4-actoff")
     print(f" [Optimizer Guard] OPTIMIZER='{args.optimizer}' requires optim_state='gpu' & fused_step=False; remapped MEMORY_PROFILE '{base_profile_name}' -> '{resolved_profile_name}'.")
@@ -560,9 +595,17 @@ if int(args.max_tokens) > 0:
     print(f" [Token Packing Override] MAX_TOKENS={max_tokens_val}")
 
 if args.text_device == "auto":
-    effective_text_device = "cpu" if (vram_gb <= 10.0 or effective_preset == "6g") else "cuda"
+    if vram_gb <= 10.0 or effective_preset in ("6g", "8g"):
+        effective_text_device = "cpu"
+    elif vram_gb <= 20.0:
+        effective_text_device = "cuda-ring"
+    else:
+        effective_text_device = "cuda"
 else:
     effective_text_device = args.text_device.lower()
+    if (vram_gb < 10.0 or effective_preset in ("6g", "8g")) and effective_text_device in ("cuda", "cuda-ring"):
+        print(f" [TE Guard] Low VRAM ({effective_preset}) forces text_device '{effective_text_device}' -> 'cpu'.")
+        effective_text_device = "cpu"
 print(f" [Devices] Text Encoder: {effective_text_device.upper()} | VAE: {args.vae_device.upper()}")
 print(f" [Resolution] Target Area: {args.resolution}x{args.resolution} ({args.resolution * args.resolution} px) | MAX_TOKENS={max_tokens_val}")
 
@@ -635,6 +678,28 @@ def _audit_cloud_dataset_folders(folder_paths: list, max_tokens: int, resolution
     for folder in folder_paths:
         if not folder or not os.path.isdir(folder):
             continue
+        jsonl_caps = {}
+        jsonl_p = os.path.join(folder, "train.jsonl")
+        if os.path.isfile(jsonl_p):
+            with open(jsonl_p, "r", encoding="utf-8", errors="ignore") as jf:
+                for raw_l in jf:
+                    l_str = raw_l.strip()
+                    if not l_str:
+                        continue
+                    try:
+                        rec = json.loads(l_str)
+                    except Exception:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    fn = ""
+                    for ik in ("image", "file", "path", "file_name"):
+                        if rec.get(ik):
+                            fn = os.path.basename(str(rec[ik]).replace("\\", "/"))
+                            break
+                    cap_txt = str(rec.get("caption") or rec.get("caption_nl") or rec.get("text") or "").strip()
+                    if fn and cap_txt:
+                        jsonl_caps.setdefault(fn, []).append(cap_txt)
         for fname in sorted(os.listdir(folder)):
             ext = os.path.splitext(fname)[1].lower()
             if ext not in valid_img_exts:
@@ -650,11 +715,12 @@ def _audit_cloud_dataset_folders(folder_paths: list, max_tokens: int, resolution
                     stats["extreme_aspect"] += 1
 
             txt_p = os.path.join(folder, os.path.splitext(fname)[0] + ".txt")
-            if not os.path.isfile(txt_p):
-                stats["missing_or_empty_txt"] += 1
-                continue
-            with open(txt_p, "r", encoding="utf-8", errors="ignore") as tf:
-                cap = tf.read().strip()
+            cap = ""
+            if os.path.isfile(txt_p):
+                with open(txt_p, "r", encoding="utf-8", errors="ignore") as tf:
+                    cap = tf.read().strip()
+            if not cap and fname in jsonl_caps:
+                cap = max(jsonl_caps[fname], key=len)
             if not cap:
                 stats["missing_or_empty_txt"] += 1
                 continue
@@ -781,6 +847,70 @@ if args.subsets_json and args.subsets_json.strip():
     else:
         parsed_cloud_subsets = json.loads(raw_sub)
 
+def _cloud_has_trigger_prefix(caption: str, trigger: str) -> bool:
+    t = str(trigger or "").strip()
+    if not t:
+        return True
+    c = str(caption or "").strip()
+    if not c:
+        return False
+    return bool(re.match(rf"^{re.escape(t)}(?:[\s,.;:!?]|$)", c, flags=re.IGNORECASE))
+
+
+def _cloud_inject_trigger_text(text: str, trigger: str) -> str:
+    t = str(trigger or "").strip()
+    c = str(text or "").strip()
+    if not t:
+        return c
+    if _cloud_has_trigger_prefix(c, t):
+        return c
+    return f"{t}, {c}" if c else t
+
+
+def _cloud_sync_jsonl(src_jsonl: str, dst_jsonl: str, valid_img_names: set, trigger: str) -> int:
+    if not src_jsonl or not os.path.isfile(src_jsonl):
+        return 0
+    lines_out = []
+    with open(src_jsonl, "r", encoding="utf-8", errors="ignore") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            img_key = None
+            for k in ("image", "file", "path", "file_name"):
+                if k in rec and str(rec[k] or "").strip():
+                    img_key = k
+                    break
+            if not img_key:
+                continue
+            img_name = os.path.basename(str(rec[img_key]).replace("\\", "/"))
+            if img_name not in valid_img_names:
+                continue
+            rec[img_key] = img_name
+            if trigger:
+                for cap_k in ("caption", "caption_nl", "text"):
+                    if cap_k in rec and isinstance(rec[cap_k], str):
+                        rec[cap_k] = _cloud_inject_trigger_text(rec[cap_k], trigger)
+                if "tags" in rec:
+                    if isinstance(rec["tags"], list):
+                        cleaned_tags = [str(x).strip() for x in rec["tags"] if str(x).strip()]
+                        if not cleaned_tags or cleaned_tags[0].lower() != trigger.lower():
+                            rec["tags"] = [trigger, *cleaned_tags]
+                    elif isinstance(rec["tags"], str):
+                        rec["tags"] = _cloud_inject_trigger_text(rec["tags"], trigger)
+            lines_out.append(json.dumps(rec, ensure_ascii=False))
+    if lines_out:
+        with open(dst_jsonl, "w", encoding="utf-8") as out_f:
+            out_f.write("\n".join(lines_out) + "\n")
+    return len(lines_out)
+
+
 if parsed_cloud_subsets:
     print(f"\n>>> Preparing Multi-Subset Kohya dataset ({len(parsed_cloud_subsets)} subsets) in /tmp/workspace_dataset...")
     active_folders = set()
@@ -820,10 +950,11 @@ if parsed_cloud_subsets:
             if os.path.exists(src_txt):
                 with open(src_txt, "r", encoding="utf-8", errors="ignore") as tf:
                     cap = tf.read().strip()
-            if s_trig and s_trig.lower() not in cap.lower():
-                cap = f"{s_trig}, {cap}" if cap else s_trig
+            if s_trig:
+                cap = _cloud_inject_trigger_text(cap, s_trig)
             with open(os.path.join(dst_sub, base_name + ".txt"), "w", encoding="utf-8") as tf:
                 tf.write(cap)
+        _cloud_sync_jsonl(os.path.join(s_dir, "train.jsonl"), os.path.join(dst_sub, "train.jsonl"), set(src_imgs), s_trig)
         exp = len(src_imgs) * s_rep
         total_exp += exp
         cloud_subsets_summary.append({
@@ -870,11 +1001,13 @@ else:
         src_imgs = [f for f in os.listdir(source_dir) if os.path.splitext(f)[1].lower() in valid_img_exts]
         valid_img_names = set(src_imgs)
         valid_txt_names = {os.path.splitext(f)[0] + ".txt" for f in src_imgs}
+        src_jsonl_p = os.path.join(source_dir, "train.jsonl")
+        keep_extra = {"train.jsonl"} if os.path.isfile(src_jsonl_p) else set()
 
         orphan_purged = 0
         for existing in os.listdir(target_data_dir):
             existing_path = os.path.join(target_data_dir, existing)
-            if os.path.isfile(existing_path) and existing not in valid_img_names and existing not in valid_txt_names:
+            if os.path.isfile(existing_path) and existing not in valid_img_names and existing not in valid_txt_names and existing not in keep_extra:
                 try:
                     os.remove(existing_path)
                     orphan_purged += 1
@@ -899,11 +1032,12 @@ else:
                 with open(src_txt, "r", encoding="utf-8", errors="ignore") as tf:
                     caption = tf.read().strip()
 
-            if trigger_clean and trigger_clean.lower() not in caption.lower():
-                caption = f"{trigger_clean}, {caption}" if caption else trigger_clean
+            if trigger_clean:
+                caption = _cloud_inject_trigger_text(caption, trigger_clean)
 
             with open(dest_txt, "w", encoding="utf-8") as tf:
                 tf.write(caption)
+        _cloud_sync_jsonl(src_jsonl_p, os.path.join(target_data_dir, "train.jsonl"), valid_img_names, trigger_clean)
     else:
         local_zip = "/tmp/dataset.zip"
         chosen_zip = None
@@ -928,16 +1062,23 @@ else:
             for txt_f in glob.glob(os.path.join(target_data_dir, "*.txt")):
                 with open(txt_f, "r", encoding="utf-8", errors="ignore") as tf:
                     cap = tf.read().strip()
-                if trigger_clean and trigger_clean.lower() not in cap.lower():
-                    cap = f"{trigger_clean}, {cap}" if cap else trigger_clean
-                    with open(txt_f, "w", encoding="utf-8") as tf:
-                        tf.write(cap)
+                if trigger_clean:
+                    new_cap = _cloud_inject_trigger_text(cap, trigger_clean)
+                    if new_cap != cap:
+                        with open(txt_f, "w", encoding="utf-8") as tf:
+                            tf.write(new_cap)
+            zip_jsonl = os.path.join(target_data_dir, "train.jsonl")
+            if os.path.isfile(zip_jsonl):
+                zip_imgs = {f for f in os.listdir(target_data_dir) if os.path.splitext(f)[1].lower() in valid_img_exts}
+                _cloud_sync_jsonl(zip_jsonl, zip_jsonl, zip_imgs, trigger_clean)
 
     staged_audit_dirs.append(target_data_dir)
     img_count = len([f for f in os.listdir(target_data_dir) if os.path.splitext(f)[1].lower() in valid_img_exts])
     txt_count = len([f for f in os.listdir(target_data_dir) if f.lower().endswith(".txt")])
-    print(f"Dataset verified: {img_count} images, {txt_count} txt captions in {target_data_dir}.")
-    if img_count < 1 or txt_count < 1:
+    jsonl_p_chk = os.path.join(target_data_dir, "train.jsonl")
+    jsonl_count = len([l for l in Path(jsonl_p_chk).read_text(encoding="utf-8", errors="ignore").splitlines() if l.strip()]) if os.path.isfile(jsonl_p_chk) else 0
+    print(f"Dataset verified: {img_count} images, {txt_count} txt captions, {jsonl_count} jsonl rows in {target_data_dir}.")
+    if img_count < 1 or (txt_count < 1 and jsonl_count < 1):
         raise RuntimeError(f"Dataset verification failed: Expected at least 1 image and caption, found {img_count} images, {txt_count} txt files.")
 
 cloud_audit_summary = _audit_cloud_dataset_folders(staged_audit_dirs, max_tokens_val, args.resolution)
@@ -1336,7 +1477,7 @@ def _align_args_from_spec(l_info: dict, mode_tag: str):
         args.rank = l_info["rank"]
         if l_info.get("alpha"):
             args.alpha = l_info["alpha"]
-    if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr") and l_info["algo"] != args.algo:
+    if l_info.get("algo") and l_info["algo"] in ("lora", "loha", "lokr", "oft", "tlora") and l_info["algo"] != args.algo:
         print(f" [{mode_tag} Auto-Align] Aligned Algo {args.algo} -> {l_info['algo']}")
         args.algo = l_info["algo"]
     if bool(l_info.get("dora", False)) != bool(args.dora):
@@ -1450,19 +1591,87 @@ text_drop_val = max(0.0, min(1.0, float(args.text_drop)))
 flip_val = bool(args.flip)
 seed_val = int(args.seed)
 
+cloud_dataset_entries = []
+cloud_has_jsonl = False
+if cloud_subsets_summary:
+    any_cloud_jsonl = any(os.path.isfile(os.path.join(workspace_data_root, sub_rec["folder"], "train.jsonl")) for sub_rec in cloud_subsets_summary)
+    if any_cloud_jsonl:
+        cloud_has_jsonl = True
+        for sub_rec in cloud_subsets_summary:
+            sub_dir_p = os.path.join(workspace_data_root, sub_rec["folder"])
+            sub_jsonl = os.path.join(sub_dir_p, "train.jsonl")
+            sub_weight = max(1, int(sub_rec.get("repeats", 1)))
+            if os.path.isfile(sub_jsonl):
+                cloud_dataset_entries.append({
+                    "source": "jsonl",
+                    "path": sub_jsonl,
+                    "weight": sub_weight,
+                })
+            else:
+                cloud_dataset_entries.append({
+                    "source": "folder",
+                    "path": sub_dir_p,
+                    "weight": sub_weight,
+                    "recursive": False,
+                    "txt_as": "nl",
+                })
+    else:
+        cloud_dataset_entries.append({
+            "source": "kohya",
+            "path": workspace_data_root,
+            "repeat_prefix": "first",
+            "artist_from_folder": None,
+            "txt_as": "nl",
+        })
+else:
+    single_sub_dir = os.path.join(workspace_data_root, f"{args.repeats}_{args.lora_name}")
+    single_jsonl = os.path.join(single_sub_dir, "train.jsonl")
+    if os.path.isfile(single_jsonl):
+        cloud_has_jsonl = True
+        cloud_dataset_entries.append({
+            "source": "jsonl",
+            "path": single_jsonl,
+            "weight": max(1, int(args.repeats)),
+        })
+    else:
+        cloud_dataset_entries.append({
+            "source": "kohya",
+            "path": workspace_data_root,
+            "repeat_prefix": "first",
+            "artist_from_folder": None,
+            "txt_as": "nl",
+        })
+
+req_cap_tpl = str(getattr(args, "caption_template", "auto") or "auto").strip().lower()
+if req_cap_tpl == "mix" or (req_cap_tpl == "auto" and cloud_has_jsonl):
+    effective_caption_tpl = "mix"
+    p_nl_val = max(0.0, min(1.0, float(getattr(args, "caption_p_nl", 0.75))))
+    cap_variants_val = max(1, int(getattr(args, "caption_variants", 4)))
+    caption_cfg_str = (
+        "CAPTION = {\n"
+        '    "template": "mix",\n'
+        f'    "p_nl": {p_nl_val},\n'
+        '    "nl": {"template": "nl"},\n'
+        '    "tags": {"template": "tags", "shuffle": True, "tag_dropout": 0.1},\n'
+        "}"
+    )
+else:
+    effective_caption_tpl = "nl"
+    p_nl_val = 1.0
+    cap_variants_val = 1
+    caption_cfg_str = 'CAPTION = {\n    "template": "nl",\n}'
+
+if effective_text_device == "cuda-ring":
+    te_kwargs_str = 'TEXT_ENCODER_KWARGS = {"path": WEIGHTS, "device": "cuda", "plan": {"memory": "ring"}}'
+else:
+    te_kwargs_str = f'TEXT_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{effective_text_device}"}}'
+
+datasets_repr = json.dumps(cloud_dataset_entries, indent=4, ensure_ascii=False)
 data_cfg_content = f"""
 data_root = "/tmp/workspace_dataset"
 WEIGHTS = "/tmp/models"
 
-DATASETS = [
-    {{
-        "source": "kohya",
-        "path": data_root,
-        "repeat_prefix": "first",
-        "artist_from_folder": None,
-        "txt_as": "nl",
-    }}
-]
+DATASETS = {datasets_repr}
 RESOLUTION_MODE = "resize"
 TARGET_AREA = {args.resolution} * {args.resolution}
 UPSCALE = "never"
@@ -1470,15 +1679,13 @@ ASPECT_RANGE = (0.33, 3.0)
 BATCHING = "tokens"
 MAX_TOKENS = {max_tokens_val}
 OVERLONG = "{args.overlong}"
-CAPTION = {{
-    "template": "nl",
-}}
-CAPTION_VARIANTS = 1
+{caption_cfg_str}
+CAPTION_VARIANTS = {cap_variants_val}
 TEXT_DROP = {text_drop_val}
 LATENT_CACHE = "offline"
 TEXT_CACHE = "offline"
 FLIP = {flip_val}
-TEXT_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{effective_text_device}"}}
+{te_kwargs_str}
 IMAGE_ENCODER_KWARGS = {{"path": WEIGHTS, "device": "{args.vae_device}"}}
 VAE_ENCODE = {{"compile": "off"}}
 """
@@ -1507,7 +1714,84 @@ else:
 save_every_val = max(0, int(args.save_every))
 resolved_save_format = "hf" if args.save_format.lower() == "lycoris" else args.save_format.lower()
 weight_decay_val = max(0.0, float(args.weight_decay))
-ema_val = max(0.0, min(0.99999, float(args.ema)))
+ema_raw_str = str(args.ema).strip().lower()
+if ema_raw_str == "power":
+    ema_cfg_line = 'EMA = {"kind": "power", "sigma_rel": [0.05, 0.10]}'
+    ema_val = "power"
+else:
+    ema_float = max(0.0, min(0.99999, float(ema_raw_str or "0.0")))
+    ema_cfg_line = f"EMA = {ema_float}"
+    ema_val = ema_float
+
+raw_sample_every = max(0, int(getattr(args, "sample_every", 0) or 0))
+if effective_preset in ("6g", "8g") and raw_sample_every > 0:
+    print(f" [Preview Guard] VRAM preset '{effective_preset}' (<=10GB) disables training-time sampling automatically (SAMPLE_EVERY: {raw_sample_every} -> 0).")
+    effective_sample_every = 0
+else:
+    effective_sample_every = raw_sample_every
+
+if effective_sample_every > 0:
+    resolved_sample_prompt = str(getattr(args, "sample_prompt", "") or "").strip()
+    if not resolved_sample_prompt:
+        trig_part = f"{args.trigger_word}, " if args.trigger_word else ""
+        resolved_sample_prompt = f"A high quality digital artwork of {trig_part}1girl, solo, expressive lighting, detailed background"
+    sample_block_str = (
+        f"SAMPLE_EVERY = {effective_sample_every}\n"
+        f"SAMPLE_PROMPTS = {json.dumps([resolved_sample_prompt], ensure_ascii=False)}\n"
+        'SAMPLE_NEGATIVE = ""\n'
+        "SAMPLE_STEPS = 30\n"
+        "SAMPLE_CFG = 3.5\n"
+        "SAMPLE_SHIFT = 5.0\n"
+        "SAMPLE_SKIP_LAYERS = (22,)\n"
+        f"SAMPLE_SIZE = ({args.resolution}, {args.resolution})\n"
+        "SAMPLE_SEEDS = (42,)"
+    )
+else:
+    sample_block_str = "SAMPLE_EVERY = 0"
+
+req_teacher = str(getattr(args, "teacher_mode", "none") or "none").strip().lower()
+distill_w_val = max(0.0, float(getattr(args, "distill_weight", 0.05) or 0.05))
+if req_teacher == "weights":
+    if effective_parallel == "pipeline":
+        print(" [Teacher Guard] PARALLEL='pipeline' is incompatible with TEACHER distill; forcing TEACHER=''.")
+        effective_teacher_mode = "none"
+        effective_teacher_prec = "none"
+        teacher_block_str = 'TEACHER = ""\nDISTILL_WEIGHT = 0.0'
+    elif effective_preset in ("6g", "8g", "12g"):
+        print(f" [Teacher Guard] VRAM preset '{effective_preset}' (<=12GB) cannot host resident 5B teacher; forcing TEACHER=''.")
+        effective_teacher_mode = "none"
+        effective_teacher_prec = "none"
+        teacher_block_str = 'TEACHER = ""\nDISTILL_WEIGHT = 0.0'
+    else:
+        effective_teacher_mode = "weights"
+        effective_teacher_prec = "int8" if effective_preset == "16g" else "auto"
+        print(f" [Teacher Distill] Enabled TEACHER='weights' (DISTILL_WEIGHT={distill_w_val}, TEACHER_PRECISION='{effective_teacher_prec}')")
+        teacher_block_str = (
+            'TEACHER = "weights"\n'
+            f"DISTILL_WEIGHT = {distill_w_val}\n"
+            f'TEACHER_PRECISION = "{effective_teacher_prec}"'
+        )
+else:
+    effective_teacher_mode = "none"
+    effective_teacher_prec = "none"
+    teacher_block_str = 'TEACHER = ""\nDISTILL_WEIGHT = 0.0'
+
+int8_compute_val = bool(getattr(args, "int8_compute", False))
+compile_val = str(getattr(args, "compile_mode", "off") or "off").strip().lower()
+if compile_val not in ("off", "block"):
+    compile_val = "off"
+raw_step_rel = str(getattr(args, "step_release", "none") or "none").strip().lower()
+if raw_step_rel in ("none", "empty_cache"):
+    step_rel_cfg_val = f'"{raw_step_rel}"'
+    step_rel_val = raw_step_rel
+else:
+    try:
+        step_rel_n = max(1, int(float(raw_step_rel)))
+        step_rel_cfg_val = str(step_rel_n)
+        step_rel_val = str(step_rel_n)
+    except Exception:
+        step_rel_cfg_val = '"none"'
+        step_rel_val = "none"
 
 in_drop = max(0.0, min(0.99, float(args.input_dropout)))
 rank_drop = max(0.0, min(0.99, float(args.rank_dropout)))
@@ -1546,8 +1830,12 @@ TRANSFORMER = "{transformer_filename}"
 {memory_profile_str}
 {resume_cfg_str}
 {init_from_cfg_str}
-SAMPLE_EVERY = 0
+{sample_block_str}
 VALIDATE_EVERY = 0
+INT8_COMPUTE = {int8_compute_val}
+COMPILE = "{compile_val}"
+STEP_RELEASE = {step_rel_cfg_val}
+{teacher_block_str}
 TUNE = "{args.tune}"
 FP16_FIX = "{fp16_fix_val}"
 {fp16_fix_kwargs_str}
@@ -1568,7 +1856,7 @@ OPTIMIZER = "{args.optimizer}"
 LR = {args.lr}
 WEIGHT_DECAY = {weight_decay_val}
 WD_RULES = "{args.wd_rules}"
-EMA = {ema_val}
+{ema_cfg_line}
 TIMESTEP = "{timestep_mode}"
 {timestep_kwargs_str}
 SAVE_EVERY = {save_every_val}
@@ -1607,8 +1895,8 @@ print(f"\n>>> Sanitizing {args.lora_name}_data.py on disk for moss.py strict kno
 with open(data_cfg_file, "r", encoding="utf-8") as f:
     raw_cfg = f.read()
 
-sanitized_cfg = re.sub(r'TEXT_ENCODER_KWARGS\s*=\s*\{[^\}]+\}', '', raw_cfg)
-sanitized_cfg = re.sub(r'IMAGE_ENCODER_KWARGS\s*=\s*\{[^\}]+\}', '', sanitized_cfg)
+sanitized_cfg = re.sub(r'(?m)^\s*TEXT_ENCODER_KWARGS\s*=.*$', '', raw_cfg)
+sanitized_cfg = re.sub(r'(?m)^\s*IMAGE_ENCODER_KWARGS\s*=.*$', '', sanitized_cfg)
 
 with open(data_cfg_file, "w", encoding="utf-8") as f:
     f.write(sanitized_cfg.strip() + "\n")
@@ -1686,7 +1974,7 @@ if os.path.isdir(run_ckpts_root):
                 if os.path.getsize(sf) <= 0:
                     continue
                 low_n = os.path.basename(sf).lower()
-                if "-ema" in low_n:
+                if "-ema" in low_n or "-power" in low_n:
                     ema_exports.append(sf)
                 elif "-comfy" in low_n or low_n.endswith("_comfy.safetensors"):
                     comfy_f = sf
@@ -1715,7 +2003,7 @@ if os.path.isdir(final_exp_dir):
         if info.get("step"):
             f_step = max(f_step, int(info["step"]))
         low_n = os.path.basename(sf).lower()
-        if "-ema" in low_n:
+        if "-ema" in low_n or "-power" in low_n:
             f_ema_exports.append(sf)
         elif "-comfy" in low_n or low_n.endswith("_comfy.safetensors"):
             f_comfy = sf
@@ -1782,6 +2070,18 @@ if copied_weights == 0:
         dest = os.path.join(output_lora_dir, dest_name)
         print(f" - Archiving (fallback) {sf} -> {dest}")
         shutil.copy2(sf, dest)
+
+# 归档训练期采样预览图（若已开启 SAMPLE_EVERY）
+samples_src_dir = os.path.join(run_lora_dir, "samples")
+if os.path.isdir(samples_src_dir):
+    for root_s, _, files_s in os.walk(samples_src_dir):
+        for fn_s in files_s:
+            if os.path.splitext(fn_s)[1].lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                src_sp = os.path.join(root_s, fn_s)
+                rel_sp = os.path.relpath(src_sp, samples_src_dir)
+                dst_sp = os.path.join(output_lora_dir, "samples", rel_sp)
+                os.makedirs(os.path.dirname(dst_sp), exist_ok=True)
+                shutil.copy2(src_sp, dst_sp)
 
 # 归档训练指标 metrics.jsonl，供本地桌面 UI 直接加载绘出云端 Loss/EMA 收敛曲线
 metrics_candidates = []
@@ -1854,6 +2154,16 @@ summary_data = {
     "fp16_fix": fp16_fix_val,
     "text_device": effective_text_device,
     "vae_device": args.vae_device,
+    "caption_template": effective_caption_tpl,
+    "caption_p_nl": p_nl_val,
+    "caption_variants": cap_variants_val,
+    "int8_compute": int8_compute_val,
+    "compile_mode": compile_val,
+    "step_release": step_rel_val,
+    "sample_every": effective_sample_every,
+    "teacher_mode": effective_teacher_mode,
+    "teacher_precision": effective_teacher_prec,
+    "distill_weight": distill_w_val,
     "training_date": time.strftime("%Y-%m-%d %H:%M:%S")
 }
 summary_file = os.path.join(output_lora_dir, "training_summary.json")

@@ -26,6 +26,7 @@ KohakuMossTrainer/
 
 # User local config & Kaggle/R2 credentials (Private paths and secrets, never commit)
 local_config.json
+task_profiles/
 kaggle.json
 r2_credentials.json
 .kaggle/

@@ -31,9 +31,60 @@ def validate_training_params(raw: dict) -> tuple:
         warmup_raw = str(raw["warmup_steps"]).strip()
         warmup_steps = -1 if warmup_raw.lower() == "auto" else int(float(warmup_raw))
         weight_decay = float(str(raw["weight_decay"]).strip())
-        ema = float(str(raw["ema"]).strip())
+        ema_raw = str(raw["ema"]).strip()
+        if ema_raw.lower() == "power":
+            ema = "power"
+        else:
+            ema_num = float(ema_raw)
+            if not (0.0 <= ema_num < 1.0):
+                raise ValueError("EMA 需为 'power' 或 [0.0, 1.0) 内的衰减率")
+            ema = ema_num
         text_drop = float(str(raw["text_drop"]).strip())
         seed = int(float(str(raw["seed"]).strip()))
+
+        algo = str(raw.get("algo", "lora")).strip().lower()
+        if algo not in ("lora", "loha", "lokr", "oft", "tlora"):
+            raise ValueError(f"不支持的适配器算法：{algo}")
+        optimizer = str(raw.get("optimizer", "adamw")).strip().lower()
+        if optimizer not in ("adamw", "adamw16", "adamw8bit_kernel", "muon"):
+            raise ValueError(f"不支持的优化器：{optimizer}")
+        vram_preset = str(raw.get("vram_preset", "auto")).strip().lower()
+        if vram_preset not in ("auto", "6g", "8g", "12g", "16g", "24g"):
+            raise ValueError(f"不支持的显存档位：{vram_preset}")
+        text_device = str(raw.get("text_device", "cpu")).strip().lower()
+        if text_device not in ("cpu", "cuda", "cuda-ring", "auto"):
+            raise ValueError(f"不支持的 Text Encoder 设备：{text_device}")
+
+        caption_template = str(raw.get("caption_template", "auto")).strip().lower() or "auto"
+        if caption_template not in ("auto", "nl", "mix"):
+            caption_template = "auto"
+        caption_p_nl = float(str(raw.get("caption_p_nl", "0.75")).strip() or "0.75")
+        caption_variants = int(float(str(raw.get("caption_variants", "4")).strip() or "4"))
+        if not (0.0 <= caption_p_nl <= 1.0) or caption_variants < 1:
+            raise ValueError("caption_p_nl 需在 [0.0, 1.0]，caption_variants 需为 >=1 的整数")
+
+        compile_mode = str(raw.get("compile_mode", "off")).strip().lower() or "off"
+        if compile_mode not in ("off", "block"):
+            compile_mode = "off"
+
+        step_release = str(raw.get("step_release", "none")).strip().lower() or "none"
+        if step_release not in ("none", "empty_cache"):
+            step_rel_n = int(float(step_release))
+            if step_rel_n <= 0:
+                raise ValueError("step_release 必须为 none、empty_cache 或正整数间隔")
+            step_release = str(step_rel_n)
+
+        sample_every = int(float(str(raw.get("sample_every", "0")).strip() or "0"))
+        if sample_every < 0:
+            raise ValueError("sample_every 不能为负数")
+        sample_prompt = str(raw.get("sample_prompt", "")).strip()
+
+        teacher_mode = str(raw.get("teacher_mode", "none")).strip().lower() or "none"
+        if teacher_mode not in ("none", "weights"):
+            teacher_mode = "none"
+        distill_weight = float(str(raw.get("distill_weight", "0.05")).strip() or "0.05")
+        if distill_weight < 0.0:
+            raise ValueError("distill_weight 不能为负数")
 
         if repeats < 1 or epochs < 1 or steps < 1 or rank < 1 or lr_val <= 0 or grad_acc < 1:
             raise ValueError("Repeats/Epochs/Steps/Rank/GradAcc 与 LR 必须为正数")
@@ -41,13 +92,17 @@ def validate_training_params(raw: dict) -> tuple:
             raise ValueError("LoKr Factor 必须为 -1（自动）或 >= 1 的整数（如 4/8/16）")
         if not (0.0 <= rank_drop < 1.0 and 0.0 <= mod_drop < 1.0 and 0.0 <= in_drop < 1.0):
             raise ValueError("Dropout 概率必须在 [0.0, 1.0) 之间")
-        if weight_decay < 0.0 or not (0.0 <= ema < 1.0) or not (0.0 <= text_drop <= 1.0):
-            raise ValueError("WeightDecay>=0、EMA 需在 [0.0, 1.0)、TextDrop 需在 [0.0, 1.0]")
+        if weight_decay < 0.0 or not (0.0 <= text_drop <= 1.0):
+            raise ValueError("WeightDecay>=0、TextDrop 需在 [0.0, 1.0]")
 
         cleaned = {
             **raw,
             "lora_name": (str(raw.get("lora_name", "")).strip() or "my_lora"),
             "trigger_word": str(raw.get("trigger_word", "")).strip(),
+            "algo": algo,
+            "optimizer": optimizer,
+            "vram_preset": vram_preset,
+            "text_device": text_device,
             "repeats": repeats,
             "epochs": epochs,
             "steps": steps,
@@ -67,6 +122,16 @@ def validate_training_params(raw: dict) -> tuple:
             "text_drop": text_drop,
             "seed": seed,
             "dora": dora,
+            "caption_template": caption_template,
+            "caption_p_nl": caption_p_nl,
+            "caption_variants": caption_variants,
+            "int8_compute": bool(raw.get("int8_compute", False)),
+            "compile_mode": compile_mode,
+            "step_release": step_release,
+            "sample_every": sample_every,
+            "sample_prompt": sample_prompt,
+            "teacher_mode": teacher_mode,
+            "distill_weight": distill_weight,
         }
         return cleaned, None
     except Exception as err:
@@ -118,8 +183,20 @@ def build_train_command(cleaned: dict, mode_code: str, subsets_manifest_path=Non
         "--save_every", str(cleaned["save_every"]),
         "--text_device", str(cleaned["text_device"]),
         "--vae_device", str(cleaned["vae_device"]),
+        "--caption_template", str(cleaned.get("caption_template", "auto")),
+        "--caption_p_nl", str(cleaned.get("caption_p_nl", 0.75)),
+        "--caption_variants", str(cleaned.get("caption_variants", 4)),
+        "--compile_mode", str(cleaned.get("compile_mode", "off")),
+        "--step_release", str(cleaned.get("step_release", "none")),
+        "--sample_every", str(cleaned.get("sample_every", 0)),
+        "--teacher_mode", str(cleaned.get("teacher_mode", "none")),
+        "--distill_weight", str(cleaned.get("distill_weight", 0.05)),
     ]
 
+    if str(cleaned.get("sample_prompt", "")).strip():
+        cmd.extend(["--sample_prompt", str(cleaned["sample_prompt"]).strip()])
+    if cleaned.get("int8_compute"):
+        cmd.append("--int8_compute")
     if cleaned.get("dora"):
         cmd.append("--dora")
     if cleaned.get("lokr_full_matrix"):

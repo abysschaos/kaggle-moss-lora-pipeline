@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-针对 v1.8.5 黄金预设矩阵、双卡 T4 步数保底公式、自定义名称/触发词防覆盖保护、
-真实 EMA 平滑权重导出补丁及满秩 LoKr 文件头嗅探的自动化单元测试套件。
+针对 v1.9.0 九大场景黄金预设矩阵、EDM2 Power EMA、JSONL/mix 多粒度标注、8GB 预览强制锁定、
+Teacher 显存门槛、cuda-ring / 24G 档位及真实双卡/单卡参数校核的自动化单元测试套件。
 所有测试均在本地临时目录运行，零外部网络请求、零真实账号写操作。
 """
 
@@ -20,8 +20,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import train_local
-from core.config_store import compute_exposure_summary, load_app_version
-from core.kaggle_bridge import build_cloud_config_payload
+from core.config_store import (
+    can_enable_teacher_distill,
+    compute_exposure_summary,
+    is_low_vram_preview_blocked,
+    load_app_version,
+    resolve_effective_vram_label,
+)
+from core.kaggle_bridge import _copy_image_txt_pairs, build_cloud_config_payload
 from core.presets import (
     ADVANCED_DEFAULTS,
     CLOUD_T4X2_OVERRIDES,
@@ -56,13 +62,13 @@ class _VarStub:
 class PresetsAndMathTest(unittest.TestCase):
     def test_version_alignment(self):
         ver = load_app_version()
-        self.assertEqual(ver, "1.8.5")
-        self.assertEqual(train_local._load_app_version(), "1.8.5")
+        self.assertEqual(ver, "1.9.0")
+        self.assertEqual(train_local._load_app_version(), "1.9.0")
 
-    def test_all_eight_presets_validate_and_align_with_upstream_specs(self):
+    def test_all_nine_presets_validate_and_align_with_upstream_specs(self):
         self.assertIsInstance(PRESETS, list)
-        self.assertEqual(len(PRESETS), 8)
-        self.assertEqual(len(PRESET_ORDER), 8)
+        self.assertEqual(len(PRESETS), 9)
+        self.assertEqual(len(PRESET_ORDER), 9)
         required_ui_keys = {
             "id",
             "row",
@@ -118,15 +124,25 @@ class PresetsAndMathTest(unittest.TestCase):
                 if target == "kaggle_t4x2":
                     self.assertEqual(cleaned["grad_acc"], 1)
 
-        # 关键预设架构断言：lokr_style 满秩 factor=16 + mu=-0.30；antifit_char 半秩 16/8.0 + text_drop=0.02；muon_style WD=0.02
+        # 关键预设架构断言：lokr_style 满秩 R10000 factor=8 alpha=1.0 mu=-0.45；pixel_style R10000 mu=-0.35；antifit_char 半秩 16/8.0 + text_drop=0.06
         lokr_local, _ = resolve_preset_for_target("lokr_style", "local")
         lokr_t4, _ = resolve_preset_for_target("lokr_style", "kaggle_t4x2")
         self.assertEqual(lokr_local["algo"], "lokr")
-        self.assertEqual(lokr_local["lokr_factor"], "16")
+        self.assertEqual(lokr_local["rank"], "10000")
+        self.assertEqual(lokr_local["alpha"], "1.0")
+        self.assertEqual(lokr_local["lokr_factor"], "8")
         self.assertTrue(lokr_local["lokr_full_matrix"])
-        self.assertEqual(lokr_local["lr"], "2e-4")
-        self.assertEqual(lokr_t4["lr"], "2.5e-4")
-        self.assertEqual(lokr_local["timestep_mu"], "-0.30")
+        self.assertEqual(lokr_local["lr"], "3e-4")
+        self.assertEqual(lokr_t4["lr"], "4e-4")
+        self.assertEqual(lokr_local["timestep_mu"], "-0.45")
+        self.assertEqual(lokr_local["text_drop"], "0.10")
+
+        pix_local, _ = resolve_preset_for_target("pixel_style", "local")
+        pix_t4, _ = resolve_preset_for_target("pixel_style", "kaggle_t4x2")
+        self.assertEqual(pix_local["algo"], "lokr")
+        self.assertEqual(pix_local["rank"], "10000")
+        self.assertEqual(pix_local["timestep_mu"], "-0.35")
+        self.assertEqual(pix_t4["lr"], "4e-4")
 
         anti_local, _ = resolve_preset_for_target("antifit_char", "local")
         anti_t4, _ = resolve_preset_for_target("antifit_char", "kaggle_t4x2")
@@ -135,7 +151,7 @@ class PresetsAndMathTest(unittest.TestCase):
         self.assertTrue(anti_local["dora"])
         self.assertEqual(anti_local["rank_dropout"], "0.05")
         self.assertEqual(anti_local["module_dropout"], "0.05")
-        self.assertEqual(anti_local["text_drop"], "0.02")
+        self.assertEqual(anti_local["text_drop"], "0.06")
         self.assertEqual(anti_local["lr"], "8e-5")
         self.assertEqual(anti_t4["lr"], "1e-4")
 
@@ -143,6 +159,7 @@ class PresetsAndMathTest(unittest.TestCase):
         muon_t4, _ = resolve_preset_for_target("muon_style", "kaggle_t4x2")
         self.assertEqual(muon_local["optimizer"], "muon")
         self.assertEqual(muon_local["weight_decay"], "0.02")
+        self.assertEqual(muon_local["timestep_mu"], "-0.45")
         self.assertEqual(muon_t4["lr"], "1.3e-4")
 
     def test_cloud_dry_config_check_for_upgraded_lokr_and_antifit_presets(self):
@@ -178,10 +195,130 @@ class PresetsAndMathTest(unittest.TestCase):
         )
         parsed = json.loads(res.stdout)
         self.assertEqual(parsed["algo"], "lokr")
-        self.assertEqual(int(parsed["lokr_factor"]), 16)
+        self.assertEqual(int(parsed["rank"]), 10000)
+        self.assertEqual(int(parsed["lokr_factor"]), 8)
         self.assertTrue(bool(parsed["lokr_full_matrix"]))
-        self.assertAlmostEqual(float(parsed["lr"]), 2.5e-4, places=8)
-        self.assertAlmostEqual(float(parsed["timestep_mu"]), -0.30, places=5)
+        self.assertAlmostEqual(float(parsed["lr"]), 4e-4, places=8)
+        self.assertAlmostEqual(float(parsed["timestep_mu"]), -0.45, places=5)
+
+    def test_v190_vram_tiers_preview_and_teacher_guards_and_jsonl_power_ema(self):
+        self.assertEqual(resolve_effective_vram_label("auto", 6.0), ("6g", 4352))
+        self.assertEqual(resolve_effective_vram_label("auto", 8.0), ("8g", 4352))
+        self.assertEqual(resolve_effective_vram_label("auto", 12.0), ("12g", 6144))
+        self.assertEqual(resolve_effective_vram_label("auto", 16.0), ("16g", 8192))
+        self.assertEqual(resolve_effective_vram_label("auto", 24.0), ("24g", 12288))
+
+        # 6G/8G 本地强制关闭预览；12G/云端允许预览
+        self.assertTrue(is_low_vram_preview_blocked("auto", 8.0, "local"))
+        self.assertTrue(is_low_vram_preview_blocked("8g", 16.0, "local"))
+        self.assertFalse(is_low_vram_preview_blocked("12g", 12.0, "local"))
+        self.assertFalse(is_low_vram_preview_blocked("auto", 8.0, "kaggle_t4x2"))
+
+        # Teacher <=12G 禁用，16G 锁 int8，24G+ 允许 auto
+        ok8, _, _ = can_enable_teacher_distill("auto", 8.0, "local")
+        ok12, _, _ = can_enable_teacher_distill("12g", 12.0, "local")
+        ok16, p16, _ = can_enable_teacher_distill("16g", 16.0, "local")
+        ok24, p24, _ = can_enable_teacher_distill("24g", 24.0, "local")
+        self.assertFalse(ok8)
+        self.assertFalse(ok12)
+        self.assertTrue(ok16)
+        self.assertEqual(p16, "int8")
+        self.assertTrue(ok24)
+        self.assertEqual(p24, "auto")
+
+        # Power EMA 保留 + train.jsonl 同步与精确触发词边界保护
+        se, ema_out, _ = recommend_save_every_and_ema(180, "power")
+        self.assertEqual(se, "50")
+        self.assertEqual(ema_out, "power")
+
+        self.assertTrue(train_local._caption_has_trigger_prefix("mychar, a girl", "mychar"))
+        self.assertFalse(train_local._caption_has_trigger_prefix("mychar_alt style, a girl", "mychar"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_ds = Path(tmp) / "src_ds"
+            dst_stage = Path(tmp) / "stage_ds"
+            src_ds.mkdir()
+            (src_ds / "cat_01.png").write_bytes(b"PNGDATA")
+            (src_ds / "train.jsonl").write_text(
+                json.dumps({"image": "cat_01.png", "caption": "a cute cat", "tags": ["1girl", "cat"], "weight": 0.7}) + "\n",
+                encoding="utf-8",
+            )
+            img_c, txt_c, _ = _copy_image_txt_pairs(src_ds, dst_stage)
+            self.assertEqual(img_c, 1)
+            self.assertEqual(txt_c, 1)
+            staged_rec = json.loads((dst_stage / "train.jsonl").read_text(encoding="utf-8").strip())
+            self.assertEqual(staged_rec["image"], "sample_0001.png")
+
+            ws_ds = Path(tmp) / "ws_ds"
+            train_local.prepare_dataset_structure(src_ds, ws_ds, 5, "cat_lora", "my_trig")
+            ws_rec = json.loads((ws_ds / "5_cat_lora" / "train.jsonl").read_text(encoding="utf-8").strip())
+            self.assertTrue(ws_rec["caption"].startswith("my_trig,"))
+            self.assertEqual(ws_rec["tags"][0], "my_trig")
+
+        # 验证 train_moss --dry_config_check 支持 v1.9.0 全部新字段
+        raw_v19 = {
+            "data_dir": str(PROJECT_ROOT),
+            "multi_subset": False,
+            "subsets": [],
+            "comfy_models_dir": "",
+            "output_dir": "./output",
+            "precision": "bf16",
+            "base_precision": "auto",
+            "vram_preset": "24g",
+            "resolution": "1024",
+            "text_device": "cuda-ring",
+            "vae_device": "cuda",
+            "steps": "300",
+            "save_every": "50",
+            "tune": "off",
+            "copy_to_comfy_loras": False,
+            **ADVANCED_DEFAULTS,
+            "algo": "oft",
+            "optimizer": "adamw16",
+            "ema": "power",
+            "caption_template": "mix",
+            "caption_p_nl": "0.75",
+            "caption_variants": "4",
+            "int8_compute": True,
+            "compile_mode": "block",
+            "step_release": "10",
+            "sample_every": "50",
+            "sample_prompt": "test preview prompt",
+            "teacher_mode": "weights",
+            "distill_weight": "0.05",
+            "lora_name": "test_v19_oft",
+            "trigger_word": "",
+            "repeats": "4",
+            "epochs": "5",
+            "rank": "32",
+            "alpha": "32.0",
+            "dora": False,
+            "target_preset": "attn-mlp",
+            "loraplus_ratio": "1.0",
+            "lr": "1e-4",
+            "grad_acc": "1",
+            "timestep_mu": "-0.45",
+        }
+        cleaned_v19, err_v19 = validate_training_params(raw_v19)
+        self.assertIsNone(err_v19)
+        payload_v19 = build_cloud_config_payload(cleaned_v19, {"accelerator": "NvidiaTeslaT4", "variant": "heal"})
+        res_v19 = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "train_moss.py"), "--config_json", json.dumps(payload_v19), "--dry_config_check"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        parsed_v19 = json.loads(res_v19.stdout)
+        self.assertEqual(parsed_v19["algo"], "oft")
+        self.assertEqual(parsed_v19["optimizer"], "adamw16")
+        self.assertEqual(parsed_v19["ema"], "power")
+        self.assertEqual(parsed_v19["caption_template"], "mix")
+        self.assertTrue(bool(parsed_v19["int8_compute"]))
+        self.assertEqual(parsed_v19["compile_mode"], "block")
+        self.assertEqual(parsed_v19["step_release"], "10")
+        self.assertEqual(int(parsed_v19["sample_every"]), 50)
+        self.assertEqual(parsed_v19["teacher_mode"], "weights")
 
     def test_step_floor_prevents_small_dataset_underfitting_on_dual_t4(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -347,9 +484,9 @@ class PresetsAndMathTest(unittest.TestCase):
             dummy.apply_preset("lokr_style")
             self.assertEqual(dummy.var_lora_name.get(), "rani3_style_v2")
             self.assertEqual(dummy.var_trigger.get(), "by rani3")
-            self.assertEqual(dummy.var_lokr_factor.get(), "16")
+            self.assertEqual(dummy.var_lokr_factor.get(), "8")
             self.assertTrue(dummy.var_lokr_full_matrix.get())
-            self.assertEqual(dummy.var_timestep_mu.get(), "-0.30")
+            self.assertEqual(dummy.var_timestep_mu.get(), "-0.45")
 
             dummy.apply_preset("muon_style")
             self.assertEqual(dummy.var_optimizer.get(), "muon")
@@ -473,10 +610,19 @@ class PresetsAndMathTest(unittest.TestCase):
             # 阻止后台初始化自动覆写本地 local_config.json 与弹出窗口
             with mock.patch("ui.app.save_local_config"), mock.patch("ui.app.messagebox.showinfo"):
                 app = ModernLocalTrainerGUI(root)
-                self.assertEqual(len(app.preset_buttons), 8)
+                self.assertEqual(len(app.preset_buttons), 9)
                 for pid in PRESET_ORDER:
                     self.assertIn(pid, app.preset_buttons)
                     app.apply_preset(pid)
+                # 8G 本机显卡模式下强制禁用训练中出图预览 (SAMPLE_EVERY=0) 与 <=12G Teacher 蒸馏
+                app.detected_vram_gb = 8.0
+                app.var_target_compute.set("local")
+                app.var_vram_preset.set("8g")
+                app.var_sample_every.set("50")
+                app.var_teacher_mode.set("weights")
+                app.on_dynamic_controls_changed()
+                self.assertEqual(app.var_sample_every.get(), "0")
+                self.assertEqual(app.var_teacher_mode.get(), "none")
                 root.update_idletasks()
         finally:
             if app is not None:
